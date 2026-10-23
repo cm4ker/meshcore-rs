@@ -5,13 +5,11 @@
 //! DIO1 is async.
 
 use embassy_time::{Duration, Instant, Timer, with_timeout};
-use esp_hal::Blocking;
-use esp_hal::gpio::{Event, Input, Output};
-use esp_hal::spi::master::Spi;
+use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal::spi::SpiBus;
 use meshcore::radio::RadioParams;
 
-use crate::radio::{Error, LoraRadio, RxEvent, RxFrame};
+use crate::radio::{Error, IrqPin, LoraRadio, RxEvent, RxFrame};
 
 // commands
 const CMD_SET_SLEEP: u8 = 0x84;
@@ -79,12 +77,12 @@ const RX_GAIN_POWER_SAVING: u8 = 0x94;
 /// 140 mA over-current limit (`SX126X_CURRENT_LIMIT`), 2.5 mA steps.
 const OCP_140MA: u8 = 56;
 
-pub struct Sx1262<'d> {
-    spi: Spi<'d, Blocking>,
-    nss: Output<'d>,
-    reset: Output<'d>,
-    busy: Input<'d>,
-    dio1: Input<'d>,
+pub struct Sx1262<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> {
+    spi: SPI,
+    nss: OUT,
+    reset: OUT,
+    busy: IN,
+    dio1: IRQ,
     params: RadioParams,
     tx_power: i8,
     rx_boost: bool,
@@ -126,8 +124,8 @@ fn image_cal(freq_mhz: f32) -> [u8; 2] {
     }
 }
 
-impl<'d> Sx1262<'d> {
-    pub fn new(spi: Spi<'d, Blocking>, nss: Output<'d>, reset: Output<'d>, busy: Input<'d>, dio1: Input<'d>) -> Self {
+impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> Sx1262<SPI, OUT, IN, IRQ> {
+    pub fn new(spi: SPI, nss: OUT, reset: OUT, busy: IN, dio1: IRQ) -> Self {
         Self {
             spi,
             nss,
@@ -149,7 +147,7 @@ impl<'d> Sx1262<'d> {
 
     fn wait_busy(&mut self, timeout_ms: u64) -> Result<(), Error> {
         let start = Instant::now();
-        while self.busy.is_high() {
+        while self.busy.is_high().unwrap_or(false) {
             if start.elapsed() > Duration::from_millis(timeout_ms) {
                 return Err(Error::Busy);
             }
@@ -159,18 +157,18 @@ impl<'d> Sx1262<'d> {
 
     fn command(&mut self, op: u8, args: &[u8]) -> Result<(), Error> {
         self.wait_busy(20)?;
-        self.nss.set_low();
+        let _ = self.nss.set_low();
         let _ = self.spi.write(&[op]);
         let _ = self.spi.write(args);
         let _ = self.spi.flush();
-        self.nss.set_high();
+        let _ = self.nss.set_high();
         Ok(())
     }
 
     /// Command with response: `op, args..., NOP(status), data...`.
     fn command_read(&mut self, op: u8, args: &[u8], out: &mut [u8]) -> Result<(), Error> {
         self.wait_busy(20)?;
-        self.nss.set_low();
+        let _ = self.nss.set_low();
         let _ = self.spi.write(&[op]);
         let _ = self.spi.write(args);
         let mut status = [0u8];
@@ -178,17 +176,17 @@ impl<'d> Sx1262<'d> {
         out.fill(0);
         let _ = self.spi.transfer_in_place(out);
         let _ = self.spi.flush();
-        self.nss.set_high();
+        let _ = self.nss.set_high();
         Ok(())
     }
 
     fn write_register(&mut self, addr: u16, data: &[u8]) -> Result<(), Error> {
         self.wait_busy(20)?;
-        self.nss.set_low();
+        let _ = self.nss.set_low();
         let _ = self.spi.write(&[CMD_WRITE_REGISTER, (addr >> 8) as u8, addr as u8]);
         let _ = self.spi.write(data);
         let _ = self.spi.flush();
-        self.nss.set_high();
+        let _ = self.nss.set_high();
         Ok(())
     }
 
@@ -232,7 +230,7 @@ impl<'d> Sx1262<'d> {
     }
 }
 
-impl LoraRadio for Sx1262<'_> {
+impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Sx1262<SPI, OUT, IN, IRQ> {
     /// Reset and configure the modem. Falls back to no-TCXO like upstream if the TCXO
     /// configuration is rejected.
     async fn init(&mut self, params: RadioParams, tx_power: i8, rx_boost: bool) -> Result<(), Error> {
@@ -240,9 +238,9 @@ impl LoraRadio for Sx1262<'_> {
         self.tx_power = tx_power;
         self.rx_boost = rx_boost;
         loop {
-            self.reset.set_low();
+            let _ = self.reset.set_low();
             Timer::after_millis(2).await;
-            self.reset.set_high();
+            let _ = self.reset.set_high();
             Timer::after_millis(10).await;
             self.wait_busy(100)?;
             self.command(CMD_SET_STANDBY, &[STDBY_RC])?;
@@ -331,16 +329,11 @@ impl LoraRadio for Sx1262<'_> {
     // ---------------------------------------------------------------- RX
 
     async fn wait_irq(&mut self) {
-        self.dio1.wait_for_high().await
+        self.dio1.wait_high().await
     }
 
     fn arm_wake(&mut self) -> bool {
-        if self.dio1.is_high() {
-            return false;
-        }
-        // a listening pin wakes the chip; the next wait_irq takes the interrupt over
-        self.dio1.listen(Event::HighLevel);
-        true
+        self.dio1.arm_wake()
     }
 
     /// Continuous receive; DIO1 rises on RX-done.
@@ -458,16 +451,16 @@ impl LoraRadio for Sx1262<'_> {
         self.command(CMD_SET_STANDBY, &[STDBY_RC])?;
         self.set_packet_params(frame.len() as u8)?;
         self.wait_busy(20)?;
-        self.nss.set_low();
+        let _ = self.nss.set_low();
         let _ = self.spi.write(&[CMD_WRITE_BUFFER, 0x00]);
         let _ = self.spi.write(frame);
         let _ = self.spi.flush();
-        self.nss.set_high();
+        let _ = self.nss.set_high();
         self.set_irq(IRQ_TX_DONE | IRQ_TIMEOUT, IRQ_TX_DONE | IRQ_TIMEOUT)?;
         self.clear_irq(IRQ_ALL)?;
         self.command(CMD_SET_TX, &[0x00, 0x00, 0x00])?;
 
-        let done = with_timeout(Duration::from_millis(timeout_ms as u64), self.dio1.wait_for_high()).await;
+        let done = with_timeout(Duration::from_millis(timeout_ms as u64), self.dio1.wait_high()).await;
         let irq = self.irq_status()?;
         self.clear_irq(IRQ_ALL)?;
         if done.is_err() || irq & IRQ_TX_DONE == 0 {
@@ -487,7 +480,7 @@ impl LoraRadio for Sx1262<'_> {
         self.set_irq(IRQ_CAD_DONE | IRQ_CAD_DETECTED, IRQ_CAD_DONE)?;
         self.clear_irq(IRQ_ALL)?;
         self.command(CMD_SET_CAD, &[])?;
-        let _ = with_timeout(Duration::from_millis(200), self.dio1.wait_for_high()).await;
+        let _ = with_timeout(Duration::from_millis(200), self.dio1.wait_high()).await;
         let irq = self.irq_status()?;
         self.start_rx()?;
         Ok(irq & IRQ_CAD_DETECTED != 0)
@@ -499,9 +492,10 @@ impl LoraRadio for Sx1262<'_> {
         self.command(CMD_SET_STANDBY, &[STDBY_RC])?;
         self.command(CMD_SET_SLEEP, &[0x04])?; // warm start: configuration retained
         Timer::after_millis(2).await;
-        self.nss.set_low(); // wake up
+        let _ = self.nss.set_low(); // wake up
         Timer::after_micros(200).await;
-        self.nss.set_high();
+        let _ = self.spi.flush();
+        let _ = self.nss.set_high();
         self.wait_busy(10)?;
         self.command(CMD_SET_STANDBY, &[STDBY_RC])?;
         self.command(CMD_CALIBRATE, &[0x7F])?;

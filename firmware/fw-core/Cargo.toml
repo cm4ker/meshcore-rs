@@ -1,0 +1,24 @@
+[package]
+edition      = "2024"
+name         = "meshcore-fw-core"
+rust-version = "1.88"
+version      = "0.1.0"
+description  = "Platform-independent MeshCore firmware parts: radio drivers over embedded-hal, storage over NOR flash, the companion role"
+
+[dependencies]
+log = "0.4.27"
+embassy-executor = "0.10.0"
+embassy-time = "0.5.0"
+embassy-sync = "0.8.0"
+embassy-futures = "0.1.2"
+embassy-net = { version = "0.9", features = ["tcp", "proto-ipv4", "medium-ethernet"], optional = true }
+embedded-hal = "1.0"
+embedded-hal-async = "1.0"
+embedded-io-async = { version = "0.7.0", optional = true }
+embedded-storage = "0.3"
+libm = "0.2.16"
+meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
+
+[features]
+# the companion TCP server (embassy-net)
+net = ["dep:embassy-net", "dep:embedded-io-async"]

@@ -8,12 +8,10 @@
 
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embedded_hal::spi::SpiBus;
-use esp_hal::Blocking;
-use esp_hal::gpio::{Event, Input, Output};
-use esp_hal::spi::master::Spi;
+use embedded_hal::digital::{InputPin, OutputPin};
 use meshcore::radio::RadioParams;
 
-use crate::radio::{Error, LoraRadio, RxEvent, RxFrame};
+use crate::radio::{Error, IrqPin, LoraRadio, RxEvent, RxFrame};
 
 const CMD_NOP: u16 = 0x0000;
 const CMD_READ_RX_FIFO: u16 = 0x0001;
@@ -106,12 +104,12 @@ fn bw_code(bw_khz: f32) -> u8 {
     best.1
 }
 
-pub struct Lr2021<'d> {
-    spi: Spi<'d, Blocking>,
-    nss: Output<'d>,
-    reset: Output<'d>,
-    busy: Input<'d>,
-    irq: Input<'d>,
+pub struct Lr2021<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> {
+    spi: SPI,
+    nss: OUT,
+    reset: OUT,
+    busy: IN,
+    irq: IRQ,
     /// The DIO (5..=11) wired to `irq`.
     irq_dio: u8,
     /// TCXO supply code (`RADIOLIB_LRXXXX_TCXO_VOLTAGE_*`); `None` for a crystal.
@@ -127,9 +125,9 @@ pub struct Lr2021<'d> {
     max_payload_ms: u64,
 }
 
-impl<'d> Lr2021<'d> {
+impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> Lr2021<SPI, OUT, IN, IRQ> {
     pub fn new(
-        spi: Spi<'d, Blocking>, nss: Output<'d>, reset: Output<'d>, busy: Input<'d>, irq: Input<'d>, irq_dio: u8,
+        spi: SPI, nss: OUT, reset: OUT, busy: IN, irq: IRQ, irq_dio: u8,
         tcxo: Option<u8>,
     ) -> Self {
         Self {
@@ -154,7 +152,7 @@ impl<'d> Lr2021<'d> {
 
     fn wait_busy(&mut self, timeout_ms: u64) -> Result<(), Error> {
         let start = Instant::now();
-        while self.busy.is_high() {
+        while self.busy.is_high().unwrap_or(false) {
             if start.elapsed() > Duration::from_millis(timeout_ms) {
                 return Err(Error::Busy);
             }
@@ -164,11 +162,11 @@ impl<'d> Lr2021<'d> {
 
     fn write(&mut self, cmd: u16, args: &[u8]) -> Result<(), Error> {
         self.wait_busy(50)?;
-        self.nss.set_low();
+        let _ = self.nss.set_low();
         let _ = self.spi.write(&cmd.to_be_bytes());
         let _ = self.spi.write(args);
         let _ = self.spi.flush();
-        self.nss.set_high();
+        let _ = self.nss.set_high();
         Ok(())
     }
 
@@ -177,12 +175,12 @@ impl<'d> Lr2021<'d> {
         self.write(cmd, args)?;
         self.wait_busy(50)?;
         let mut status = [0u8; 2];
-        self.nss.set_low();
+        let _ = self.nss.set_low();
         let _ = self.spi.transfer_in_place(&mut status);
         out.fill(0);
         let _ = self.spi.transfer_in_place(out);
         let _ = self.spi.flush();
-        self.nss.set_high();
+        let _ = self.nss.set_high();
         if status[0] == 0x00 || status[0] == 0xFF {
             return Err(Error::NotFound);
         }
@@ -192,10 +190,10 @@ impl<'d> Lr2021<'d> {
     fn irq_status(&mut self) -> Result<u32, Error> {
         self.wait_busy(50)?;
         let mut buf = [0u8; 6];
-        self.nss.set_low();
+        let _ = self.nss.set_low();
         let _ = self.spi.transfer_in_place(&mut buf);
         let _ = self.spi.flush();
-        self.nss.set_high();
+        let _ = self.nss.set_high();
         Ok(u32::from_be_bytes([buf[2], buf[3], buf[4], buf[5]]))
     }
 
@@ -210,10 +208,10 @@ impl<'d> Lr2021<'d> {
 
     fn standby(&mut self) -> Result<(), Error> {
         // a NOP first pulls NSS low, which wakes the chip from sleep
-        self.nss.set_low();
+        let _ = self.nss.set_low();
         let _ = self.spi.write(&CMD_NOP.to_be_bytes());
         let _ = self.spi.flush();
-        self.nss.set_high();
+        let _ = self.nss.set_high();
         self.write(CMD_SET_STANDBY, &[STANDBY_RC])
     }
 
@@ -272,13 +270,13 @@ impl<'d> Lr2021<'d> {
     }
 }
 
-impl LoraRadio for Lr2021<'_> {
+impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Lr2021<SPI, OUT, IN, IRQ> {
     async fn init(&mut self, params: RadioParams, tx_power: i8, rx_boost: bool) -> Result<(), Error> {
         self.params = params;
         self.rx_boost = rx_boost;
-        self.reset.set_low();
+        let _ = self.reset.set_low();
         Timer::after_millis(10).await;
-        self.reset.set_high();
+        let _ = self.reset.set_high();
         Timer::after_millis(300).await; // typical boot 273 ms
         self.wait_busy(3000)?;
 
@@ -362,16 +360,11 @@ impl LoraRadio for Lr2021<'_> {
     }
 
     async fn wait_irq(&mut self) {
-        self.irq.wait_for_high().await
+        self.irq.wait_high().await
     }
 
     fn arm_wake(&mut self) -> bool {
-        if self.irq.is_high() {
-            return false;
-        }
-        // a listening pin wakes the chip; the next wait_irq takes the interrupt over
-        self.irq.listen(Event::HighLevel);
-        true
+        self.irq.arm_wake()
     }
 
     fn read_rx(&mut self) -> Result<RxEvent, Error> {
@@ -392,11 +385,11 @@ impl LoraRadio for Lr2021<'_> {
             let mut frame = RxFrame { data: [0; 256], len, rssi: 0.0, snr: 0.0 };
             // the FIFO read is a single transaction without status bytes
             self.wait_busy(50)?;
-            self.nss.set_low();
+            let _ = self.nss.set_low();
             let _ = self.spi.write(&CMD_READ_RX_FIFO.to_be_bytes());
             let _ = self.spi.transfer_in_place(&mut frame.data[..len]);
             let _ = self.spi.flush();
-            self.nss.set_high();
+            let _ = self.nss.set_high();
             let mut st = [0u8; 6];
             self.read(CMD_GET_LORA_PACKET_STATUS, &[], &mut st)?;
             frame.snr = (st[2] as i8) as f32 / 4.0;
@@ -477,7 +470,7 @@ impl LoraRadio for Lr2021<'_> {
         self.write(CMD_SET_TX, &[0, 0, 0])?;
         self.wait_busy(50)?; // PA ramp-up done
 
-        let done = with_timeout(Duration::from_millis(timeout_ms as u64), self.irq.wait_for_high()).await;
+        let done = with_timeout(Duration::from_millis(timeout_ms as u64), self.irq.wait_high()).await;
         let irq = self.irq_status()?;
         self.clear_irq(IRQ_ALL)?;
         self.standby()?;
@@ -495,7 +488,7 @@ impl LoraRadio for Lr2021<'_> {
         self.set_irq(IRQ_CAD_DETECTED | IRQ_CAD_DONE)?;
         self.clear_irq(IRQ_ALL)?;
         self.write(CMD_SET_LORA_CAD, &[])?;
-        let _ = with_timeout(Duration::from_millis(200), self.irq.wait_for_high()).await;
+        let _ = with_timeout(Duration::from_millis(200), self.irq.wait_high()).await;
         let irq = self.irq_status()?;
         self.start_rx()?;
         Ok(irq & IRQ_CAD_DETECTED != 0)
@@ -513,11 +506,11 @@ impl LoraRadio for Lr2021<'_> {
     fn sleep(&mut self) -> Result<(), Error> {
         self.standby()?;
         // configuration retained, no wake-up timer; BUSY stays high in sleep, so no wait after
-        self.nss.set_low();
+        let _ = self.nss.set_low();
         let _ = self.spi.write(&CMD_SET_SLEEP.to_be_bytes());
         let _ = self.spi.write(&[0x02, 0, 0, 0, 0]);
         let _ = self.spi.flush();
-        self.nss.set_high();
+        let _ = self.nss.set_high();
         Ok(())
     }
 

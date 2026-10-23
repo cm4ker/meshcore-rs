@@ -1445,6 +1445,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ef0e785f54e316f64a1e14a7a2f061a2ea0b038b284902ca71e1e1f5574cf47"
 dependencies = [
  "document-features",
+ "embedded-storage",
  "esp-hal",
  "esp-hal-procmacros",
  "esp-metadata-generated",
@@ -2171,8 +2172,27 @@ dependencies = [
  "libm",
  "log",
  "meshcore",
+ "meshcore-fw-core",
  "static_cell",
  "trouble-host",
+]
+
+[[package]]
+name = "meshcore-fw-core"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-net",
+ "embassy-sync 0.8.0",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-io-async 0.7.0",
+ "embedded-storage",
+ "libm",
+ "log",
+ "meshcore",
 ]
 
 [[package]]

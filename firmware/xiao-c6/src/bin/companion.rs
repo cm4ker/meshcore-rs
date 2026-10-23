@@ -33,7 +33,8 @@ use meshcore::radio::RadioParams;
 use meshcore_fw::companion_app::{self, Board, Config, Hardware};
 use meshcore_fw::lr2021::Lr2021;
 use meshcore_fw::reset;
-use meshcore_fw::storage::Store;
+use meshcore_fw::radio::EspIrq;
+use meshcore_fw::storage;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -91,7 +92,7 @@ async fn main(spawner: Spawner) -> ! {
 
     println!();
     println!("MeshCore companion (Rust) {} build {} for XIAO C6 + LR2021", meshcore::FIRMWARE_VERSION, BUILD_DATE);
-    let store = Store::new(FlashStorage::new(p.FLASH)).map(|s| Rc::new(RefCell::new(s)));
+    let store = storage::open(FlashStorage::new(p.FLASH)).map(|s| Rc::new(RefCell::new(s)));
 
     let spi = Spi::new(p.SPI2, SpiConfig::default().with_frequency(Rate::from_mhz(8)))
         .unwrap()
@@ -103,7 +104,7 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(p.GPIO21, Level::High, OutputConfig::default()),
         Output::new(p.GPIO2, Level::High, OutputConfig::default()),
         Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::None)),
-        Input::new(p.GPIO1, InputConfig::default().with_pull(Pull::Down)),
+        EspIrq(Input::new(p.GPIO1, InputConfig::default().with_pull(Pull::Down))),
         IRQ_DIO,
         None,
     );

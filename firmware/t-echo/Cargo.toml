@@ -1,0 +1,49 @@
+[package]
+edition      = "2024"
+name         = "t-echo"
+rust-version = "1.88"
+version      = "0.1.0"
+
+[lib]
+test = false
+bench = false
+
+[[bin]]
+name = "companion"
+path = "./src/bin/companion.rs"
+test = false
+bench = false
+
+[dependencies]
+cortex-m = { version = "0.7.7", features = ["inline-asm"] }
+# set-vtor: our vector table takes over from the MBR/SoftDevice forwarding of the bootloader
+cortex-m-rt = { version = "0.7.5", features = ["set-vtor"] }
+embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
+embassy-time = "0.5.1"
+embassy-nrf = { version = "0.11.0", features = ["nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac"] }
+embassy-usb = "0.6.0"
+embassy-futures = "0.1.2"
+embassy-sync = "0.8.0"
+embedded-alloc = "0.6"
+static_cell = "2.1.1"
+log = "0.4.27"
+heapless = "0.9"
+embedded-graphics = "0.8"
+meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
+meshcore-fw-core = { version = "0.1.0", path = "../fw-core" }
+trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "derive", "security", "default-packet-pool-mtu-255", "log"] }
+nrf-sdc = { version = "0.4.0", default-features = false, features = ["nrf52840", "peripheral"] }
+nrf-mpsl = { version = "0.4.0", default-features = false, features = ["critical-section-impl"] }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = "fat"
+opt-level     = "s"
+
+[patch.crates-io]
+# the identity-IRK patch, see ../vendor/README.md
+trouble-host = { path = "../vendor/trouble-host-0.8" }

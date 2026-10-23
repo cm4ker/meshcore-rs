@@ -65,18 +65,22 @@ crates/meshcore/        no_std-ядро протокола, без железа,
   ota.rs                сессия обновления (куски в любом порядке, zlib, дельта, проверка SHA-256 и образа ESP)
   uplink.rs             JSON/топики MeshCoreTel, JWT, кодек MQTT 3.1.1, кадры WebSocket
   radio.rs prefs.rs     параметры LoRa и время в эфире; настройки узла
-firmware/common/        общее для плат (esp-hal 1.2 + embassy, ESP32-S3 и ESP32-C6)
+firmware/fw-core/       общее для любых чипов (embassy, embedded-hal, embedded-storage)
   radio.rs              интерфейс LoRa-трансивера
   sx1262.rs lr2021.rs   драйверы SX1262 и LR2021
-  ota.rs storage.rs     слоты и откат; хранилище во flash (+ кольцевой журнал контактов)
-  net.rs                Wi-Fi-клиент, SNTP
-  ble.rs frames.rs      BLE (trouble-host): Nordic UART + сопряжение; кадры по USB и TCP
-  companion_app.rs      основной цикл компаньона для любой платы
+  storage.rs            хранилище во flash (+ кольцевой журнал контактов)
+  companion.rs          основной цикл компаньона: платформа (`Platform`) и плата (`Board`) снаружи
+  frames.rs links.rs    кадры приложения между транспортами и циклом; TCP-сервер
+firmware/common/        ESP32 (esp-hal 1.2, ESP32-S3 и ESP32-C6): прерывание радио, разделы flash,
+                        слоты и откат, watchdog, Wi-Fi и SNTP, BLE (trouble-host 0.7), USB-JTAG
 firmware/heltec-v4/     Heltec V4
   board.rs display.rs   FEM GC1109/KCT8103L (V4.2/V4.3); OLED
   wifi_ota.rs broker.rs точка доступа + HTTP-загрузка; MQTT по TCP или TLS 1.3 + WebSocket (embedded-tls)
   bin/main.rs           прошивка репитера; bin/companion.rs — компаньона
 firmware/xiao-c6/       XIAO ESP32-C6 + LR2021 (Waveshare Core2021-HF): компаньон
+firmware/t-echo/        LilyGO T-Echo (nRF52840, embassy-nrf): компаньон; BLE на Nordic SDC
+                        (trouble-host 0.8), хранилище на QSPI-флешке, экран e-paper
+tools/uf2/              ELF -> UF2 и прошивка платы с UF2-загрузчиком (T-Echo)
 tools/provision/        образ раздела настроек (перенос ключа и конфигурации с другой прошивки)
 tools/ota-lora/         обновление репитера по LoRa через компаньон (Python, библиотека meshcore)
 tools/ota-app/          обновление компаньона по его подключению: BLE, USB или TCP
@@ -107,6 +111,26 @@ espflash flash --erase-parts otadata,meshcore,companion target\riscv32imac-unkno
 
 Подключение модуля (вывод XIAO -> GPIO): CLK D8 -> 19, MISO D9 -> 20, MOSI D10 -> 18, CS D3 -> 21,
 DIO11 (IRQ) D1 -> 1, RESET D2 -> 2, BUSY D0 -> 0.
+
+LilyGO T-Echo (`rustup target add thumbv7em-none-eabihf`; для привязок к Nordic SDC нужен LLVM под
+архитектуру ПК, `LIBCLANG_PATH` — его каталог `bin`):
+
+```powershell
+cd firmware\t-echo
+$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+cargo build --release
+python ..\..\tools\uf2\elf2uf2.py target\thumbv7em-none-eabihf\release\companion companion.uf2
+python ..\..\tools\uf2\flash_uf2.py companion.uf2
+```
+
+Прошивка ставится UF2-файлом через загрузчик Adafruit, с которым плата продаётся (MBR, SoftDevice
+и загрузчик не трогаются). Первый раз — двойное нажатие reset (появляется диск `TECHOBOOT`), дальше
+`flash_uf2.py` сам перезапускает плату в загрузчик (открытие порта на 1200 бод). Перед первой
+прошивкой стоит сохранить с диска `CURRENT.UF2`: это вся текущая прошивка, и тем же способом её
+можно вернуть. Ключ, контакты и каналы переносятся через приложение (экспорт и импорт). Данные
+лежат на внешней QSPI-флешке, поэтому файловая система прошивки upstream на ней при этом теряется.
+BLE-адрес тот же, что у прошивки upstream, но телефону нужно забыть устройство и сопрячься заново
+(PIN 123456, если в приложении не задан другой).
 
 Спящую ноду (`powersaving on`) по USB не прошить: сначала разбудить её кнопкой PRG или выключить
 сон удалённо (`powersaving off` по LoRa). `--erase-parts otadata` нужен, чтобы загрузчик стартовал со слота 0. Ключ и настройки лежат в

@@ -3,13 +3,13 @@ edition      = "2024"
 name         = "meshcore-fw"
 rust-version = "1.88"
 version      = "0.1.0"
-description  = "Board-independent MeshCore firmware parts for ESP32 chips: radio drivers, storage, BLE/USB/TCP transports, the companion role"
+description  = "MeshCore firmware parts for ESP32 chips: the chip side of radio and storage, BLE/USB/TCP transports, the companion role"
 
 [dependencies]
 esp-hal = { version = "~1.2.2", features = ["log-04", "unstable"] }
 # coex: BLE next to Wi-Fi (companion apps on both, the repeater's `start ota ble`)
 esp-radio = { version = "1.0.0-beta.1", features = ["wifi", "ble", "coex", "log-04", "unstable"] }
-esp-storage = "0.10.0"
+esp-storage = { version = "0.10.0", features = ["embedded-storage"] }
 esp-println = { version = "0.18.0", features = ["log-04"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["log-04"] }
 log = "0.4.27"
@@ -28,6 +28,7 @@ heapless = "0.9"
 # patched copy in ../vendor/trouble-host (fixed passkey), see the board crates' [patch.crates-io]
 trouble-host = { version = "=0.7.0", default-features = false, features = ["peripheral", "gatt", "derive", "security", "default-packet-pool-mtu-255", "log"] }
 meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
+meshcore-fw-core = { version = "0.1.0", path = "../fw-core", features = ["net"] }
 
 [features]
 esp32s3 = ["esp-hal/esp32s3", "esp-radio/esp32s3", "esp-storage/esp32s3", "esp-println/esp32s3", "esp-bootloader-esp-idf/esp32s3"]

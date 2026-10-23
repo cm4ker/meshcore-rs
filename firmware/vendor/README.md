@@ -13,3 +13,10 @@ marked `meshcore-rust patch`:
   undefined, which broke the `gatt_server` macro for peripheral-only builds).
 
 The board crates use it through `[patch.crates-io]`.
+
+## trouble-host 0.8.0 (`trouble-host-0.8`)
+
+The same crate at 0.8.0 for the nRF52 board (its BLE controller, Nordic's SDC, needs bt-hci
+0.10), with one change marked `meshcore-rust patch`: `set_identity_irk()`, as above. 0.8.0 already
+has a fixed passkey (`set_passkey`) and the GAP attribute count. The T-Echo crate uses it through
+`[patch.crates-io]`.

@@ -16,11 +16,11 @@ use esp_bootloader_esp_idf::ota_updater::OtaUpdater;
 use esp_bootloader_esp_idf::partitions::{self, AppPartitionSubType, PartitionType};
 use meshcore::ota::FirmwareTarget;
 
-use crate::storage::{Blob, Store};
+use crate::storage::{Blob, EspStore};
 
 pub const MAX_TRIAL_BOOTS: u8 = 3;
 
-pub type SharedStore<'d> = Rc<RefCell<Store<'d>>>;
+pub type SharedStore<'d> = Rc<RefCell<EspStore<'d>>>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Slots {
@@ -37,7 +37,7 @@ fn sub(n: u8) -> AppPartitionSubType {
 }
 
 /// Find the running slot and the inactive one. `None` with a single-slot partition table.
-pub fn slots(store: &mut Store<'_>) -> Option<Slots> {
+pub fn slots(store: &mut EspStore<'_>) -> Option<Slots> {
     let mut buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
     let pt = partitions::read_partition_table(store.flash(), &mut buf).ok()?;
     let running = pt.booted_partition().ok()??;
@@ -51,7 +51,7 @@ pub fn slots(store: &mut Store<'_>) -> Option<Slots> {
     Some(Slots { booted, current: (running.offset(), running.len()), target: (other, entry.offset(), entry.len()) })
 }
 
-fn select_slot(store: &mut Store<'_>, slot: u8, state: OtaImageState) -> bool {
+fn select_slot(store: &mut EspStore<'_>, slot: u8, state: OtaImageState) -> bool {
     let mut buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
     let Ok(mut updater) = OtaUpdater::new(store.flash(), &mut buf) else {
         return false;
@@ -62,13 +62,13 @@ fn select_slot(store: &mut Store<'_>, slot: u8, state: OtaImageState) -> bool {
     data.set_current_app_partition(sub(slot)).is_ok() && data.set_current_ota_state(state).is_ok()
 }
 
-fn trial_record(store: &mut Store<'_>) -> Option<[u8; 3]> {
+fn trial_record(store: &mut EspStore<'_>) -> Option<[u8; 3]> {
     store.load(Blob::OtaTrial).and_then(|r| r.get(..3).and_then(|b| b.try_into().ok()))
 }
 
 /// Run at boot, before anything that could hang. Returns `true` while on a trial boot.
 /// Never returns if the trial budget is exhausted (switches back and resets).
-pub fn check_trial(store: &mut Store<'_>, booted: u8) -> bool {
+pub fn check_trial(store: &mut EspStore<'_>, booted: u8) -> bool {
     let Some([slot, prev, boots]) = trial_record(store) else {
         return false;
     };
@@ -90,7 +90,7 @@ pub fn check_trial(store: &mut Store<'_>, booted: u8) -> bool {
 }
 
 /// The new firmware is healthy: keep it.
-pub fn confirm(store: &mut Store<'_>) {
+pub fn confirm(store: &mut EspStore<'_>) {
     store.save(Blob::OtaTrial, &[]);
     let mut buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
     if let Ok(mut updater) = OtaUpdater::new(store.flash(), &mut buf) {
@@ -99,7 +99,7 @@ pub fn confirm(store: &mut Store<'_>) {
 }
 
 /// Switch back to the other slot (CLI `ota rollback`), keeping it on trial too.
-pub fn rollback(store: &mut Store<'_>, slots: Slots) -> bool {
+pub fn rollback(store: &mut EspStore<'_>, slots: Slots) -> bool {
     store.save(Blob::OtaTrial, &[]);
     select_slot(store, slots.target.0, OtaImageState::Valid)
 }

@@ -1,0 +1,10 @@
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+rustflags = ["-C", "link-arg=--nmagic"]
+
+[env]
+# nrf-sdc/nrf-mpsl generate bindings with clang for a bare-metal target: its own stdint.h, not a
+# hosted one picked up from the build machine (LIBCLANG_PATH must name an LLVM for the host)
+BINDGEN_EXTRA_CLANG_ARGS = "-ffreestanding"

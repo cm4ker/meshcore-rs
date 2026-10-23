@@ -34,7 +34,8 @@ use heltec_v4::board::Fem;
 use heltec_v4::common::Battery;
 use heltec_v4::display::{Oled, Status as OledStatus};
 use heltec_v4::reset;
-use heltec_v4::storage::Store;
+use heltec_v4::radio::EspIrq;
+use heltec_v4::storage;
 use heltec_v4::sx1262::Sx1262;
 use meshcore::radio::RadioParams;
 use meshcore_fw::companion_app::{self, Board, Config, Hardware, Status};
@@ -158,7 +159,7 @@ async fn main(spawner: Spawner) -> ! {
 
     println!();
     println!("MeshCore companion (Rust) {} build {}", meshcore::FIRMWARE_VERSION, BUILD_DATE);
-    let store = Store::new(FlashStorage::new(p.FLASH)).map(|s| Rc::new(RefCell::new(s)));
+    let store = storage::open(FlashStorage::new(p.FLASH)).map(|s| Rc::new(RefCell::new(s)));
 
     let led = Output::new(p.GPIO35, Level::Low, OutputConfig::default());
     // the LNA setting is applied from the stored settings once they are loaded
@@ -174,7 +175,7 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(p.GPIO8, Level::High, OutputConfig::default()),
         Output::new(p.GPIO12, Level::High, OutputConfig::default()),
         Input::new(p.GPIO13, InputConfig::default().with_pull(Pull::None)),
-        Input::new(p.GPIO14, InputConfig::default().with_pull(Pull::Down)),
+        EspIrq(Input::new(p.GPIO14, InputConfig::default().with_pull(Pull::Down))),
     );
 
     let mut entropy = [0u8; 32];

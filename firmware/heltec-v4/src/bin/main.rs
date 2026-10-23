@@ -47,11 +47,11 @@ use heltec_v4::ota::{self, FlashTarget, SharedStore};
 use heltec_v4::power::Sleeper;
 use heltec_v4::reset;
 use heltec_v4::frames::FRAMES_IN;
-use heltec_v4::storage::{Blob, CompBlob, Store};
+use heltec_v4::storage::{self, Blob, CompBlob};
 use heltec_v4::net::{self, BrokerState};
 use heltec_v4::wifi_ota;
 use meshcore::uplink;
-use heltec_v4::radio::{LoraRadio, RxEvent};
+use heltec_v4::radio::{EspIrq, LoraRadio, RxEvent};
 use heltec_v4::sx1262::Sx1262;
 use meshcore::crypto;
 use meshcore::identity::LocalIdentity;
@@ -342,7 +342,7 @@ async fn main(spawner: Spawner) -> ! {
     println!("MeshCore repeater (Rust) {} build {}", meshcore::FIRMWARE_VERSION, BUILD_DATE);
 
     // ---- persistent state
-    let store: Option<SharedStore> = Store::new(FlashStorage::new(p.FLASH)).map(|s| Rc::new(RefCell::new(s)));
+    let store: Option<SharedStore> = storage::open(FlashStorage::new(p.FLASH)).map(|s| Rc::new(RefCell::new(s)));
     if store.is_none() {
         warn!("no '{}' partition: settings will not persist", heltec_v4::storage::PARTITION_LABEL);
     }
@@ -383,7 +383,7 @@ async fn main(spawner: Spawner) -> ! {
     let reset = Output::new(p.GPIO12, Level::High, OutputConfig::default());
     let busy = Input::new(p.GPIO13, InputConfig::default().with_pull(Pull::None));
     let dio1 = Input::new(p.GPIO14, InputConfig::default().with_pull(Pull::Down));
-    let mut radio = Sx1262::new(spi, nss, reset, busy, dio1);
+    let mut radio = Sx1262::new(spi, nss, reset, busy, EspIrq(dio1));
     if let Err(e) = radio.init(prefs.radio, prefs.tx_power_dbm, prefs.rx_boosted_gain).await {
         println!("ERROR: radio init failed: {e:?}");
         loop {

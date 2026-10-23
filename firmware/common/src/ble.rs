@@ -8,13 +8,12 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::num::NonZeroU128;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use embassy_futures::join::join;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use esp_hal::peripherals::BT;
@@ -25,21 +24,14 @@ use meshcore::ota::REQ_TYPE_OTA_BEGIN;
 use trouble_host::prelude::*;
 
 use crate::frames::{FRAMES_IN, Link};
+pub use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
 
-/// An app is connected (and its link is authenticated).
-pub static BLE_CONNECTED: AtomicBool = AtomicBool::new(false);
-/// Frames for the BLE app.
-pub static BLE_OUT: Channel<CriticalSectionRawMutex, Vec<u8>, 32> = Channel::new();
 /// The BLE task runs (and holds the controller).
 pub static BLE_RUNNING: AtomicBool = AtomicBool::new(false);
 static BLE_STOP: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// The GATT server, built on the first run of the BLE task: trouble-host keeps the attribute
 /// storage in statics, so a second one cannot be built in the same boot.
 static SERVER: AtomicPtr<Server<'static>> = AtomicPtr::new(core::ptr::null_mut());
-/// Passkey to show while a phone pairs (0 = not pairing).
-pub static BLE_PASSKEY: AtomicU32 = AtomicU32::new(0);
-/// Bonds changed: their serialized form, for the main loop to store.
-pub static BONDS_CHANGED: Signal<CriticalSectionRawMutex, Vec<u8>> = Signal::new();
 
 /// Gap between notifications. Upstream uses 60 ms (`BLE_WRITE_MIN_INTERVAL`, Bluedroid's queue);
 /// here each notify already waits until the host stack has taken it, so a short gap is enough and
