@@ -509,6 +509,8 @@ pub struct Companion {
     pub connected: bool,
     /// The latest text messages, oldest first.
     pub recent: VecDeque<RecentMessage>,
+    /// Text messages received since the start (an interface counts the unread ones with it).
+    pub messages_received: u32,
     /// The latest nodes heard advertising, most recent first.
     pub heard: VecDeque<HeardNode>,
     /// Transient slots first (`MAX_ANON_CONTACTS`), then the real contacts, like upstream.
@@ -557,6 +559,7 @@ impl Companion {
             ota: OtaEndpoint::default(),
             connected: true,
             recent: VecDeque::new(),
+            messages_received: 0,
             heard: VecDeque::new(),
             contacts: Vec::new(),
             matching_peers: Vec::new(),
@@ -1033,6 +1036,7 @@ impl Companion {
             self.recent.pop_front();
         }
         self.recent.push_back(RecentMessage { from, text: String::from_utf8_lossy(text).into_owned(), received: now });
+        self.messages_received = self.messages_received.wrapping_add(1);
     }
 
     fn note_heard(&mut self, node: HeardNode) {

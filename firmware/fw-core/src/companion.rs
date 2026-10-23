@@ -204,8 +204,11 @@ fn now_ms() -> u64 {
     Instant::now().as_millis()
 }
 
-/// The interface's current page with what it shows.
-fn build_view(ui: &mut Ui, mesh: &Mesh<Companion>, ble: BleState, fixed_pin: Option<u32>, pin: u32, now: u64) -> View {
+/// The interface's current page with what it shows; `unread`: messages since the messages page
+/// was last open.
+fn build_view(
+    ui: &mut Ui, mesh: &Mesh<Companion>, ble: BleState, fixed_pin: Option<u32>, pin: u32, unread: u32, now: u64,
+) -> View {
     let app = &mesh.app;
     let clock = mesh.ctx.current_time();
     let message = |m: &RecentMessage| ui::Message {
@@ -214,12 +217,7 @@ fn build_view(ui: &mut Ui, mesh: &Mesh<Companion>, ble: BleState, fixed_pin: Opt
         age_min: ui::coarse_minutes(clock.saturating_sub(m.received)),
     };
     let body = match ui.page() {
-        Page::Home => Body::Home {
-            name: app.prefs.node_name.clone(),
-            // no age here: the home page stays up for long and would redraw every minute
-            last: app.recent.back().map(|m| ui::Message { age_min: 0, ..message(m) }),
-            contacts: app.num_contacts(),
-        },
+        Page::Home => Body::Home { name: app.prefs.node_name.clone(), unread },
         Page::Messages => Body::Messages(app.recent.iter().rev().map(message).collect()),
         Page::Nearby => Body::Nearby(
             app.heard
@@ -274,7 +272,7 @@ fn build_view(ui: &mut Ui, mesh: &Mesh<Companion>, ble: BleState, fixed_pin: Opt
         page: ui.page(),
         page_idx,
         pages,
-        bar: Bar { battery_pct: ui.battery_pct(app.board.batt_mv), ble, waiting: app.queued_messages() },
+        bar: Bar { battery_pct: ui.battery_pct(app.board.batt_mv), ble },
         body,
         alert,
         pin: (pin != 0).then_some(pin),
@@ -450,6 +448,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     let mut next_gps_position = 0u64;
     let mut next_gps_time = 0u64;
     let mut gps_fix_secs = 0u32;
+    let mut messages_seen = 0u32;
     loop {
         platform.feed_watchdog();
         let now = now_ms();
@@ -587,9 +586,13 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             }
         }
         if ui.enabled() {
+            if ui.page() == Page::Messages {
+                messages_seen = mesh.app.messages_received;
+            }
             if now >= next_screen {
                 next_screen = now + 1000;
-                let view = build_view(&mut ui, &mesh, ble_state, fixed_pin, pin, now);
+                let unread = mesh.app.messages_received.wrapping_sub(messages_seen);
+                let view = build_view(&mut ui, &mesh, ble_state, fixed_pin, pin, unread, now);
                 board.show_view(&view);
             }
         } else if now >= screen_until && !board.always_on() {
@@ -731,7 +734,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         if fx.power_off {
             let _ = radio.sleep();
             if ui.enabled() {
-                let mut view = build_view(&mut ui, &mesh, BleState::Off, None, 0, now);
+                let mut view = build_view(&mut ui, &mesh, BleState::Off, None, 0, 0, now);
                 view.body = Body::Off { name: mesh.app.prefs.node_name.clone() };
                 (view.alert, view.pin) = (None, None);
                 board.show_view(&view);

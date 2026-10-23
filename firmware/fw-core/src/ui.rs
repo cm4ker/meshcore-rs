@@ -218,8 +218,6 @@ pub enum BleState {
 pub struct Bar {
     pub battery_pct: u8,
     pub ble: BleState,
-    /// Messages the app has not fetched yet.
-    pub waiting: usize,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -273,7 +271,8 @@ pub struct GpsInfo {
 /// The page's content.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Body {
-    Home { name: String, last: Option<Message>, contacts: usize },
+    /// Calm on purpose (it is up most of the time): no message text, nothing that ticks.
+    Home { name: String, unread: u32 },
     /// Most recent first.
     Messages(Vec<Message>),
     /// Most recent first.

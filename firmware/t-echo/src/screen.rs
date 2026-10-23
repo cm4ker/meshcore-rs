@@ -265,26 +265,12 @@ impl Canvas {
         }
     }
 
-    fn envelope(&mut self, x: i32, y: i32) {
-        self.rect(x, y, 20, 14, None);
-        self.line(Point::new(x, y), Point::new(x + 10, y + 8));
-        self.line(Point::new(x + 10, y + 8), Point::new(x + 19, y));
-    }
-
     fn bar(&mut self, v: &View) {
         let battery_x = W - MARGIN - 29;
         self.battery(battery_x, 6, v.bar.battery_pct);
         let ble_x = battery_x - 18;
         self.ble(ble_x, 4, v.bar.ble);
-        let mut title_end = ble_x - 8;
-        // on the home page only: elsewhere the title needs the room
-        if v.bar.waiting > 0 && v.page == Page::Home {
-            let count = format!("{}", v.bar.waiting.min(99));
-            let x = ble_x - 8 - width(&TEXT_BOLD, &count);
-            self.text(&TEXT_BOLD, &count, x, 4);
-            self.envelope(x - 23, 6);
-            title_end = x - 28;
-        }
+        let title_end = ble_x - 8;
         let title = match (&v.page, &v.body) {
             (_, Body::Home { name, .. }) => clean(name),
             (Page::Messages, _) => "Сообщения".into(),
@@ -329,6 +315,15 @@ impl Canvas {
     }
 }
 
+/// The Russian noun form for `n`: one (1, 21...), few (2-4, 22-24...), many (the rest).
+fn plural(n: u32, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
+    match (n % 10, n % 100) {
+        (1, r) if r != 11 => one,
+        (2..=4, r) if !(12..=14).contains(&r) => few,
+        _ => many,
+    }
+}
+
 fn alert_text(a: Alert) -> &'static str {
     match a {
         Alert::AdvertSent => "Объявление отправлено",
@@ -352,13 +347,18 @@ pub fn render(v: &View) -> Frame {
     }
     c.bar(v);
     match &v.body {
-        Body::Home { last, .. } => match last {
-            Some(m) => {
-                c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, &clean(&m.from), full), MARGIN, BODY_TOP + 2);
-                c.lines(&BIG, &wrap(&BIG, &clean(&m.text), full, 5), BODY_TOP + 24);
+        Body::Home { unread, .. } => {
+            if *unread > 0 {
+                let n = (*unread).min(999);
+                c.centered(&HUGE_DIGITS, &format!("{n}"), BODY_TOP + 14);
+                c.centered(&TEXT, plural(n, "новое сообщение", "новых сообщения", "новых сообщений"), BODY_TOP + 62);
+            } else {
+                c.centered(&BIG, "Нет новых", BODY_TOP + 24);
+                c.centered(&BIG, "сообщений", BODY_TOP + 50);
             }
-            None => c.centered(&BIG, "Сообщений нет", 80),
-        },
+            c.text(&SMALL, "Нажатие - дальше,", MARGIN, HINT_Y);
+            c.text(&SMALL, "двойное - назад", MARGIN, HINT_Y + 15);
+        }
         Body::Messages(list) => {
             if list.is_empty() {
                 c.centered(&BIG, "Сообщений нет", 80);

@@ -2,12 +2,14 @@
 //! pages ([`crate::screen`]), drawn in their own task so a refresh (up to 2 s) never holds up the
 //! radio.
 //!
-//! A page turn, a notice, a pairing PIN, Bluetooth or the messages waiting change the screen at
-//! once; anything else (counters, ages, the battery) at most every [`MIN_REFRESH_MS`]: an
-//! e-paper keeps its image without power, and refreshes are slow and wear it. Most refreshes are
-//! partial, but a partial refresh drives only the pixels that change and the rest slowly fades:
-//! once nothing has changed for [`CLEAN_AFTER_MS`] the page is redrawn in full, and so is every
-//! [`FULL_EVERY`]th refresh in a row.
+//! A page turn, a notice, a pairing PIN, Bluetooth, the home page or new messages change the
+//! screen at once; anything else (counters, ages, the battery) at most every
+//! [`MIN_REFRESH_MS`]: an e-paper keeps its image without power, and refreshes are slow and wear
+//! it. Refreshes are partial, but a partial refresh drives only the pixels that change and the
+//! rest slowly fades, so now and then the page is redrawn in full, which flashes the screen: once
+//! nothing has changed for [`QUIET_MS`] after [`CLEAN_AFTER_PARTIALS`] partial refreshes (or
+//! after any, if the last full one is [`CLEAN_EVERY_MS`] old), and at every [`FULL_EVERY`]th
+//! refresh in a row.
 
 use embassy_nrf::gpio::{Input, Output};
 use embassy_nrf::spim::Spim;
@@ -23,8 +25,10 @@ use crate::screen::render;
 pub const WIDTH: usize = 200;
 pub const HEIGHT: usize = 200;
 const MIN_REFRESH_MS: u64 = 30_000;
-const CLEAN_AFTER_MS: u64 = 20_000;
-const FULL_EVERY: u32 = 20;
+const QUIET_MS: u64 = 20_000;
+const CLEAN_AFTER_PARTIALS: u32 = 15;
+const CLEAN_EVERY_MS: u64 = 60 * 60 * 1000;
+const FULL_EVERY: u32 = 30;
 
 pub static SCREEN: Signal<CriticalSectionRawMutex, View> = Signal::new();
 
@@ -143,8 +147,14 @@ fn urgent(old: &View, new: &View) -> bool {
         || old.alert != new.alert
         || old.pin != new.pin
         || old.bar.ble != new.bar.ble
-        || old.bar.waiting != new.bar.waiting
         || matches!(new.body, Body::Home { .. } | Body::Off { .. })
+        || match (&old.body, &new.body) {
+            // a new message while the page is open (not the ages ticking)
+            (Body::Messages(a), Body::Messages(b)) => {
+                a.len() != b.len() || a.iter().zip(b).any(|(a, b)| a.from != b.from || a.text != b.text)
+            }
+            _ => false,
+        }
 }
 
 #[embassy_executor::task]
@@ -152,13 +162,18 @@ pub async fn task(mut epd: Epaper) {
     epd.init().await;
     let mut shown: Option<View> = None;
     let mut last = Instant::from_millis(0);
+    let mut last_full = Instant::from_millis(0);
     let mut partials = 0u32; // since the last full refresh
     loop {
-        let next = if partials > 0 {
-            let clean_at = last + Duration::from_millis(CLEAN_AFTER_MS);
-            embassy_time::with_deadline(clean_at, SCREEN.wait()).await.ok()
-        } else {
-            Some(SCREEN.wait().await)
+        let quiet = last + Duration::from_millis(QUIET_MS);
+        let clean_at = match partials {
+            0 => None,
+            n if n >= CLEAN_AFTER_PARTIALS => Some(quiet),
+            _ => Some(quiet.max(last_full + Duration::from_millis(CLEAN_EVERY_MS))),
+        };
+        let next = match clean_at {
+            Some(at) => embassy_time::with_deadline(at, SCREEN.wait()).await.ok(),
+            None => Some(SCREEN.wait().await),
         };
         let Some(mut view) = next else {
             // nothing changed for a while: restore the contrast the partial refreshes wore off
@@ -166,6 +181,7 @@ pub async fn task(mut epd: Epaper) {
                 epd.show(&render(v), true).await;
             }
             partials = 0;
+            last_full = Instant::now();
             continue;
         };
         if shown.as_ref() == Some(&view) {
@@ -189,6 +205,9 @@ pub async fn task(mut epd: Epaper) {
         epd.show(&render(&view), full).await;
         partials = if full { 0 } else { partials + 1 };
         last = Instant::now();
+        if full {
+            last_full = last;
+        }
         shown = Some(view);
         if off {
             epd.sleep().await;
