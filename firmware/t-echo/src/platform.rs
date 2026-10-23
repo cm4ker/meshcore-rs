@@ -1,10 +1,11 @@
-//! The nRF52840 under the companion loop: BLE (Nordic's SDC), the USB port, reboots.
+//! The nRF52840 under the companion loop: BLE (Nordic's SDC), the USB port, the watchdog, reboots.
 
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
 use embassy_executor::Spawner;
 use embassy_nrf::qspi::Qspi;
+use embassy_nrf::wdt::WatchdogHandle;
 use meshcore::companion::CompanionPrefs;
 use meshcore_fw_core::companion::{BleSetup, Links, Platform};
 use nrf_sdc::SoftdeviceController;
@@ -19,10 +20,17 @@ pub struct Nrf {
     pub sdc: Option<SoftdeviceController<'static>>,
     /// State of a small generator seeded from the hardware RNG (which the BLE controller owns).
     pub seed: u64,
+    pub watchdog: Option<WatchdogHandle>,
 }
 
 impl Platform for Nrf {
     type Flash = Qspi<'static>;
+
+    fn feed_watchdog(&mut self) {
+        if let Some(w) = &mut self.watchdog {
+            w.pet();
+        }
+    }
 
     fn reboot(&mut self) -> ! {
         cortex_m::peripheral::SCB::sys_reset()

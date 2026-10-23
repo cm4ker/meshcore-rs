@@ -26,6 +26,7 @@ use embassy_nrf::saadc::{self, ChannelConfig, Saadc};
 use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
+use embassy_nrf::wdt::{self, Watchdog};
 use embassy_nrf::{bind_interrupts, config, peripherals, usb};
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
@@ -61,6 +62,11 @@ const L2CAP_MTU: u16 = 251;
 const L2CAP_TXQ: u8 = 3;
 const L2CAP_RXQ: u8 = 3;
 const SDC_MEM_SIZE: usize = 8192;
+
+/// Without a pass of the main loop for this long, the watchdog restarts the board. Long, as the
+/// watchdog keeps running into the UF2 bootloader (the 1200 baud touch is a soft reset), which
+/// does not feed it: copying the next firmware has to fit in.
+const WATCHDOG_SECS: u32 = 60;
 
 fn build_sdc(
     p: sdc::Peripherals<'static>, rng: &'static mut Rng<'static, Blocking>, mpsl: &'static MultiprotocolServiceLayer<'static>,
@@ -132,8 +138,19 @@ async fn main(spawner: Spawner) {
         unsafe { HEAP.init(&raw mut HEAP_MEM as usize, 160 * 1024) }
     }
     // the clocks are MPSL's (the BLE controller's service layer): it runs the 32 kHz crystal, and
-    // keeps the HF crystal on while asked to
-    let p = embassy_nrf::init(config::Config::default());
+    // keeps the HF crystal on while asked to; started on the crystal here already, so that MPSL
+    // need not switch it (a running watchdog keeps it running through a soft reset)
+    let mut ncfg = config::Config::default();
+    ncfg.lfclk_source = config::LfclkSource::ExternalXtal;
+    ncfg.dcdc.reg1 = true; // the DC/DC converter instead of the LDO (upstream `NRF52BoardDCDC`)
+    let p = embassy_nrf::init(ncfg);
+    // a watchdog still running from before a soft reset is taken over with the same settings
+    let mut wcfg = wdt::Config::default();
+    wcfg.timeout_ticks = 32_768 * WATCHDOG_SECS;
+    let watchdog = match Watchdog::try_new::<_, 1>(p.WDT, wcfg) {
+        Ok((_, [handle])) => Some(handle),
+        Err(_) => None, // running with other settings: it restarts the board, and starts afresh
+    };
     let mpsl_p = mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
     let lfclk = mpsl::raw::mpsl_clock_lfclk_cfg_t {
         source: mpsl::raw::MPSL_CLOCK_LF_SRC_XTAL as u8,
@@ -274,7 +291,7 @@ async fn main(spawner: Spawner) {
     busy_led.set_high();
     stage_led(GREEN, false);
     let seed = u64::from_le_bytes(entropy[..8].try_into().unwrap());
-    let platform = Nrf { sdc, seed };
+    let platform = Nrf { sdc, seed, watchdog };
     let cfg = Config {
         // the Omsk mesh (upstream builds: `LORA_FREQ` etc. of the variant)
         radio: RadioParams { freq_mhz: 868.731, bw_khz: 62.5, sf: 7, cr: 7 },
