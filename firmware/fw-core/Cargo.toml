@@ -22,3 +22,8 @@ meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
 [features]
 # the companion TCP server (embassy-net)
 net = ["dep:embassy-net", "dep:embedded-io-async"]
+
+[dev-dependencies]
+# a clock and critical sections on the host
+embassy-time = { version = "0.5.0", features = ["std"] }
+critical-section = { version = "1.2", features = ["std"] }

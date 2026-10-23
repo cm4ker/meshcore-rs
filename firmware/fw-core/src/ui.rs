@@ -260,9 +260,14 @@ pub struct RadioInfo {
 #[derive(Clone, PartialEq, Debug)]
 pub struct GpsInfo {
     pub on: bool,
+    /// The receiver is talking (else it is starting, or broken).
+    pub receiving: bool,
     /// Latitude and longitude in millionths of a degree.
     pub fix: Option<(i32, i32)>,
+    /// Used for the position.
     pub satellites: u8,
+    /// Seen.
+    pub in_view: u8,
 }
 
 /// The page's content.

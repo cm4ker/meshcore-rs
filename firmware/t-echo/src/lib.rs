@@ -12,6 +12,7 @@ pub mod ble;
 pub mod board;
 pub mod diag;
 pub mod epaper;
+pub mod gps;
 pub mod platform;
 pub mod screen;
 pub mod usb;

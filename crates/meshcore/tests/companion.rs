@@ -799,3 +799,47 @@ fn repeater_powersaving_cli() {
     assert_eq!(cli(&mut r, "powersaving off"), "off");
     assert_eq!(cli(&mut r, "powersaving"), "off");
 }
+
+#[test]
+fn gps_setting_position_and_telemetry() {
+    // no GPS: no settings to offer
+    let mut a = companion(1, "Alice");
+    assert_eq!(cmd(&mut a, &[CMD_GET_CUSTOM_VARS]), vec![vec![RESP_CODE_CUSTOM_VARS]]);
+    assert_eq!(cmd(&mut a, b"\x29gps:1")[0][0], RESP_CODE_ERR);
+
+    let mut air = Air::new();
+    air.link(0, 1);
+    let mut b = companion(2, "Bob");
+    b.app.board.has_gps = true;
+    b.app.prefs.telemetry_mode_base = TELEM_MODE_ALLOW_ALL;
+    b.app.prefs.telemetry_mode_loc = TELEM_MODE_ALLOW_ALL;
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:0");
+    assert_eq!(cmd(&mut b, b"\x29gps:1")[0][0], RESP_CODE_OK);
+    let fx = b.app.take_effects();
+    assert!(fx.gps && fx.save_prefs && b.app.prefs.gps_enabled);
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:1");
+    assert_eq!(cmd(&mut b, b"\x29gps_interval:30")[0][0], RESP_CODE_OK);
+    assert_eq!(b.app.prefs.gps_interval, 30);
+    assert_eq!(cmd(&mut b, b"\x29alt:1")[0][0], RESP_CODE_ERR);
+
+    // own telemetry: voltage, then the position (1/10000 degree, centimetres)
+    b.app.set_gps_position(55_000_000, -33_500_000, 120_500);
+    let t = cmd(&mut b, &[CMD_SEND_TELEMETRY_REQ, 0, 0, 0]);
+    assert_eq!(&t[0][8..], &[1, 116, 0x01, 0x86, 1, 136, 0x08, 0x64, 0x70, 0xFA, 0xE3, 0x68, 0x00, 0x2F, 0x12]);
+
+    // another client's request: the position too, as location is allowed
+    exchange_adverts(&mut air, &mut a, &mut b);
+    frames(&mut a);
+    let mut req = vec![CMD_SEND_TELEMETRY_REQ, 0, 0, 0];
+    req.extend_from_slice(&pub_key(&b));
+    cmd(&mut a, &req);
+    air.run(&mut [&mut a, &mut b], 5000);
+    let t = only(&frames(&mut a), PUSH_CODE_TELEMETRY_RESPONSE);
+    // (the reply is padded to the cipher's block)
+    assert_eq!(&t[0][8..23], &[1, 116, 0x01, 0x86, 1, 136, 0x08, 0x64, 0x70, 0xFA, 0xE3, 0x68, 0x00, 0x2F, 0x12]);
+
+    // GPS off: no position
+    cmd(&mut b, b"\x29gps:0");
+    let t = cmd(&mut b, &[CMD_SEND_TELEMETRY_REQ, 0, 0, 0]);
+    assert_eq!(&t[0][8..], &[1, 116, 0x01, 0x86]);
+}

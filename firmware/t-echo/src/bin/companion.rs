@@ -4,8 +4,8 @@
 //! NSS P0.24), RESET P0.25, BUSY P0.17, DIO1 P0.20, DIO2 switching the antenna, a 1.8 V TCXO on
 //! DIO3 (its supply on P0.21), radio supply on P1.05; 2 MB QSPI flash (SCK P1.14, CS P1.15, IO
 //! P1.12 P1.13 P0.07 P0.05); peripherals' 3.3 V on P0.12; button P1.10; touch pad P0.11 and the
-//! screen's light P1.11; GPS supply P1.02; LEDs P0.13-15 (active low); battery on AIN2 (P0.04)
-//! behind a 1:2 divider.
+//! screen's light P1.11; GPS (L76K) on UARTE1 P1.09/P1.08, enable P1.02, reset P1.05; LEDs
+//! P0.13-15 (active low); battery on AIN2 (P0.04) behind a 1:2 divider.
 
 #![no_std]
 #![no_main]
@@ -43,6 +43,7 @@ use log::{info, warn};
 use t_echo::board::{self as board, TEcho};
 use t_echo::diag;
 use t_echo::epaper::{self, Epaper};
+use t_echo::gps::{self, Gps};
 use t_echo::usb as frames_usb;
 use t_echo::platform::Nrf;
 
@@ -185,11 +186,11 @@ async fn main(spawner: Spawner) {
         warn!("last reset: {crash}");
     }
 
-    // ---- power: peripherals, TCXO, radio; the GPS stays off
+    // ---- power: peripherals, TCXO; the GPS off and in reset until the companion wants it
     let power = Output::new(p.P0_12, Level::High, OutputDrive::Standard);
     let _tcxo = Output::new(p.P0_21, Level::High, OutputDrive::Standard);
-    let gps_power = Output::new(p.P1_02, Level::Low, OutputDrive::Standard);
-    let _radio_power = Output::new(p.P1_05, Level::High, OutputDrive::Standard);
+    let gps_enable = Output::new(p.P1_02, Level::Low, OutputDrive::Standard);
+    let gps_reset = Output::new(p.P1_05, Level::Low, OutputDrive::Standard);
     let _red = Output::new(p.P0_13, Level::High, OutputDrive::Standard);
     Timer::after_millis(10).await; // the radio powers up
 
@@ -241,8 +242,19 @@ async fn main(spawner: Spawner) {
         button: Input::new(p.P1_10, Pull::Up),
         battery,
         power,
-        gps_power,
     };
+    let gps = Gps {
+        uarte: p.UARTE1,
+        timer: p.TIMER1,
+        ppi_ch1: p.PPI_CH0,
+        ppi_ch2: p.PPI_CH1,
+        ppi_group: p.PPI_GROUP0,
+        rx: p.P1_09,
+        tx: p.P1_08,
+        enable: gps_enable,
+        reset: gps_reset,
+    };
+    spawner.spawn(gps::task(gps).unwrap());
     let touch = Input::new(p.P0_11, Pull::Up);
     let light = Output::new(p.P1_11, Level::Low, OutputDrive::Standard);
     spawner.spawn(board::backlight_task(touch, light).unwrap());

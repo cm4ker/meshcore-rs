@@ -30,6 +30,7 @@ use meshcore::util::to_hex;
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE};
 
 use crate::frames::{FRAMES_IN, Link, TCP_CONNECTED, TCP_OUT};
+use crate::gps;
 use crate::links::{BLE_CONNECTED, BLE_ENABLED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
 use crate::noise::NoiseFloor;
 use crate::radio::{LoraRadio, RxEvent};
@@ -47,6 +48,8 @@ pub const TCP_PORT: u16 = 5000;
 const ADVERT_PRESS_MS: u64 = 1500;
 /// Static BLE PIN of boards without a screen when none is set (upstream `BLE_PIN_CODE`).
 const DEFAULT_BLE_PIN: u32 = 123_456;
+/// The clock follows the GPS this often (upstream `TIME_SYNC_INTERVAL`).
+const GPS_TIME_SYNC_MS: u64 = 30 * 60 * 1000;
 
 /// What the status screen shows (once a second while it is on).
 pub struct Status<'a> {
@@ -102,9 +105,11 @@ pub trait Board {
     /// The interface's page, about once a second and right after a press: the board renders it
     /// and decides when to redraw.
     fn show_view(&mut self, _view: &View) {}
-    fn gps(&mut self) -> GpsInfo {
-        GpsInfo { on: false, fix: None, satellites: 0 }
+    /// A GPS receiver, whose readings the board's serial task hands to [`gps::publish`].
+    fn has_gps(&self) -> bool {
+        false
     }
+    /// The GPS on or off: the board powers it, sets it up and reads it.
     fn set_gps(&mut self, _on: bool) {}
 }
 
@@ -200,9 +205,7 @@ fn now_ms() -> u64 {
 }
 
 /// The interface's current page with what it shows.
-fn build_view<B: Board>(
-    ui: &mut Ui, mesh: &Mesh<Companion>, board: &mut B, ble: BleState, fixed_pin: Option<u32>, pin: u32, now: u64,
-) -> View {
+fn build_view(ui: &mut Ui, mesh: &Mesh<Companion>, ble: BleState, fixed_pin: Option<u32>, pin: u32, now: u64) -> View {
     let app = &mesh.app;
     let clock = mesh.ctx.current_time();
     let message = |m: &RecentMessage| ui::Message {
@@ -253,7 +256,16 @@ fn build_view<B: Board>(
             name: alloc::format!("MeshCore-{}", app.prefs.node_name),
             pin: fixed_pin,
         },
-        Page::Gps => Body::Gps(board.gps()),
+        Page::Gps => {
+            let fix = gps::latest();
+            Body::Gps(GpsInfo {
+                on: app.gps_active(),
+                receiving: fix.is_some(),
+                fix: fix.filter(|f| f.valid).map(|f| (f.lat, f.lon)),
+                satellites: fix.map_or(0, |f| f.satellites),
+                in_view: fix.map_or(0, |f| f.in_view),
+            })
+        }
         Page::Advert => Body::Advert,
         Page::PowerOff => Body::PowerOff,
     };
@@ -375,6 +387,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         batt_mv,
         mcu_temp_c: None,
         max_tx_power_dbm: max_tx,
+        has_gps: board.has_gps(),
         ..Default::default()
     };
     let mut mesh = Mesh::new(ctx, Companion::new(prefs, info));
@@ -392,6 +405,9 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     mesh.begin(now_ms());
     mesh.app.start(&mut mesh.ctx);
     info!("{} contacts", mesh.app.num_contacts());
+    if board.has_gps() {
+        board.set_gps(mesh.app.prefs.gps_enabled);
+    }
 
     // ---- the app links
     let ble = BleSetup {
@@ -430,6 +446,10 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     let mut next_screen = 0u64;
     let mut ui = Ui::new(board.ui_pages());
     let mut button = Button::default();
+    let mut next_gps = 0u64;
+    let mut next_gps_position = 0u64;
+    let mut next_gps_time = 0u64;
+    let mut gps_fix_secs = 0u32;
     loop {
         platform.feed_watchdog();
         let now = now_ms();
@@ -540,8 +560,9 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
                         ui.alert(if on { Alert::BleOn } else { Alert::BleOff }, now);
                     }
                     Some(Action::ToggleGps) => {
-                        let on = !board.gps().on;
-                        board.set_gps(on);
+                        let on = !mesh.app.prefs.gps_enabled;
+                        mesh.app.prefs.gps_enabled = on;
+                        (mesh.app.effects.gps, mesh.app.effects.save_prefs) = (true, true);
                         ui.alert(if on { Alert::GpsOn } else { Alert::GpsOff }, now);
                     }
                     Some(Action::PowerOff) => mesh.app.effects.power_off = true,
@@ -568,7 +589,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         if ui.enabled() {
             if now >= next_screen {
                 next_screen = now + 1000;
-                let view = build_view(&mut ui, &mesh, &mut board, ble_state, fixed_pin, pin, now);
+                let view = build_view(&mut ui, &mesh, ble_state, fixed_pin, pin, now);
                 board.show_view(&view);
             }
         } else if now >= screen_until && !board.always_on() {
@@ -626,6 +647,29 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             mesh.app.board.wifi_ip = ip;
         }
 
+        // GPS: the node's position, and now and then the clock, once the fix has held for a few
+        // seconds (upstream `EnvironmentSensorManager`, `MicroNMEALocationProvider`)
+        if mesh.app.gps_active() && now >= next_gps {
+            next_gps = now + 1000;
+            match gps::latest().filter(|f| f.valid) {
+                Some(fix) => {
+                    gps_fix_secs += 1;
+                    if now >= next_gps_position {
+                        next_gps_position = now + mesh.app.prefs.gps_interval.max(1) as u64 * 1000;
+                        mesh.app.set_gps_position(fix.lat, fix.lon, fix.alt_mm);
+                    }
+                    if gps_fix_secs > 2
+                        && now >= next_gps_time
+                        && let Some(t) = fix.time
+                    {
+                        next_gps_time = now + GPS_TIME_SYNC_MS;
+                        mesh.ctx.set_current_time(t);
+                    }
+                }
+                None => gps_fix_secs = 0,
+            }
+        }
+
         // clock persistence
         let clock = mesh.ctx.current_time();
         let jumped = clock.abs_diff(last_clock) > 120;
@@ -671,6 +715,11 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         if let Some(on) = fx.fem_lna {
             board.set_lna(on);
         }
+        if fx.gps {
+            board.set_gps(mesh.app.gps_active());
+            gps::clear();
+            gps_fix_secs = 0;
+        }
         if fx.factory_reset
             && let Some(s) = &store
         {
@@ -682,7 +731,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         if fx.power_off {
             let _ = radio.sleep();
             if ui.enabled() {
-                let mut view = build_view(&mut ui, &mesh, &mut board, BleState::Off, None, 0, now);
+                let mut view = build_view(&mut ui, &mesh, BleState::Off, None, 0, now);
                 view.body = Body::Off { name: mesh.app.prefs.node_name.clone() };
                 (view.alert, view.pin) = (None, None);
                 board.show_view(&view);

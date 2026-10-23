@@ -76,6 +76,7 @@ pub const TELEM_PERM_ENVIRONMENT: u8 = 0x04;
 const TELEM_CHANNEL_SELF: u8 = 1;
 const LPP_VOLTAGE: u8 = 116;
 const LPP_TEMPERATURE: u8 = 103;
+const LPP_GPS: u8 = 136;
 
 // Command frames (app -> radio).
 pub const CMD_APP_START: u8 = 1;
@@ -394,6 +395,8 @@ pub struct Effects {
     pub fem_lna: Option<bool>,
     /// Wi-Fi settings changed (applied after a reboot).
     pub network_changed: bool,
+    /// The GPS was switched on or off (`prefs.gps_enabled`).
+    pub gps: bool,
 }
 
 /// Live board values the firmware keeps up to date.
@@ -407,6 +410,10 @@ pub struct Board {
     /// Status line for `get wifi.status`.
     pub wifi_status: String,
     pub wifi_ip: Option<String>,
+    /// A GPS receiver: its `gps` setting is offered to the app.
+    pub has_gps: bool,
+    /// Altitude of the latest GPS position, in metres.
+    pub altitude_m: f64,
 }
 
 impl Default for Board {
@@ -419,6 +426,8 @@ impl Default for Board {
             max_tx_power_dbm: 22,
             wifi_status: String::new(),
             wifi_ip: None,
+            has_gps: false,
+            altitude_m: 0.0,
         }
     }
 }
@@ -965,12 +974,40 @@ impl Companion {
         }
     }
 
-    fn telemetry_lpp(&self, out: &mut Vec<u8>) {
+    /// The GPS is on: its positions are the node's.
+    pub fn gps_active(&self) -> bool {
+        self.board.has_gps && self.prefs.gps_enabled
+    }
+
+    /// A position from the GPS (`EnvironmentSensorManager::loop`), in millionths of a degree and
+    /// millimetres: the node's location from now on.
+    pub fn set_gps_position(&mut self, lat: i32, lon: i32, alt_mm: i32) {
+        self.prefs.node_lat = lat as f64 / 1e6;
+        self.prefs.node_lon = lon as f64 / 1e6;
+        self.board.altitude_m = alt_mm as f64 / 1000.0;
+    }
+
+    fn lpp_voltage(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&[TELEM_CHANNEL_SELF, LPP_VOLTAGE]);
         out.extend_from_slice(&((self.board.batt_mv as u32 / 10) as u16).to_be_bytes());
+    }
+
+    fn lpp_temperature(&self, out: &mut Vec<u8>) {
         if let Some(t) = self.board.mcu_temp_c {
             out.extend_from_slice(&[TELEM_CHANNEL_SELF, LPP_TEMPERATURE]);
             out.extend_from_slice(&((t * 10.0) as i16).to_be_bytes());
+        }
+    }
+
+    /// `querySensors`: the position while the GPS is on, if `perms` allow it.
+    fn lpp_sensors(&self, out: &mut Vec<u8>, perms: u8) {
+        if perms & TELEM_PERM_LOCATION != 0 && self.gps_active() {
+            out.extend_from_slice(&[TELEM_CHANNEL_SELF, LPP_GPS]);
+            // 1/10000 degree and centimetres, 24 bits each
+            let p = &self.prefs;
+            for v in [(p.node_lat * 10_000.0) as i32, (p.node_lon * 10_000.0) as i32, (self.board.altitude_m * 100.0) as i32] {
+                out.extend_from_slice(&v.to_be_bytes()[1..]);
+            }
         }
     }
 
@@ -1087,7 +1124,9 @@ impl Companion {
             perms &= !data.get(1).copied().unwrap_or(0); // inverse mask from the requester
             if perms & TELEM_PERM_BASE != 0 {
                 reply.extend_from_slice(&sender_timestamp.to_le_bytes());
-                self.telemetry_lpp(&mut reply);
+                self.lpp_voltage(&mut reply);
+                self.lpp_sensors(&mut reply, perms);
+                self.lpp_temperature(&mut reply);
             }
         }
         reply

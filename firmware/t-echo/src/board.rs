@@ -6,9 +6,10 @@ use embassy_nrf::pac;
 use embassy_nrf::saadc::Saadc;
 use embassy_time::{Duration, Instant};
 use meshcore_fw_core::companion::Board;
-use meshcore_fw_core::ui::{GpsInfo, Page, View};
+use meshcore_fw_core::ui::{Page, View};
 
 use crate::epaper::SCREEN;
+use crate::gps::GPS_ON;
 
 /// 12-bit samples of a 0..3 V range, behind a 1:2 divider (upstream `REAL_VBAT_MV_PER_LSB`).
 const BATT_MV_PER_LSB: f32 = 3000.0 / 4096.0 * 2.0;
@@ -27,8 +28,6 @@ pub struct TEcho {
     pub battery: Saadc<'static, 1>,
     /// 3.3 V to the peripherals (radio, flash, screen, sensors).
     pub power: Output<'static>,
-    /// The GPS module's supply.
-    pub gps_power: Output<'static>,
 }
 
 impl Board for TEcho {
@@ -52,7 +51,7 @@ impl Board for TEcho {
     /// (the peripherals' supply has to stay on until the page is drawn).
     fn power_off(&mut self) {
         self.tx_led.set_high();
-        self.gps_power.set_low();
+        GPS_ON.signal(false);
     }
 
     async fn battery_mv(&mut self) -> u16 {
@@ -77,12 +76,12 @@ impl Board for TEcho {
         SCREEN.signal(view.clone());
     }
 
-    fn gps(&mut self) -> GpsInfo {
-        GpsInfo { on: self.gps_power.is_set_high(), fix: None, satellites: 0 }
+    fn has_gps(&self) -> bool {
+        true
     }
 
     fn set_gps(&mut self, on: bool) {
-        self.gps_power.set_level(if on { Level::High } else { Level::Low });
+        GPS_ON.signal(on);
     }
 }
 
@@ -111,10 +110,13 @@ pub fn system_off() -> ! {
         w.set_pin(21, true); // TCXO
     });
     pac::P1.outclr().write(|w| {
-        w.set_pin(2, true); // GPS
-        w.set_pin(5, true); // radio
+        w.set_pin(2, true); // GPS enable
+        w.set_pin(5, true); // GPS reset
         w.set_pin(11, true); // screen light
     });
+    for gps_uart in [8, 9] {
+        pac::P1.pin_cnf(gps_uart).write(|_| {}); // disconnected: nothing to feed the unpowered GPS
+    }
     pac::P1.pin_cnf(BUTTON_PIN).modify(|w| w.set_sense(pac::gpio::vals::Sense::Low));
     embassy_nrf::power::set_system_off();
     loop {

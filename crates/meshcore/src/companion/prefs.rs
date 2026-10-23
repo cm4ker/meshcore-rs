@@ -61,6 +61,10 @@ pub struct CompanionPrefs {
     pub wifi_ssid: String,
     pub wifi_pwd: String,
     pub wifi_enabled: bool,
+    /// The GPS receiver on (boards that have one); off by default, as upstream.
+    pub gps_enabled: bool,
+    /// Seconds between GPS position updates; 0 = every second.
+    pub gps_interval: u32,
 }
 
 impl Default for CompanionPrefs {
@@ -98,6 +102,8 @@ impl Default for CompanionPrefs {
             wifi_ssid: String::new(),
             wifi_pwd: String::new(),
             wifi_enabled: true,
+            gps_enabled: false,
+            gps_interval: 0,
         }
     }
 }
@@ -118,6 +124,7 @@ impl CompanionPrefs {
         self.autoadd_max_hops = self.autoadd_max_hops.min(64);
         self.node_name = truncate_str(&self.node_name, NAME_MAX);
         self.default_scope_name = truncate_str(&self.default_scope_name, SCOPE_NAME_MAX);
+        self.gps_interval = self.gps_interval.min(86_400);
     }
 
     pub fn is_repeat_enabled(&self) -> bool {
@@ -161,6 +168,8 @@ impl CompanionPrefs {
         let _ = writeln!(s, "wifi_ssid={}", escape(&self.wifi_ssid));
         let _ = writeln!(s, "wifi_pwd={}", escape(&self.wifi_pwd));
         let _ = writeln!(s, "wifi_enabled={}", b(self.wifi_enabled));
+        let _ = writeln!(s, "gps={}", b(self.gps_enabled));
+        let _ = writeln!(s, "gps_int={}", self.gps_interval);
         s
     }
 
@@ -212,6 +221,8 @@ impl CompanionPrefs {
                 "wifi_ssid" => p.wifi_ssid = unescape(v),
                 "wifi_pwd" => p.wifi_pwd = unescape(v),
                 "wifi_enabled" => p.wifi_enabled = flag(),
+                "gps" => p.gps_enabled = flag(),
+                "gps_int" => p.gps_interval = atoi(v),
                 _ => {}
             }
         }

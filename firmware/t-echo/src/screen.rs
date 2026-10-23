@@ -417,9 +417,16 @@ pub fn render(v: &View) -> Frame {
                 (false, _) => {
                     c.text(&BIG_BOLD, "Выключен", MARGIN, BODY_TOP + 2);
                 }
+                (true, None) if !g.receiving => {
+                    c.text(&BIG_BOLD, "Нет связи", MARGIN, BODY_TOP + 2);
+                    c.text(&TEXT, "Приемник молчит", MARGIN, BODY_TOP + 34);
+                }
                 (true, None) => {
                     c.text(&BIG_BOLD, "Ищет", MARGIN, BODY_TOP + 2);
-                    c.text(&TEXT, &format!("Спутников: {}", g.satellites), MARGIN, BODY_TOP + 34);
+                    c.text(&TEXT, &format!("Видно спутников: {}", g.in_view), MARGIN, BODY_TOP + 34);
+                    if g.in_view == 0 {
+                        c.text(&SMALL, "Нужно открытое небо", MARGIN, BODY_TOP + 60);
+                    }
                 }
                 (true, Some((lat, lon))) => {
                     c.text(&BIG, &micro_deg(lat), MARGIN, BODY_TOP + 2);

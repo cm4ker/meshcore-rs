@@ -511,7 +511,9 @@ impl Companion {
                 // our own telemetry
                 let mut f = alloc::vec![PUSH_CODE_TELEMETRY_RESPONSE, 0];
                 f.extend_from_slice(&ctx.self_id.pub_key()[..6]);
-                self.telemetry_lpp(&mut f);
+                self.lpp_voltage(&mut f);
+                self.lpp_temperature(&mut f);
+                self.lpp_sensors(&mut f, 0xFF);
                 self.write_frame(&f);
             }
             CMD_SEND_BINARY_REQ if len >= 2 + PUB_KEY_SIZE => match self.lookup_contact(&frame[1..33]) {
@@ -607,8 +609,35 @@ impl Companion {
                     self.write_err(ERR_CODE_ILLEGAL_ARG);
                 }
             }
-            CMD_GET_CUSTOM_VARS => self.write_frame(&[RESP_CODE_CUSTOM_VARS]), // no sensors
-            CMD_SET_CUSTOM_VAR if len >= 4 => self.write_err(ERR_CODE_ILLEGAL_ARG),
+            CMD_GET_CUSTOM_VARS => {
+                // the sensors' settings: only the GPS's
+                let mut f = alloc::vec![RESP_CODE_CUSTOM_VARS];
+                if self.board.has_gps {
+                    f.extend_from_slice(if self.prefs.gps_enabled { b"gps:1" } else { b"gps:0" });
+                }
+                self.write_frame(&f);
+            }
+            CMD_SET_CUSTOM_VAR if len >= 4 => {
+                let var = &frame[1..];
+                match var.iter().position(|&c| c == b':') {
+                    Some(sep) if self.board.has_gps => match (&var[..sep], &var[sep + 1..]) {
+                        (b"gps", value) => {
+                            self.prefs.gps_enabled = value.first() == Some(&b'1');
+                            self.effects.gps = true;
+                            self.effects.save_prefs = true;
+                            self.write_ok();
+                        }
+                        (b"gps_interval", value) => {
+                            let secs = core::str::from_utf8(value).map_or(0, crate::util::atoi);
+                            self.prefs.gps_interval = secs.min(86_400);
+                            self.effects.save_prefs = true;
+                            self.write_ok();
+                        }
+                        _ => self.write_err(ERR_CODE_ILLEGAL_ARG),
+                    },
+                    _ => self.write_err(ERR_CODE_ILLEGAL_ARG),
+                }
+            }
             CMD_GET_ADVERT_PATH if len >= PUB_KEY_SIZE + 2 => {
                 let key = &frame[2..];
                 match self.advert_paths.iter().find(|p| key.starts_with(&p.pubkey_prefix)) {
