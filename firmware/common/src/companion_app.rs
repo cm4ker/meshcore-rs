@@ -33,7 +33,7 @@ use meshcore::util::to_hex;
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE};
 
 use crate::ble::{self, BLE_CONNECTED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
-use crate::frames::{self, FRAMES_IN, TCP_CONNECTED, TCP_OUT};
+use crate::frames::{self, FRAMES_IN, Link, TCP_CONNECTED, TCP_OUT};
 use crate::noise::NoiseFloor;
 use crate::ota::{self, SharedStore};
 use crate::radio::{LoraRadio, RxEvent};
@@ -272,7 +272,11 @@ pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, mut 
     let mut wifi = Some(wifi);
     if mesh.app.prefs.wifi_enabled && !mesh.app.prefs.wifi_ssid.is_empty() {
         let seed = (Rng::new().random() as u64) << 32 | Rng::new().random() as u64;
-        let params = net::StationParams { ssid: mesh.app.prefs.wifi_ssid.clone(), password: mesh.app.prefs.wifi_pwd.clone() };
+        let params = net::StationParams {
+            ssid: mesh.app.prefs.wifi_ssid.clone(),
+            password: mesh.app.prefs.wifi_pwd.clone(),
+            power_save: false, // the app connects in
+        };
         match net::start(&spawner, wifi.take().unwrap(), seed, params) {
             Ok(stack) => {
                 station = Some(stack);
@@ -282,8 +286,10 @@ pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, mut 
         }
     }
 
-    // ---- BLE, unless Wi-Fi carries the app (both at once would need radio coexistence)
-    let ble_on = station.is_none();
+    // ---- BLE, next to Wi-Fi only where esp-radio coordinates the two radios (`coex`). On the C6
+    // its BLE side is still stubbed out (esp-radio 1.0.0-beta.1): Wi-Fi starves while an app is
+    // connected over BLE, so there Wi-Fi (TCP) replaces BLE as upstream's builds do.
+    let ble_on = station.is_none() || cfg!(feature = "esp32s3");
     if ble_on {
         let params = ble::Params {
             name: alloc::format!("MeshCore-{}", mesh.app.prefs.node_name),
@@ -301,7 +307,11 @@ pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, mut 
 
     // ---- USB: from here on the port carries companion frames only
     spawner.spawn(frames::usb_rx_task(usb_rx).unwrap());
-    println!("Ready: companion frames on USB and {}", if station.is_some() { "TCP 5000" } else { "BLE" });
+    println!(
+        "Ready: companion frames on USB{}{}",
+        if ble_on { ", BLE" } else { "" },
+        if station.is_some() { ", TCP 5000" } else { "" }
+    );
     log::set_max_level(log::LevelFilter::Off);
 
     let id_prefix = alloc::format!("ID {}", to_hex(&self_id.pub_key()[..4]));
@@ -315,6 +325,8 @@ pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, mut 
     let confirm_at = now_ms() + TRIAL_HEALTHY_MS;
     let mut button_down_at: Option<u64> = None;
     let mut screen_until = now_ms() + SCREEN_ON_MS;
+    // where replies go: the link of the latest request
+    let mut reply_to = Link::Usb;
     let mut next_screen = 0u64;
     loop {
         reset::feed();
@@ -352,7 +364,8 @@ pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, mut 
                 Ok(RxEvent::CrcError) => mesh.ctx.stats.n_recv_errors += 1,
                 _ => {}
             },
-            Either3::Second(frame) => {
+            Either3::Second((link, frame)) => {
+                reply_to = link;
                 mesh.ctx.now = now_ms();
                 mesh.app.handle_frame(&mut mesh.ctx, &frame);
                 screen_until = screen_until.max(now_ms() + 10_000);
@@ -371,11 +384,16 @@ pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, mut 
             && (!tcp || TCP_OUT.free_capacity() > 0)
             && let Some(f) = mesh.app.take_frame()
         {
-            frames::usb_write(&f);
-            if ble_app {
+            // pushes (codes from 0x80) go to every app; replies (and a contact list in progress)
+            // to the link of the latest request, so two apps do not see each other's answers
+            let push = f.first().is_some_and(|c| *c >= 0x80);
+            if push || reply_to == Link::Usb {
+                frames::usb_write(&f);
+            }
+            if ble_app && (push || reply_to == Link::Ble) {
                 let _ = BLE_OUT.try_send(f.clone());
             }
-            if tcp {
+            if tcp && (push || reply_to == Link::Tcp) {
                 let _ = TCP_OUT.try_send(f);
             }
         }
@@ -433,10 +451,13 @@ pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, mut 
                 Some(String::from("OTA trial boot"))
             } else if waiting > 0 {
                 Some(alloc::format!("{waiting} new message(s)"))
+            } else if ble_app {
+                Some(String::from("BLE: app connected"))
             } else {
-                station.and_then(|s| net::ipv4(&s)).map(|ip| alloc::format!("{ip}:{TCP_PORT}")).or_else(|| {
-                    ble_on.then(|| String::from(if ble_app { "BLE: app connected" } else { "BLE: waiting for app" }))
-                })
+                station
+                    .and_then(|s| net::ipv4(&s))
+                    .map(|ip| alloc::format!("{ip}:{TCP_PORT}"))
+                    .or_else(|| ble_on.then(|| String::from("BLE: waiting for app")))
             };
             let s = &mesh.ctx.stats;
             board.show_status(&Status {

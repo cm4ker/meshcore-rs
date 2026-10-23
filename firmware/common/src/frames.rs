@@ -9,13 +9,21 @@ use embassy_net::Stack;
 use embassy_net::tcp::TcpSocket;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Timer, with_timeout};
 use esp_hal::Blocking;
 use esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx;
 use meshcore::companion::MAX_FRAME_SIZE;
 
+/// The transport a command frame came in on (its replies go back there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    Usb,
+    Ble,
+    Tcp,
+}
+
 /// Command frames from any transport, for the main loop.
-pub static FRAMES_IN: Channel<CriticalSectionRawMutex, Vec<u8>, 8> = Channel::new();
+pub static FRAMES_IN: Channel<CriticalSectionRawMutex, (Link, Vec<u8>), 8> = Channel::new();
 /// Frames for the TCP client.
 pub static TCP_OUT: Channel<CriticalSectionRawMutex, Vec<u8>, 32> = Channel::new();
 pub static TCP_CONNECTED: AtomicBool = AtomicBool::new(false);
@@ -86,7 +94,7 @@ pub async fn usb_rx_task(mut rx: UsbSerialJtagRx<'static, Blocking>) {
         }
         for &c in &buf[..n] {
             if let Some(f) = parser.push(c) {
-                FRAMES_IN.send(f).await;
+                FRAMES_IN.send((Link::Usb, f)).await;
             }
         }
     }
@@ -100,7 +108,10 @@ pub async fn tcp_server_task(stack: Stack<'static>, port: u16) {
     loop {
         stack.wait_config_up().await;
         let mut socket = TcpSocket::new(stack, &mut rx_buf, &mut tx_buf);
-        socket.set_timeout(Some(Duration::from_secs(600)));
+        // keep-alives let a vanished client (its FIN lost, e.g. on a flaky Wi-Fi) time out in a
+        // minute instead of keeping the only listening socket busy
+        socket.set_timeout(Some(Duration::from_secs(60)));
+        socket.set_keep_alive(Some(Duration::from_secs(15)));
         if socket.accept(port).await.is_err() {
             Timer::after_secs(1).await;
             continue;
@@ -114,7 +125,7 @@ pub async fn tcp_server_task(stack: Stack<'static>, port: u16) {
                 Either::First(Ok(n)) if n > 0 => {
                     for &c in &buf[..n] {
                         if let Some(f) = parser.push(c) {
-                            FRAMES_IN.send(f).await;
+                            FRAMES_IN.send((Link::Tcp, f)).await;
                         }
                     }
                 }
@@ -127,7 +138,11 @@ pub async fn tcp_server_task(stack: Stack<'static>, port: u16) {
             }
         }
         TCP_CONNECTED.store(false, Ordering::Relaxed);
+        // a vanished client never acknowledges: flushing without a limit kept the port closed for
+        // the socket timeout (10 minutes)
         socket.close();
-        let _ = socket.flush().await;
+        let _ = with_timeout(Duration::from_secs(2), socket.flush()).await;
+        socket.abort();
+        let _ = with_timeout(Duration::from_millis(500), socket.flush()).await;
     }
 }

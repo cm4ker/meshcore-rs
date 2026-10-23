@@ -81,6 +81,9 @@ impl BrokerState {
 pub struct StationParams {
     pub ssid: String,
     pub password: String,
+    /// Modem sleep between beacons (the ESP-IDF station default). Off where clients connect in:
+    /// with it the XIAO C6 missed ARP requests and could not be reached at all.
+    pub power_save: bool,
 }
 
 /// Bring up the station; returns the network stack (for LAN updates).
@@ -102,16 +105,16 @@ pub fn start(spawner: &Spawner, wifi: WIFI<'static>, seed: u64, params: StationP
         RESOURCES.init(StackResources::new()),
         seed,
     );
-    spawner.spawn(station_task(controller).map_err(|_| "task busy")?);
+    spawner.spawn(station_task(controller, params.power_save).map_err(|_| "task busy")?);
     spawner.spawn(net_task(runner).map_err(|_| "task busy")?);
     spawner.spawn(sntp_task(stack).map_err(|_| "task busy")?);
     Ok(stack)
 }
 
 #[embassy_executor::task]
-async fn station_task(mut controller: WifiController<'static>) {
-    // modem sleep between beacons, the ESP-IDF station default (esp-radio keeps the radio on)
-    if let Err(e) = controller.set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum) {
+async fn station_task(mut controller: WifiController<'static>, power_save: bool) {
+    // esp-radio keeps the radio on unless told otherwise
+    if power_save && let Err(e) = controller.set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum) {
         log::warn!("Wi-Fi: power saving not set: {e:?}");
     }
     loop {

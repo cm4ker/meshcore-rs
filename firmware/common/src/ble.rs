@@ -24,7 +24,7 @@ use meshcore::companion::MAX_FRAME_SIZE;
 use meshcore::ota::REQ_TYPE_OTA_BEGIN;
 use trouble_host::prelude::*;
 
-use crate::frames::FRAMES_IN;
+use crate::frames::{FRAMES_IN, Link};
 
 /// An app is connected (and its link is authenticated).
 pub static BLE_CONNECTED: AtomicBool = AtomicBool::new(false);
@@ -320,7 +320,7 @@ async fn events(server: &Server<'_>, conn: &GattConnection<'_, '_, DefaultPacket
                     if !frame.is_empty() {
                         // wait for room: the write is acknowledged only once the frame is queued,
                         // which paces a fast sender (firmware upload) to the main loop
-                        FRAMES_IN.send(frame).await;
+                        FRAMES_IN.send((Link::Ble, frame)).await;
                     }
                 }
                 if let Ok(reply) = event.accept() {

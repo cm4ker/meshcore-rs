@@ -489,7 +489,11 @@ async fn main(spawner: Spawner) -> ! {
     let mut station: Option<embassy_net::Stack<'static>> = None;
     if !mesh.app.prefs.wifi_ssid.is_empty() {
         let seed = (Rng::new().random() as u64) << 32 | Rng::new().random() as u64;
-        let params = net::StationParams { ssid: mesh.app.prefs.wifi_ssid.clone(), password: mesh.app.prefs.wifi_pwd.clone() };
+        let params = net::StationParams {
+            ssid: mesh.app.prefs.wifi_ssid.clone(),
+            password: mesh.app.prefs.wifi_pwd.clone(),
+            power_save: true,
+        };
         info!("boot: Wi-Fi station");
         wdt.feed();
         match net::start(&spawner, wifi.take().unwrap(), seed, params) {
@@ -723,7 +727,7 @@ async fn main(spawner: Spawner) -> ! {
             }
             Either4::Third(()) => {}
             // firmware update over BLE (`start ota ble`)
-            Either4::Fourth(frame) => {
+            Either4::Fourth((_, frame)) => {
                 if let Some(reply) = mesh.app.handle_link_frame(&frame) {
                     let _ = BLE_OUT.try_send(reply);
                 }
