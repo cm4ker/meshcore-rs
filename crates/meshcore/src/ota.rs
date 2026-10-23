@@ -1,11 +1,12 @@
 //! Firmware update session, independent of the transport (LoRa admin requests, the companion app
 //! link over BLE/USB/TCP, Wi-Fi upload).
 //!
-//! The image is received in fixed-size chunks, in any order, into the inactive app slot.
-//! Sectors are erased lazily before their first write, so no long blocking erase is needed.
-//! `commit` reads the whole image back and checks the ESP image header, the SHA-256 the build
-//! tool appends to the image, and (when the sender supplied one) the expected SHA-256; only then
-//! it asks the platform to boot it (on trial: the firmware rolls back if it never gets healthy).
+//! The image is received in fixed-size chunks, in any order, into the inactive app slot (on
+//! chips with a single slot, a staging area the platform installs from). Sectors are erased
+//! lazily before their first write, so no long blocking erase is needed. `commit` reads the whole
+//! image back and checks it (see [`ImageFormat`]: the ESP image header and the SHA-256 the build
+//! tool appends, or this firmware's trailer of an nRF52 image) and, when the sender supplied one,
+//! the expected SHA-256; only then it asks the platform to boot it.
 //!
 //! Transfers can be zlib-compressed, and over LoRa also a delta: a zlib-compressed bsdiff patch
 //! (format of the `bsdiff` crate) against the running firmware, which turns a typical update
@@ -28,15 +29,33 @@ const ESP_IMAGE_MAGIC: u8 = 0xE9;
 pub const ESP_CHIP_ID_ESP32S3: u16 = 0x0009;
 pub const ESP_CHIP_ID_ESP32C6: u16 = 0x000D;
 
+/// The trailer of an nRF52 image ([`ImageFormat::Nrf`]), 64 bytes after the application's flash
+/// contents: `[magic 8][app length u32][load address u32][chip u32][reserved 12][SHA-256 of the
+/// app 32]`. It is flashed with the app, so the running firmware finds its own image by it.
+pub const NRF_TRAILER_MAGIC: &[u8; 8] = b"MCRS-NRF";
+pub const NRF_TRAILER_LEN: u32 = 64;
+pub const NRF_CHIP_NRF52840: u32 = 0x52840;
+
+/// What a target's images look like.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFormat {
+    /// An ESP-IDF app image (header, segments, appended SHA-256) for this chip (`ESP_CHIP_ID_*`).
+    Esp(u16),
+    /// The flash contents of an nRF52 application from `load` on, then the trailer.
+    Nrf { chip: u32, load: u32 },
+}
+
 // Update requests: the first byte of a LoRa admin request, or the command byte of a companion
 // app frame (the reply frame starts with the same byte). The layout is the same for both.
 
 /// `[size u32][sha256 32][chunk_size u16]` (+ `[flags u8][raw_size u32]`, flags bit0 = zlib:
 /// `size` is then the compressed size and `sha256` the hash of the inflated image;
 /// + `[base_len u32][base_sha256 32]` with flags bit1 = delta: the zlib stream is a bsdiff patch
-///   against that prefix of the running firmware) -> `[status][total_chunks u16]`
+///   against that prefix of the running firmware; flags bit2 = every DATA request ends with a
+///   CRC-32 of its index and data, for links that can corrupt frames) -> `[status][total_chunks u16]`
 pub const REQ_TYPE_OTA_BEGIN: u8 = 0xF0;
-/// `[index u16][data]` -> no response (saves airtime; progress is polled with STATUS)
+/// `[index u16][data]` (+ `[crc32 u32]`, see BEGIN) -> no response (saves airtime; progress is
+/// polled with STATUS)
 pub const REQ_TYPE_OTA_DATA: u8 = 0xF1;
 /// `[from u16]` -> `[status][received u16][total u16][n][missing u16 x n]`
 pub const REQ_TYPE_OTA_STATUS: u8 = 0xF2;
@@ -57,8 +76,9 @@ pub trait FirmwareTarget {
     /// Write at a 4-byte aligned offset.
     fn write(&mut self, offset: u32, data: &[u8]) -> bool;
     fn read(&mut self, offset: u32, buf: &mut [u8]) -> bool;
-    /// Select this slot for the next boot, on trial.
-    fn activate(&mut self) -> bool;
+    /// Select the verified `size`-byte image for the next boot (on trial, where the platform can
+    /// roll back).
+    fn activate(&mut self, size: u32) -> bool;
     /// Size of the running firmware's slot (the base of delta updates); 0 if it can't be read.
     fn running_capacity(&self) -> u32 {
         0
@@ -66,9 +86,12 @@ pub trait FirmwareTarget {
     fn read_running(&mut self, _offset: u32, _buf: &mut [u8]) -> bool {
         false
     }
-    /// Chip id an image must carry in its header (see `ESP_CHIP_ID_*`).
+    /// Chip id an ESP image must carry in its header (see `ESP_CHIP_ID_*`).
     fn chip_id(&self) -> u16 {
         ESP_CHIP_ID_ESP32S3
+    }
+    fn format(&self) -> ImageFormat {
+        ImageFormat::Esp(self.chip_id())
     }
 }
 
@@ -101,6 +124,19 @@ pub struct OtaSession {
     received: Vec<u8>,
     received_count: u32,
     erased: Vec<u8>,
+    /// DATA requests carry a CRC-32 (BEGIN flags bit2).
+    crc_chunks: bool,
+}
+
+/// CRC-32 (IEEE 802.3, as zlib's `crc32`).
+fn crc32(data: &[u8]) -> u32 {
+    !data.iter().fold(!0u32, |mut c, &b| {
+        c ^= b as u32;
+        for _ in 0..8 {
+            c = (c >> 1) ^ (0xEDB8_8320 & (c & 1).wrapping_neg());
+        }
+        c
+    })
 }
 
 fn bit(v: &[u8], i: usize) -> bool {
@@ -192,6 +228,7 @@ impl OtaSession {
             received: vec![0; chunks.div_ceil(8)],
             received_count: 0,
             erased: vec![0; sectors.div_ceil(8)],
+            crc_chunks: false,
         })
     }
 
@@ -294,7 +331,7 @@ impl OtaSession {
             (None, _) => self.size,
         };
         verify_image(target, image_size, self.sha256)?;
-        if !target.activate() {
+        if !target.activate(image_size) {
             return Err(OtaError::FlashError);
         }
         Ok(())
@@ -522,7 +559,8 @@ impl OtaEndpoint {
                     (Some(t), Some(sha)) if flags & 1 != 0 => OtaSession::begin_compressed(t, size, raw_size, Some(sha), chunk),
                     (Some(t), Some(sha)) => OtaSession::begin(t, size, Some(sha), chunk),
                 }
-                .map(|s| {
+                .map(|mut s| {
+                    s.crc_chunks = flags & 4 != 0;
                     self.session = Some(s);
                 });
                 let total = self.session.as_ref().map_or(0, |s| s.total_chunks() as u16);
@@ -538,7 +576,12 @@ impl OtaEndpoint {
                     let index = index as u32;
                     let chunk = session.chunk_size();
                     let len = session.size().saturating_sub(index * chunk).min(chunk) as usize;
-                    if let Some(data) = payload.get(3..3 + len) {
+                    // a corrupted request is dropped: the chunk stays missing and is sent again
+                    let intact = !session.crc_chunks
+                        || payload.get(3 + len..3 + len + 4).is_some_and(|c| {
+                            u32::from_le_bytes(c.try_into().unwrap()) == crc32(&payload[1..3 + len])
+                        });
+                    if let Some(data) = payload.get(3..3 + len).filter(|_| intact) {
                         let _ = session.write_chunk(target, index, data);
                     }
                 }
@@ -609,9 +652,18 @@ fn running_hash(target: &mut dyn FirmwareTarget, len: u32) -> Result<[u8; 32], O
     Ok(h.finalize().into())
 }
 
-/// Length of the ESP image at the start of the running slot (segments, checksum block and the
-/// appended hash) and its SHA-256: what a delta for this device must be made against.
+/// Length of the image at the start of the running slot and its SHA-256: what a delta for this
+/// device must be made against.
 pub fn running_image(target: &mut dyn FirmwareTarget) -> Option<(u32, [u8; 32])> {
+    let len = match target.format() {
+        ImageFormat::Esp(_) => running_esp_len(target)?,
+        ImageFormat::Nrf { chip, load } => find_nrf_trailer(target, chip, load)? + NRF_TRAILER_LEN,
+    };
+    Some((len, running_hash(target, len).ok()?))
+}
+
+/// An ESP image: its segments, the checksum block and the appended hash.
+fn running_esp_len(target: &mut dyn FirmwareTarget) -> Option<u32> {
     let cap = target.running_capacity();
     let mut header = [0u8; 24];
     if cap < 24 || !target.read_running(0, &mut header) || header[0] != ESP_IMAGE_MAGIC {
@@ -630,10 +682,47 @@ pub fn running_image(target: &mut dyn FirmwareTarget) -> Option<(u32, [u8; 32])>
     }
     // the checksum byte ends a 16-byte aligned block, then comes the optional SHA-256
     let len = (offset / 16 + 1) * 16 + if header[23] == 1 { 32 } else { 0 };
-    if len > cap {
-        return None;
+    (len <= cap).then_some(len)
+}
+
+fn read_u32_le(b: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
+}
+
+/// The trailer of an image whose app is `app_len` bytes long, for this chip and load address.
+fn nrf_trailer_ok(t: &[u8], app_len: u32, chip: u32, load: u32) -> bool {
+    t.len() >= NRF_TRAILER_LEN as usize
+        && &t[..8] == NRF_TRAILER_MAGIC
+        && read_u32_le(t, 8) == app_len
+        && read_u32_le(t, 12) == load
+        && read_u32_le(t, 16) == chip
+}
+
+/// Offset of the running image's trailer: the first 4-byte aligned place holding a trailer that
+/// names its own offset as the app length (the magic alone also turns up in the firmware's data).
+fn find_nrf_trailer(target: &mut dyn FirmwareTarget, chip: u32, load: u32) -> Option<u32> {
+    const STEP: u32 = 1024;
+    let cap = target.running_capacity();
+    let mut window = [0u8; STEP as usize + 8];
+    let mut base = 0u32;
+    while base + NRF_TRAILER_LEN <= cap {
+        // 8 bytes of overlap: a magic across the step is found in this window
+        let n = (cap - base).min(STEP + 8) as usize;
+        if !target.read_running(base, &mut window[..n]) {
+            return None;
+        }
+        for i in (0..n.saturating_sub(7)).step_by(4).take_while(|&i| i < STEP as usize) {
+            if &window[i..i + 8] == NRF_TRAILER_MAGIC {
+                let at = base + i as u32;
+                let mut t = [0u8; NRF_TRAILER_LEN as usize];
+                if at + NRF_TRAILER_LEN <= cap && target.read_running(at, &mut t) && nrf_trailer_ok(&t, at, chip, load) {
+                    return Some(at);
+                }
+            }
+        }
+        base += STEP;
     }
-    Some((len, running_hash(target, len).ok()?))
+    None
 }
 
 /// Inflate the zlib stream at `[src, src + len)` of the slot into `sink`.
@@ -688,8 +777,60 @@ fn inflate(target: &mut dyn FirmwareTarget, src: u32, len: u32, sink: &mut dyn S
     sink.finish(target)
 }
 
-/// Check the ESP image header, its appended SHA-256 and the expected hash of the whole image.
+/// Check the image (its own hash) and the expected hash of the whole image.
 fn verify_image(target: &mut dyn FirmwareTarget, size: u32, expected: Option<[u8; 32]>) -> Result<(), OtaError> {
+    match target.format() {
+        ImageFormat::Esp(chip) => verify_esp(target, size, expected, chip),
+        ImageFormat::Nrf { chip, load } => verify_nrf(target, size, expected, chip, load),
+    }
+}
+
+/// An nRF52 image: the trailer, the app's hash in it, and that it fits the app's flash.
+fn verify_nrf(
+    target: &mut dyn FirmwareTarget, size: u32, expected: Option<[u8; 32]>, chip: u32, load: u32,
+) -> Result<(), OtaError> {
+    let max = target.running_capacity();
+    if max != 0 && size > max {
+        return Err(OtaError::TooLarge);
+    }
+    let Some(app_len) = size.checked_sub(NRF_TRAILER_LEN) else {
+        return Err(OtaError::BadImage);
+    };
+    let mut trailer = [0u8; NRF_TRAILER_LEN as usize];
+    if !target.read(app_len, &mut trailer) {
+        return Err(OtaError::FlashError);
+    }
+    if !nrf_trailer_ok(&trailer, app_len, chip, load) {
+        return Err(OtaError::BadImage);
+    }
+    let mut whole = Sha256::new();
+    let mut app = Sha256::new();
+    let mut buf = [0u8; 1024];
+    let mut offset = 0u32;
+    while offset < size {
+        let n = ((size - offset) as usize).min(buf.len());
+        if !target.read(offset, &mut buf[..n]) {
+            return Err(OtaError::FlashError);
+        }
+        whole.update(&buf[..n]);
+        if offset < app_len {
+            app.update(&buf[..(app_len.min(offset + n as u32) - offset) as usize]);
+        }
+        offset += n as u32;
+    }
+    if app.finalize()[..] != trailer[32..] {
+        return Err(OtaError::HashMismatch);
+    }
+    match expected {
+        Some(e) if whole.finalize()[..] != e => Err(OtaError::HashMismatch),
+        _ => Ok(()),
+    }
+}
+
+/// The ESP image header, its appended SHA-256 and the expected hash of the whole image.
+fn verify_esp(
+    target: &mut dyn FirmwareTarget, size: u32, expected: Option<[u8; 32]>, chip_id: u16,
+) -> Result<(), OtaError> {
     // whole-image hash, and the hash of everything but the last 32 bytes (the appended one)
     let body_len = size - 32;
     let mut whole = Sha256::new();
@@ -719,7 +860,7 @@ fn verify_image(target: &mut dyn FirmwareTarget, size: u32, expected: Option<[u8
         offset = end;
     }
     let chip = u16::from_le_bytes([header[12], header[13]]);
-    if header[0] != ESP_IMAGE_MAGIC || chip != target.chip_id() {
+    if header[0] != ESP_IMAGE_MAGIC || chip != chip_id {
         return Err(OtaError::BadImage);
     }
     let hash_appended = header[23] == 1;
@@ -743,6 +884,13 @@ mod tests {
         activated: bool,
         /// The running slot (base of delta updates).
         running: Vec<u8>,
+        format: ImageFormat,
+    }
+
+    impl RamTarget {
+        fn new(size: usize, fill: u8, running: Vec<u8>) -> Self {
+            Self { mem: vec![fill; size], erases: 0, activated: false, running, format: ImageFormat::Esp(9) }
+        }
     }
 
     impl FirmwareTarget for RamTarget {
@@ -768,9 +916,12 @@ mod tests {
             buf.copy_from_slice(&self.mem[offset as usize..offset as usize + buf.len()]);
             true
         }
-        fn activate(&mut self) -> bool {
+        fn activate(&mut self, _size: u32) -> bool {
             self.activated = true;
             true
+        }
+        fn format(&self) -> ImageFormat {
+            self.format
         }
         fn running_capacity(&self) -> u32 {
             self.running.len() as u32
@@ -779,6 +930,90 @@ mod tests {
             buf.copy_from_slice(&self.running[offset as usize..offset as usize + buf.len()]);
             true
         }
+    }
+
+    #[test]
+    fn corrupted_chunks_are_dropped_when_they_carry_a_crc() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        let img = image(1000);
+        let sha: [u8; 32] = Sha256::digest(&img).into();
+        let mut ep = OtaEndpoint { target: Some(Box::new(RamTarget::new(8192, 0, Vec::new()))), ..Default::default() };
+        let mut begin = vec![REQ_TYPE_OTA_BEGIN];
+        begin.extend_from_slice(&1000u32.to_le_bytes());
+        begin.extend_from_slice(&sha);
+        begin.extend_from_slice(&168u16.to_le_bytes());
+        begin.push(4); // CRCs, not compressed
+        assert_eq!(ep.handle(&begin, "v").0.unwrap()[0], 0);
+        let data = |i: u16, flip: bool| {
+            let mut f = vec![REQ_TYPE_OTA_DATA];
+            f.extend_from_slice(&i.to_le_bytes());
+            f.extend_from_slice(&img[i as usize * 168..((i as usize + 1) * 168).min(1000)]);
+            let crc = crc32(&f[1..]);
+            if flip {
+                f[10] ^= 0x40;
+            }
+            f.extend_from_slice(&crc.to_le_bytes());
+            f
+        };
+        for i in 0..6 {
+            ep.handle(&data(i, i == 2), "v");
+        }
+        let status = ep.handle(&[REQ_TYPE_OTA_STATUS, 0, 0], "v").0.unwrap();
+        assert_eq!(&status[..8], &[0, 5, 0, 6, 0, 1, 2, 0], "chunk 2 is missing");
+        ep.handle(&data(2, false), "v");
+        assert_eq!(ep.handle(&[REQ_TYPE_OTA_COMMIT], "v").0.unwrap()[0], 0);
+    }
+
+    /// Fake nRF52840 image: app bytes, then the trailer, like tools/uf2/elf2uf2.py writes it.
+    fn nrf_image(app: &[u8]) -> Vec<u8> {
+        let mut img = app.to_vec();
+        img.extend_from_slice(NRF_TRAILER_MAGIC);
+        img.extend_from_slice(&(app.len() as u32).to_le_bytes());
+        img.extend_from_slice(&0x26000u32.to_le_bytes());
+        img.extend_from_slice(&NRF_CHIP_NRF52840.to_le_bytes());
+        img.extend_from_slice(&[0; 12]);
+        img.extend_from_slice(&Sha256::digest(app));
+        img
+    }
+
+    #[test]
+    fn nrf_images_and_the_running_one() {
+        let nrf = ImageFormat::Nrf { chip: NRF_CHIP_NRF52840, load: 0x26000 };
+        // the app's own data holds the magic too: it must not pass for the trailer
+        let mut app: Vec<u8> = (0..30_000u32).map(|i| (i * 13 % 251) as u8).collect();
+        app[4096..4104].copy_from_slice(NRF_TRAILER_MAGIC);
+        let img = nrf_image(&app);
+        let mut running = img.clone();
+        running.extend_from_slice(&nrf_image(&[7; 2000])); // stale bytes of an older, longer build
+        running.resize(64 * 1024, 0xFF);
+        let mut t = RamTarget::new(64 * 1024, 0x55, running);
+        t.format = nrf;
+        assert_eq!(running_image(&mut t), Some((img.len() as u32, Sha256::digest(&img).into())));
+
+        let upload = |t: &mut RamTarget, img: &[u8]| {
+            let sha: [u8; 32] = Sha256::digest(img).into();
+            let mut s = OtaSession::begin(t, img.len() as u32, Some(sha), 1024)?;
+            for (i, c) in img.chunks(1024).enumerate() {
+                s.write_chunk(t, i as u32, c)?;
+            }
+            s.commit(t)
+        };
+        let mut corrupt = img.clone();
+        corrupt[100] ^= 1;
+        assert_eq!(upload(&mut t, &corrupt), Err(OtaError::HashMismatch));
+        let mut other_chip = img.clone();
+        other_chip[app.len() + 16] = 0x32;
+        assert_eq!(upload(&mut t, &other_chip), Err(OtaError::BadImage));
+        assert_eq!(upload(&mut t, &image(5000)), Err(OtaError::BadImage), "an ESP image");
+        assert!(!t.activated);
+        assert_eq!(upload(&mut t, &img), Ok(()));
+        assert!(t.activated);
+        // bigger than the app's flash (the running slot)
+        let big = nrf_image(&vec![1; 70 * 1024]);
+        let mut t = RamTarget::new(128 * 1024, 0x55, vec![0xFF; 64 * 1024]);
+        t.format = nrf;
+        assert_eq!(upload(&mut t, &big), Err(OtaError::TooLarge));
+        assert_eq!(running_image(&mut t), None, "no trailer: flashed some other way");
     }
 
     /// Fake ESP32-S3 image with the SHA-256 appended, like espflash produces.
@@ -796,7 +1031,7 @@ mod tests {
     fn out_of_order_with_duplicates_and_resume() {
         let img = image(10_001);
         let sha: [u8; 32] = Sha256::digest(&img).into();
-        let mut t = RamTarget { mem: vec![0x55; 64 * 1024], erases: 0, activated: false, running: Vec::new() };
+        let mut t = RamTarget::new(64 * 1024, 0x55, Vec::new());
         let mut s = OtaSession::begin(&t, img.len() as u32, Some(sha), LORA_CHUNK_SIZE).unwrap();
         let n = s.total_chunks();
         let chunk = |i: u32| {
@@ -823,7 +1058,7 @@ mod tests {
     #[test]
     fn rejects_bad_hash_bad_image_and_bad_chunks() {
         let img = image(1000);
-        let mut t = RamTarget { mem: vec![0; 8192], erases: 0, activated: false, running: Vec::new() };
+        let mut t = RamTarget::new(8192, 0, Vec::new());
         let mut s = OtaSession::begin(&t, 1000, Some([0; 32]), 152).unwrap();
         assert_eq!(s.write_chunk(&mut t, 0, &img[..100]), Err(OtaError::BadParams));
         assert_eq!(s.write_chunk(&mut t, 99, &img[..152]), Err(OtaError::BadParams));
@@ -853,7 +1088,7 @@ mod tests {
         let packed = miniz_oxide::deflate::compress_to_vec_zlib(&img, 9);
         assert!(packed.len() < img.len());
         let sha: [u8; 32] = Sha256::digest(&img).into();
-        let mut t = RamTarget { mem: vec![0x55; 128 * 1024], erases: 0, activated: false, running: Vec::new() };
+        let mut t = RamTarget::new(128 * 1024, 0x55, Vec::new());
         let mut s = OtaSession::begin_compressed(&t, packed.len() as u32, img.len() as u32, Some(sha), 152).unwrap();
         for i in (0..s.total_chunks()).rev() {
             let a = (i * 152) as usize;
@@ -882,7 +1117,7 @@ mod tests {
     #[test]
     fn embedded_hash_only() {
         let img = image(5000);
-        let mut t = RamTarget { mem: vec![0; 8192], erases: 0, activated: false, running: Vec::new() };
+        let mut t = RamTarget::new(8192, 0, Vec::new());
         let upload = |t: &mut RamTarget, img: &[u8]| {
             let mut s = OtaSession::begin(t, img.len() as u32, None, 1024).unwrap();
             for (i, c) in img.chunks(1024).enumerate() {
@@ -940,7 +1175,7 @@ mod tests {
 
         let mut running = old.clone();
         running.resize(128 * 1024, 0xFF); // the rest of the slot
-        let mut t = RamTarget { mem: vec![0x55; 256 * 1024], erases: 0, activated: false, running };
+        let mut t = RamTarget::new(256 * 1024, 0x55, running);
         let (base_len, base_sha) = running_image(&mut t).unwrap();
         assert_eq!(base_len as usize, old.len());
         assert_eq!(base_sha, <[u8; 32]>::from(Sha256::digest(&old)));

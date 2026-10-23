@@ -6,6 +6,7 @@ same as the LoRa update of a repeater), so no LoRa airtime is used.
 
     pip install meshcore            # pulls in bleak and pyserial
     espflash save-image --chip esp32c6 --flash-size 4mb <elf> firmware.bin
+    python tools/uf2/elf2uf2.py <elf> firmware.uf2 --bin firmware.bin   # T-Echo
     python ota_app.py --port COM4 firmware.bin
     python ota_app.py --ble D8:E6:C5:14:21:A8 firmware.bin   # paired first: Windows Settings >
                                                              # Bluetooth > Add device, enter the PIN
@@ -33,8 +34,10 @@ from meshcore_ota import DEFAULT_DELTA_TOOL, ERRORS, REPO, find_base, log, make_
 
 OTA_BEGIN, OTA_DATA, OTA_STATUS, OTA_COMMIT, OTA_ABORT, OTA_INFO = range(0xF0, 0xF6)
 CMD_DEVICE_QUERY, RESP_DEVICE_INFO = 22, 13
-# 176-byte frames: command + chunk index + data, a multiple of 4 for flash writes
-CHUNK = 172
+# up to 176-byte frames: command + chunk index + data (a multiple of 4, for flash writes) + the
+# CRC-32 of index and data, so a frame the link mangled is dropped and sent again
+CHUNK = 168
+FLAG_ZLIB, FLAG_DELTA, FLAG_CRC = 1, 2, 4
 NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 
@@ -113,6 +116,10 @@ class SerialLink(StreamLink):
         # as the meshcore library does: DTR on, RTS off (RTS alone resets an ESP32 on USB-Serial-JTAG)
         writer.transport.serial.dtr = True
         writer.transport.serial.rts = False
+        # writes that wait until they are done: the transport's non-blocking ones on Windows reuse
+        # one OVERLAPPED, so a write issued while the device is busy (erasing flash) and not taking
+        # data cuts the end off the one still pending
+        writer.transport.serial.write_timeout = 10
         await asyncio.sleep(0.2)
         return cls(reader, writer)
 
@@ -200,8 +207,11 @@ async def main():
         model = dev[19:59].split(b"\0")[0].decode(errors="replace")
         version = dev[59:79].split(b"\0")[0].decode(errors="replace")
         log(f"device: {model}, firmware {version}")
-        board = "xiao-c6" if "Xiao" in model else "heltec-v4"
+        board = "xiao-c6" if "Xiao" in model else "t-echo" if "T-Echo" in model else "heltec-v4"
         images = args.images or REPO / "firmware" / board / "images"
+        # the ESP boards keep the previous firmware and fall back to it; the T-Echo has room for one
+        after = ("it installs the image and restarts" if board == "t-echo"
+                 else "on trial until it has run healthy for 2 minutes")
 
         info = await link.request(bytes([OTA_INFO]))
         if not info[0]:
@@ -221,12 +231,12 @@ async def main():
 
         payload = zlib.compress(image, 9)
         how = f"zlib {len(image)} -> {len(payload)} bytes"
-        begin = struct.pack("<I", len(payload)) + sha + struct.pack("<HBI", CHUNK, 1, len(image))
+        begin = struct.pack("<I", len(payload)) + sha + struct.pack("<HBI", CHUNK, FLAG_ZLIB | FLAG_CRC, len(image))
         # the device stages a compressed stream at the end of the slot and inflates it to the start
         if sector_align(len(payload)) + sector_align(len(image)) > capacity:
             payload = image
             how = f"raw {len(image)} bytes (image and its zlib stream do not both fit the slot)"
-            begin = struct.pack("<I", len(payload)) + sha + struct.pack("<HB", CHUNK, 0)
+            begin = struct.pack("<I", len(payload)) + sha + struct.pack("<HBI", CHUNK, FLAG_CRC, 0)
         if len(running) >= 12 and not args.no_delta:
             run_len, run_sha8 = struct.unpack_from("<I", running)[0], running[4:12]
             base = find_base(images, run_len, run_sha8)
@@ -240,7 +250,8 @@ async def main():
                     payload = delta
                     how = f"delta {len(base)} -> {len(image)} bytes as {len(delta)} bytes"
                     begin = struct.pack("<I", len(payload)) + sha + struct.pack("<H", CHUNK)
-                    begin += struct.pack("<BII", 3, len(image), len(base)) + hashlib.sha256(base).digest()
+                    begin += struct.pack("<BII", FLAG_ZLIB | FLAG_DELTA | FLAG_CRC, len(image), len(base))
+                    begin += hashlib.sha256(base).digest()
 
         total = math.ceil(len(payload) / CHUNK)
         reply = await link.request(bytes([OTA_BEGIN]) + begin, timeout=30)
@@ -252,7 +263,8 @@ async def main():
         missing = list(range(total))
         for round_no in range(50):
             for k, i in enumerate(missing):
-                await link.send(bytes([OTA_DATA]) + struct.pack("<H", i) + payload[i * CHUNK:(i + 1) * CHUNK])
+                body = struct.pack("<H", i) + payload[i * CHUNK:(i + 1) * CHUNK]
+                await link.send(bytes([OTA_DATA]) + body + struct.pack("<I", zlib.crc32(body)))
                 if round_no == 0 and k % 500 == 499:
                     # asking for the status also keeps a serial link from queueing far ahead
                     reply = await link.request(bytes([OTA_STATUS, 0, 0]))
@@ -288,12 +300,12 @@ async def main():
             if got != sha[:8]:
                 sys.exit(f"the device runs {got.hex()}..., not the new image: the update did not take")
             store_image(images, image)
-            log("the device runs the new image (on trial until it has run healthy for 2 minutes)")
+            log(f"the device runs the new image ({after})")
             return
         if reply[0]:
             sys.exit(f"commit failed: {ERRORS.get(reply[0], reply[0])}")
         store_image(images, image)
-        log("image verified; the device reboots into it (on trial until it has run healthy for 2 minutes)")
+        log(f"image verified; the device reboots into it ({after})")
     finally:
         if link:
             await link.close()

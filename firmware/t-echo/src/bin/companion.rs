@@ -219,6 +219,9 @@ async fn main(spawner: Spawner) {
     qcfg.frequency = qspi::Frequency::M16;
     let flash = Qspi::new(p.QSPI, Irqs, p.P1_14, p.P1_15, p.P1_12, p.P1_13, p.P0_07, p.P0_05, qcfg);
     let store = Some(Rc::new(RefCell::new(Store::with_regions(flash, DATA_REGION, Some(COMPANION_REGION)))));
+    if let Some(s) = &store {
+        t_echo::ota::clear_request(s);
+    }
     info!("flash ready");
 
     // ---- radio
@@ -291,7 +294,7 @@ async fn main(spawner: Spawner) {
     busy_led.set_high();
     stage_led(GREEN, false);
     let seed = u64::from_le_bytes(entropy[..8].try_into().unwrap());
-    let platform = Nrf { sdc, seed, watchdog };
+    let platform = Nrf { sdc, seed, watchdog, store: store.clone() };
     let cfg = Config {
         // the Omsk mesh (upstream builds: `LORA_FREQ` etc. of the variant)
         radio: RadioParams { freq_mhz: 868.731, bw_khz: 62.5, sf: 7, cr: 7 },

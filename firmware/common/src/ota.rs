@@ -148,7 +148,7 @@ impl FirmwareTarget for FlashTarget<'_> {
         if cfg!(feature = "esp32c6") { meshcore::ota::ESP_CHIP_ID_ESP32C6 } else { meshcore::ota::ESP_CHIP_ID_ESP32S3 }
     }
 
-    fn activate(&mut self) -> bool {
+    fn activate(&mut self, _size: u32) -> bool {
         let mut store = self.store.borrow_mut();
         let (slot, booted) = (self.slots.target.0, self.slots.booted);
         store.save(Blob::OtaTrial, &[slot, booted, 0]) && select_slot(&mut store, slot, OtaImageState::New)

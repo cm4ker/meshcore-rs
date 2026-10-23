@@ -5,3 +5,4 @@
 /firmware/*/images
 __pycache__/
 *.pyc
+/firmware/*/installer/target

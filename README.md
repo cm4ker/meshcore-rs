@@ -124,8 +124,9 @@ LilyGO T-Echo (`rustup target add thumbv7em-none-eabihf`; для привязо�
 cd firmware\t-echo
 $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
 cargo build --release
-python ..\..\tools\uf2\elf2uf2.py target\thumbv7em-none-eabihf\release\companion companion.uf2
+python ..\..\tools\uf2\elf2uf2.py target\thumbv7em-none-eabihf\release\companion companion.uf2 --bin companion.bin
 python ..\..\tools\uf2\flash_uf2.py companion.uf2
+python ..\..\tools\ota-lora\meshcore_ota.py --register --images images companion.bin   # база для дельт
 ```
 
 Прошивка ставится UF2-файлом через загрузчик Adafruit, с которым плата продаётся (MBR, SoftDevice
@@ -190,6 +191,16 @@ python tools/ota-app/ota_app.py --ble D8:E6:C5:14:21:A8 firmware.bin   # пос�
 python tools/ota-app/ota_app.py --tcp 192.168.1.50:5000 firmware.bin
 python tools/ota-app/ota_app.py --port COM4 --info                     # что сейчас работает
 ```
+
+Куски образа несут CRC-32, испорченные отбрасываются и досылаются: на T-Echo по USB под нагрузкой
+изредка теряются пакеты.
+
+На T-Echo место только под одну прошивку: образ (`companion.bin` из `elf2uf2.py --bin`) принимается
+во внешнюю QSPI-флешку и проверяется там, а при перезагрузке установщик
+(`firmware/t-echo/installer`, хранится в 0xED000) переносит его во внутреннюю, ~10 секунд. Если в это
+время пропадёт питание, при следующем включении он продолжит с того же места. Отката на прошлую
+прошивку нет. Образ кончается хвостом с длиной и SHA-256; он прошивается вместе с приложением, и по
+нему прошивка узнаёт свой образ — базу для дельты — как после USB, так и после обновления.
 
 Дельты — как по LoRa, хранилище `firmware/<плата>/images/` выбирается по модели устройства. Дельта
 по BLE — секунды; целый образ — минуты (на время загрузки прошивка просит у телефона/ПК короткий

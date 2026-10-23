@@ -354,7 +354,7 @@ fn lora_ota_update() {
             b.copy_from_slice(&self.0.borrow().mem[o as usize..o as usize + b.len()]);
             true
         }
-        fn activate(&mut self) -> bool {
+        fn activate(&mut self, _size: u32) -> bool {
             self.0.borrow_mut().activated = true;
             true
         }

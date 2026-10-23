@@ -29,6 +29,7 @@ static_cell = "2.1.1"
 log = "0.4.27"
 heapless = "0.9"
 embedded-graphics = "0.8"
+embedded-storage = "0.3"
 u8g2-fonts = "0.8.0"
 meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
 meshcore-fw-core = { version = "0.1.0", path = "../fw-core" }

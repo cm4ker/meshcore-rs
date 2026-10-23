@@ -4,13 +4,17 @@ use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
 use embassy_executor::Spawner;
+use alloc::boxed::Box;
 use embassy_nrf::qspi::Qspi;
 use embassy_nrf::wdt::WatchdogHandle;
 use meshcore::companion::CompanionPrefs;
+use meshcore::ota::FirmwareTarget;
 use meshcore_fw_core::companion::{BleSetup, Links, Platform};
+use meshcore_fw_core::storage::SharedStore;
 use nrf_sdc::SoftdeviceController;
 
 use crate::ble;
+use crate::ota::{self, StagingTarget};
 use crate::usb::{USB_HOST, USB_OUT};
 
 /// The USB port runs from the start (the boot log goes there), so the links to start are the
@@ -21,6 +25,8 @@ pub struct Nrf {
     /// State of a small generator seeded from the hardware RNG (which the BLE controller owns).
     pub seed: u64,
     pub watchdog: Option<WatchdogHandle>,
+    /// The flash that stages updates.
+    pub store: Option<SharedStore<Qspi<'static>>>,
 }
 
 impl Platform for Nrf {
@@ -33,7 +39,15 @@ impl Platform for Nrf {
     }
 
     fn reboot(&mut self) -> ! {
+        if ota::INSTALL_PENDING.load(Ordering::Relaxed) {
+            ota::hand_over();
+        }
         cortex_m::peripheral::SCB::sys_reset()
+    }
+
+    fn ota_target(&mut self) -> Option<Box<dyn FirmwareTarget>> {
+        let target = StagingTarget::new(self.store.clone()?)?;
+        Some(Box::new(target))
     }
 
     fn random(&mut self) -> u32 {

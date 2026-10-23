@@ -1848,6 +1848,7 @@ dependencies = [
  "embassy-usb",
  "embedded-alloc",
  "embedded-graphics",
+ "embedded-storage",
  "heapless 0.9.3",
  "log",
  "meshcore",

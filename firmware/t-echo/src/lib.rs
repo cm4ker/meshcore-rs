@@ -13,6 +13,7 @@ pub mod board;
 pub mod diag;
 pub mod epaper;
 pub mod gps;
+pub mod ota;
 pub mod platform;
 pub mod screen;
 pub mod usb;

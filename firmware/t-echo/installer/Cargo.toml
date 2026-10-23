@@ -1,0 +1,33 @@
+[package]
+edition      = "2024"
+name         = "t-echo-installer"
+rust-version = "1.88"
+version      = "0.1.0"
+description  = "Copies a staged firmware update from the T-Echo's QSPI flash into its app flash; resumes after a power loss"
+
+[[bin]]
+name = "installer"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+cortex-m = "0.7.7"
+# set-vtor: faults go to our own handlers, not through the app's (half-copied) vector table
+cortex-m-rt = { version = "0.7.5", features = ["set-vtor"] }
+nrf-pac = { version = "0.4.0", features = ["nrf52840"] }
+sha2 = { version = "0.11.1", default-features = false }
+
+# its own build, not part of the firmware's
+[workspace]
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = "fat"
+opt-level     = "s"
+panic         = "abort"
+
+[profile.dev]
+opt-level = "s"
+panic     = "abort"
