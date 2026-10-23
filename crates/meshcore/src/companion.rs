@@ -460,6 +460,35 @@ impl Sent {
     }
 }
 
+/// Received text messages kept for an on-device screen (the app gets its own copy).
+const RECENT_MESSAGES: usize = 8;
+/// Nodes heard advertising, kept for an on-device screen.
+const HEARD_NODES: usize = 8;
+
+/// A received text message, for an on-device screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecentMessage {
+    /// The contact's name, or the channel's.
+    pub from: String,
+    pub text: String,
+    /// Our clock when it arrived.
+    pub received: u32,
+}
+
+/// A node heard advertising, for an on-device screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeardNode {
+    pub name: String,
+    pub key_prefix: [u8; 4],
+    pub adv_type: u8,
+    /// Hops the advert travelled; 0 = heard directly.
+    pub hops: u8,
+    /// SNR of the last hop, multiplied by 4.
+    pub snr: i8,
+    /// Our clock when it was heard.
+    pub heard: u32,
+}
+
 pub struct Companion {
     pub prefs: CompanionPrefs,
     pub board: Board,
@@ -469,6 +498,10 @@ pub struct Companion {
     pub ota: OtaEndpoint,
     /// The app is attached (upstream `isConnected()`): push frames are dropped otherwise.
     pub connected: bool,
+    /// The latest text messages, oldest first.
+    pub recent: VecDeque<RecentMessage>,
+    /// The latest nodes heard advertising, most recent first.
+    pub heard: VecDeque<HeardNode>,
     /// Transient slots first (`MAX_ANON_CONTACTS`), then the real contacts, like upstream.
     contacts: Vec<ContactInfo>,
     matching_peers: Vec<usize>,
@@ -514,6 +547,8 @@ impl Companion {
             blobs: Box::new(MemBlobStore::default()),
             ota: OtaEndpoint::default(),
             connected: true,
+            recent: VecDeque::new(),
+            heard: VecDeque::new(),
             contacts: Vec::new(),
             matching_peers: Vec::new(),
             channels: alloc::vec![Channel::default(); MAX_GROUP_CHANNELS],
@@ -956,6 +991,19 @@ impl Companion {
         self.write_frame(&[PUSH_CODE_MSG_WAITING]);
     }
 
+    fn note_message(&mut self, from: String, text: &[u8], now: u32) {
+        if self.recent.len() >= RECENT_MESSAGES {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(RecentMessage { from, text: String::from_utf8_lossy(text).into_owned(), received: now });
+    }
+
+    fn note_heard(&mut self, node: HeardNode) {
+        self.heard.retain(|h| h.key_prefix != node.key_prefix);
+        self.heard.push_front(node);
+        self.heard.truncate(HEARD_NODES);
+    }
+
     fn queue_message(&mut self, idx: usize, txt_type: u8, pkt: &Packet, sender_timestamp: u32, extra: &[u8], text: &[u8]) {
         let mut f = Vec::with_capacity(MAX_FRAME_SIZE);
         if self.app_target_ver >= 3 {
@@ -1189,6 +1237,7 @@ impl MeshApp for Companion {
                     self.contacts[idx].lastmod = ctx.current_time();
                     self.mark_connection_active(ctx, idx);
                     self.queue_message(idx, TXT_TYPE_PLAIN, pkt, sender_timestamp, &[], text);
+                    self.note_message(self.contacts[idx].name_lossy(), text, ctx.current_time());
 
                     // truncated hash of timestamp + text + sender key proves receipt
                     let mut ack = [0u8; 6];
@@ -1237,6 +1286,7 @@ impl MeshApp for Companion {
                     self.mark_contacts_dirty(ctx); // sync_since changed
                     let text = c_str(&data[9..]);
                     self.queue_message(idx, TXT_TYPE_SIGNED_PLAIN, pkt, sender_timestamp, &data[5..9], text);
+                    self.note_message(self.contacts[idx].name_lossy(), text, ctx.current_time());
 
                     // hash of timestamp + flags + prefix + text + OUR key
                     let mut ack = [0u8; 4];
@@ -1320,6 +1370,14 @@ impl MeshApp for Companion {
         {
             return; // possible replay
         }
+        self.note_heard(HeardNode {
+            name: String::from_utf8_lossy(c_str(name)).into_owned(),
+            key_prefix: id.pub_key[..4].try_into().unwrap(),
+            adv_type: adv.adv_type,
+            hops: if pkt.is_route_flood() { pkt.path_hash_count() as u8 } else { 0 },
+            snr: pkt.snr,
+            heard: now,
+        });
 
         // raw advert, as a flood packet without transport codes ("share" / "export")
         let mut raw = [0u8; MAX_TRANS_UNIT];
@@ -1376,7 +1434,7 @@ impl MeshApp for Companion {
         self.channels.iter().filter(|c| !c.is_empty() && c.hash == hash).map(Channel::group).collect()
     }
 
-    fn on_group_data_recv(&mut self, _ctx: &mut MeshCtx, pkt: &Packet, payload_type: u8, channel: &GroupChannel, data: &[u8]) {
+    fn on_group_data_recv(&mut self, ctx: &mut MeshCtx, pkt: &Packet, payload_type: u8, channel: &GroupChannel, data: &[u8]) {
         let channel_idx = self.find_channel_idx(channel);
         let path_len = if pkt.is_route_flood() { pkt.path_len } else { 0xFF };
         if payload_type == PAYLOAD_TYPE_GRP_TXT {
@@ -1395,6 +1453,8 @@ impl MeshApp for Companion {
             let n = text.len().min(MAX_FRAME_SIZE - f.len());
             f.extend_from_slice(&text[..n]);
             self.add_to_offline_queue(&f);
+            let from = self.channels.get(channel_idx as usize).map(|c| c.name.clone()).unwrap_or_default();
+            self.note_message(from, text, ctx.current_time());
         } else if payload_type == PAYLOAD_TYPE_GRP_DATA {
             if data.len() < 3 {
                 return;

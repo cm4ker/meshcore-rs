@@ -1,13 +1,23 @@
-//! The LilyGO T-Echo around the radio: LEDs, the user button, the battery, power, the screen.
+//! The LilyGO T-Echo around the radio: LEDs, the user button, the battery, power, the screen and
+//! its light, the GPS.
 
-use embassy_nrf::gpio::{Input, Output};
+use embassy_nrf::gpio::{Input, Level, Output};
+use embassy_nrf::pac;
 use embassy_nrf::saadc::Saadc;
-use meshcore_fw_core::companion::{Board, Status};
+use embassy_time::{Duration, Instant};
+use meshcore_fw_core::companion::Board;
+use meshcore_fw_core::ui::{GpsInfo, Page, View};
 
-use crate::epaper::{SCREEN, Snapshot};
+use crate::epaper::SCREEN;
 
 /// 12-bit samples of a 0..3 V range, behind a 1:2 divider (upstream `REAL_VBAT_MV_PER_LSB`).
 const BATT_MV_PER_LSB: f32 = 3000.0 / 4096.0 * 2.0;
+
+const PAGES: &[Page] =
+    &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Bluetooth, Page::Gps, Page::Advert, Page::PowerOff];
+
+/// The button (P1.10) as a pin number in P1.
+const BUTTON_PIN: usize = 10;
 
 pub struct TEcho {
     /// Green LED, lit while transmitting (active low).
@@ -17,6 +27,8 @@ pub struct TEcho {
     pub battery: Saadc<'static, 1>,
     /// 3.3 V to the peripherals (radio, flash, screen, sensors).
     pub power: Output<'static>,
+    /// The GPS module's supply.
+    pub gps_power: Output<'static>,
 }
 
 impl Board for TEcho {
@@ -36,9 +48,11 @@ impl Board for TEcho {
         self.tx_led.set_high();
     }
 
+    /// The screen task finishes the job: it draws the "off" page, then calls [`system_off`]
+    /// (the peripherals' supply has to stay on until the page is drawn).
     fn power_off(&mut self) {
         self.tx_led.set_high();
-        self.power.set_low();
+        self.gps_power.set_low();
     }
 
     async fn battery_mv(&mut self) -> u16 {
@@ -51,11 +65,59 @@ impl Board for TEcho {
         self.button.is_low()
     }
 
-    fn show_status(&mut self, status: &Status<'_>) {
-        SCREEN.signal(Snapshot::of(status));
-    }
-
     fn always_on(&self) -> bool {
         true
+    }
+
+    fn ui_pages(&self) -> &'static [Page] {
+        PAGES
+    }
+
+    fn show_view(&mut self, view: &View) {
+        SCREEN.signal(view.clone());
+    }
+
+    fn gps(&mut self) -> GpsInfo {
+        GpsInfo { on: self.gps_power.is_set_high(), fix: None, satellites: 0 }
+    }
+
+    fn set_gps(&mut self, on: bool) {
+        self.gps_power.set_level(if on { Level::High } else { Level::Low });
+    }
+}
+
+/// Lights the screen while the touch pad above it is touched (it reads low then), as upstream.
+#[embassy_executor::task]
+pub async fn backlight_task(mut touch: Input<'static>, mut light: Output<'static>) {
+    loop {
+        light.set_level(if touch.is_low() { Level::High } else { Level::Low });
+        touch.wait_for_any_edge().await;
+    }
+}
+
+/// Everything off, then the chip's System OFF, which only the button ends (with a reset, so the
+/// firmware starts over).
+pub fn system_off() -> ! {
+    // a pin already at its sense level would wake the chip at once: wait for the button to be let go
+    let since = Instant::now();
+    while !pac::P1.in_().read().pin(BUTTON_PIN) && since.elapsed() < Duration::from_secs(10) {}
+    pac::P0.outset().write(|w| {
+        for led in [13, 14, 15] {
+            w.set_pin(led, true); // LEDs are active low
+        }
+    });
+    pac::P0.outclr().write(|w| {
+        w.set_pin(12, true); // peripherals' 3.3 V
+        w.set_pin(21, true); // TCXO
+    });
+    pac::P1.outclr().write(|w| {
+        w.set_pin(2, true); // GPS
+        w.set_pin(5, true); // radio
+        w.set_pin(11, true); // screen light
+    });
+    pac::P1.pin_cnf(BUTTON_PIN).modify(|w| w.set_sense(pac::gpio::vals::Sense::Low));
+    embassy_nrf::power::set_system_off();
+    loop {
+        cortex_m::asm::wfe();
     }
 }

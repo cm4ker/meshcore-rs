@@ -1,66 +1,42 @@
-//! The T-Echo's 1.54" e-paper (GDEH0154D67, SSD1681 controller, 200 x 200): the companion's
-//! status screen, drawn in its own task so a refresh (up to 2 s) never holds up the radio.
+//! The T-Echo's 1.54" e-paper (GDEH0154D67, SSD1681 controller, 200 x 200): the interface's
+//! pages ([`crate::screen`]), drawn in their own task so a refresh (up to 2 s) never holds up the
+//! radio.
 //!
-//! The screen is redrawn only when what it shows changed, at most every [`MIN_REFRESH_MS`] (an
-//! e-paper keeps its image without power, and refreshes are slow and wear it), and only the
-//! messages waiting or the link note forces an earlier one. Most refreshes are partial; every
-//! [`FULL_EVERY`]th one is full, to clear the ghosting partial refreshes leave.
-
-use alloc::format;
-use alloc::string::String;
+//! A page turn, a notice, a pairing PIN, Bluetooth or the messages waiting change the screen at
+//! once; anything else (counters, ages, the battery) at most every [`MIN_REFRESH_MS`]: an
+//! e-paper keeps its image without power, and refreshes are slow and wear it. Most refreshes are
+//! partial, but a partial refresh drives only the pixels that change and the rest slowly fades:
+//! once nothing has changed for [`CLEAN_AFTER_MS`] the page is redrawn in full, and so is every
+//! [`FULL_EVERY`]th refresh in a row.
 
 use embassy_nrf::gpio::{Input, Output};
 use embassy_nrf::spim::Spim;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use embassy_time::{Instant, Timer};
-use embedded_graphics::mono_font::MonoTextStyle;
-use embedded_graphics::mono_font::iso_8859_5::{FONT_6X10, FONT_9X15_BOLD};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{Line, PrimitiveStyle};
-use embedded_graphics::text::{Baseline, Text};
-use meshcore_fw_core::companion::Status;
+use meshcore_fw_core::ui::{Body, View};
 
-const WIDTH: usize = 200;
-const HEIGHT: usize = 200;
+use crate::screen::render;
+
+pub const WIDTH: usize = 200;
+pub const HEIGHT: usize = 200;
 const MIN_REFRESH_MS: u64 = 30_000;
-const FULL_EVERY: u32 = 10;
+const CLEAN_AFTER_MS: u64 = 20_000;
+const FULL_EVERY: u32 = 20;
 
-/// What the screen shows: a copy of the companion's status, without the fields that change all
-/// the time (uptime, noise floor), which would otherwise force a refresh every time.
-#[derive(Clone, PartialEq, Default)]
-pub struct Snapshot {
-    pub name: String,
-    pub radio: String,
-    pub id: String,
-    pub batt_mv: u16,
-    pub contacts: usize,
-    pub rx: u32,
-    pub tx: u32,
-    pub note: Option<String>,
-}
+pub static SCREEN: Signal<CriticalSectionRawMutex, View> = Signal::new();
 
-impl Snapshot {
-    pub fn of(s: &Status<'_>) -> Self {
-        Self {
-            name: s.name.into(),
-            radio: s.radio.into(),
-            id: s.id_prefix.into(),
-            // to 0.05 V: the reading wanders by a few millivolts
-            batt_mv: s.batt_mv / 50 * 50,
-            contacts: s.contacts,
-            rx: s.rx,
-            tx: s.tx,
-            note: s.note.map(String::from),
-        }
+/// A 1-bit frame in the controller's layout: rows of 25 bytes, bit 7 leftmost, 1 = white. Drawn
+/// turned as upstream's (GxEPD2 rotation 3).
+pub struct Frame([u8; WIDTH * HEIGHT / 8]);
+
+impl Frame {
+    pub fn blank() -> Self {
+        Self([0xFF; WIDTH * HEIGHT / 8])
     }
 }
-
-pub static SCREEN: Signal<CriticalSectionRawMutex, Snapshot> = Signal::new();
-
-/// A 1-bit frame in the controller's layout: rows of 25 bytes, bit 7 leftmost, 1 = white.
-struct Frame([u8; WIDTH * HEIGHT / 8]);
 
 impl OriginDimensions for Frame {
     fn size(&self) -> Size {
@@ -75,8 +51,9 @@ impl DrawTarget for Frame {
     fn draw_iter<I: IntoIterator<Item = Pixel<BinaryColor>>>(&mut self, pixels: I) -> Result<(), Self::Error> {
         for Pixel(p, c) in pixels {
             if (0..WIDTH as i32).contains(&p.x) && (0..HEIGHT as i32).contains(&p.y) {
-                let i = p.y as usize * WIDTH / 8 + p.x as usize / 8;
-                let bit = 0x80 >> (p.x as usize % 8);
+                let (x, y) = (p.y as usize, HEIGHT - 1 - p.x as usize);
+                let i = y * WIDTH / 8 + x / 8;
+                let bit = 0x80 >> (x % 8);
                 // BinaryColor::On is ink
                 if c.is_on() {
                     self.0[i] &= !bit;
@@ -100,7 +77,7 @@ pub struct Epaper {
 impl Epaper {
     async fn wait_idle(&mut self) {
         // BUSY is high while the controller works; a refresh takes up to ~2 s
-        let _ = embassy_time::with_timeout(embassy_time::Duration::from_secs(5), self.busy.wait_for_low()).await;
+        let _ = embassy_time::with_timeout(Duration::from_secs(5), self.busy.wait_for_low()).await;
     }
 
     async fn command(&mut self, cmd: u8, data: &[u8]) {
@@ -153,58 +130,69 @@ impl Epaper {
             self.write_ram(0x26, frame).await;
         }
     }
+
+    /// Deep sleep: the image stays, the controller draws next to nothing until a reset.
+    async fn sleep(&mut self) {
+        self.command(0x10, &[0x01]).await;
+    }
 }
 
-fn render(s: &Snapshot) -> Frame {
-    let mut f = Frame([0xFF; WIDTH * HEIGHT / 8]);
-    let big = MonoTextStyle::new(&FONT_9X15_BOLD, BinaryColor::On);
-    let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let text = |f: &mut Frame, s: &str, y: i32, style| {
-        let _ = Text::with_baseline(s, Point::new(4, y), style, Baseline::Top).draw(f);
-    };
-    // names may hold characters the font lacks (emoji): they come out as '?'
-    let name: String = s.name.chars().take(21).collect();
-    text(&mut f, &name, 4, big);
-    let _ = Line::new(Point::new(0, 24), Point::new(WIDTH as i32 - 1, 24))
-        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
-        .draw(&mut f);
-    text(&mut f, &s.radio, 32, small);
-    text(&mut f, &s.id, 46, small);
-    let batt = format!("Battery {}.{:02} V", s.batt_mv / 1000, s.batt_mv % 1000 / 10);
-    text(&mut f, &batt, 64, small);
-    text(&mut f, &format!("Contacts {}", s.contacts), 78, small);
-    text(&mut f, &format!("RX {}  TX {}", s.rx, s.tx), 92, small);
-    if let Some(note) = &s.note {
-        let note: String = note.chars().take(21).collect();
-        text(&mut f, &note, 120, big);
-    }
-    f
+/// A change worth a refresh right away (else it waits for [`MIN_REFRESH_MS`]).
+fn urgent(old: &View, new: &View) -> bool {
+    old.page != new.page
+        || old.alert != new.alert
+        || old.pin != new.pin
+        || old.bar.ble != new.bar.ble
+        || old.bar.waiting != new.bar.waiting
+        || matches!(new.body, Body::Home { .. } | Body::Off { .. })
 }
 
 #[embassy_executor::task]
 pub async fn task(mut epd: Epaper) {
     epd.init().await;
-    let mut shown: Option<Snapshot> = None;
+    let mut shown: Option<View> = None;
     let mut last = Instant::from_millis(0);
-    let mut count = 0u32;
+    let mut partials = 0u32; // since the last full refresh
     loop {
-        let mut snap = SCREEN.wait().await;
-        if shown.as_ref() == Some(&snap) {
+        let next = if partials > 0 {
+            let clean_at = last + Duration::from_millis(CLEAN_AFTER_MS);
+            embassy_time::with_deadline(clean_at, SCREEN.wait()).await.ok()
+        } else {
+            Some(SCREEN.wait().await)
+        };
+        let Some(mut view) = next else {
+            // nothing changed for a while: restore the contrast the partial refreshes wore off
+            if let Some(v) = &shown {
+                epd.show(&render(v), true).await;
+            }
+            partials = 0;
+            continue;
+        };
+        if shown.as_ref() == Some(&view) {
             continue;
         }
-        // a note change (messages, app link) is worth an early refresh; counters can wait
-        let urgent = shown.as_ref().is_none_or(|s| s.note != snap.note || s.name != snap.name);
-        if !urgent {
-            let wait = (last + embassy_time::Duration::from_millis(MIN_REFRESH_MS)).saturating_duration_since(Instant::now());
-            Timer::after(wait).await;
-            if let Some(newer) = SCREEN.try_take() {
-                snap = newer; // show the latest state
+        if shown.as_ref().is_some_and(|s| !urgent(s, &view)) {
+            // show the latest state once the minimum interval is up, or as soon as it is urgent
+            let until = last + Duration::from_millis(MIN_REFRESH_MS);
+            while let Ok(newer) = embassy_time::with_deadline(until, SCREEN.wait()).await {
+                view = newer;
+                if shown.as_ref().is_some_and(|s| urgent(s, &view)) {
+                    break;
+                }
+            }
+            if shown.as_ref() == Some(&view) {
+                continue;
             }
         }
-        let full = count.is_multiple_of(FULL_EVERY);
-        epd.show(&render(&snap), full).await;
-        count += 1;
+        let off = matches!(view.body, Body::Off { .. });
+        let full = shown.is_none() || off || partials + 1 >= FULL_EVERY;
+        epd.show(&render(&view), full).await;
+        partials = if full { 0 } else { partials + 1 };
         last = Instant::now();
-        shown = Some(snap);
+        shown = Some(view);
+        if off {
+            epd.sleep().await;
+            crate::board::system_off();
+        }
     }
 }

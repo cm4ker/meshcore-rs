@@ -7,6 +7,8 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 
+/// BLE is switched on (the on-device interface can switch it off until the next start).
+pub static BLE_ENABLED: AtomicBool = AtomicBool::new(true);
 /// A BLE app is connected (and its link is authenticated).
 pub static BLE_CONNECTED: AtomicBool = AtomicBool::new(false);
 /// Frames for the BLE app.

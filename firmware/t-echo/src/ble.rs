@@ -16,7 +16,7 @@ use embassy_time::{Duration, Timer};
 use log::{info, warn};
 use meshcore::companion::MAX_FRAME_SIZE;
 use meshcore_fw_core::frames::{FRAMES_IN, Link};
-use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
+use meshcore_fw_core::links::{BLE_CONNECTED, BLE_ENABLED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
 use nrf_sdc::SoftdeviceController;
 use trouble_host::prelude::*;
 
@@ -150,23 +150,38 @@ pub async fn ble_task(sdc: SoftdeviceController<'static>, params: Params) {
         },
         async {
             loop {
-                match advertise(&params.name, &mut peripheral, server).await {
-                    Ok(conn) => {
+                while !BLE_ENABLED.load(Ordering::Relaxed) {
+                    Timer::after_millis(500).await;
+                }
+                // switched off on the device: stop advertising, or drop the app
+                match select(advertise(&params.name, &mut peripheral, server), switched_off()).await {
+                    Either::First(Ok(conn)) => {
                         let _ = conn.raw().set_bondable(true);
                         while BLE_OUT.try_receive().is_ok() {} // stale frames for an earlier app
-                        select(events(server, &conn, stack), notifier(server, &conn)).await;
+                        let link = select(events(server, &conn, stack), notifier(server, &conn));
+                        if let Either::Second(()) = select(link, switched_off()).await {
+                            conn.raw().disconnect();
+                            Timer::after_millis(300).await;
+                        }
                         BLE_CONNECTED.store(false, Ordering::Relaxed);
                         BLE_PASSKEY.store(0, Ordering::Relaxed);
                     }
-                    Err(e) => {
+                    Either::First(Err(e)) => {
                         warn!("BLE: advertising failed: {e:?}");
                         Timer::after_secs(5).await;
                     }
+                    Either::Second(()) => {}
                 }
             }
         },
     )
     .await;
+}
+
+async fn switched_off() {
+    while BLE_ENABLED.load(Ordering::Relaxed) {
+        Timer::after_millis(250).await;
+    }
 }
 
 async fn advertise<'stack, 'server, C: Controller>(

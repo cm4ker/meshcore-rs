@@ -13,4 +13,5 @@ pub mod board;
 pub mod diag;
 pub mod epaper;
 pub mod platform;
+pub mod screen;
 pub mod usb;

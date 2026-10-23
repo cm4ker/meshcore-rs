@@ -19,7 +19,7 @@ use embassy_futures::select::{Either3, select3};
 use embassy_time::{Instant, Timer};
 use embedded_storage::nor_flash::NorFlash;
 use log::{error, info, warn};
-use meshcore::companion::{BlobStore, Board as BoardInfo, Companion, CompanionPrefs};
+use meshcore::companion::{BlobStore, Board as BoardInfo, Companion, CompanionPrefs, RecentMessage};
 use meshcore::crypto;
 use meshcore::identity::LocalIdentity;
 use meshcore::mesh::{Mesh, MeshCtx};
@@ -30,10 +30,11 @@ use meshcore::util::to_hex;
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE};
 
 use crate::frames::{FRAMES_IN, Link, TCP_CONNECTED, TCP_OUT};
-use crate::links::{BLE_CONNECTED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
+use crate::links::{BLE_CONNECTED, BLE_ENABLED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
 use crate::noise::NoiseFloor;
 use crate::radio::{LoraRadio, RxEvent};
 use crate::storage::{Blob, CompBlob, SharedStore};
+use crate::ui::{self, Action, Alert, Bar, BleState, Body, Button, GpsInfo, Node, Page, RadioInfo, Ui, View};
 
 const SCREEN_ON_MS: u64 = 60_000;
 const TRIAL_HEALTHY_MS: u64 = 120_000;
@@ -93,6 +94,18 @@ pub trait Board {
     fn always_on(&self) -> bool {
         false
     }
+    /// The pages of the on-device interface ([`ui`]), the home page first; none = the board only
+    /// shows the status ([`Self::show_status`]).
+    fn ui_pages(&self) -> &'static [Page] {
+        &[]
+    }
+    /// The interface's page, about once a second and right after a press: the board renders it
+    /// and decides when to redraw.
+    fn show_view(&mut self, _view: &View) {}
+    fn gps(&mut self) -> GpsInfo {
+        GpsInfo { on: false, fix: None, satellites: 0 }
+    }
+    fn set_gps(&mut self, _on: bool) {}
 }
 
 /// What a platform needs to bring BLE up.
@@ -184,6 +197,76 @@ impl<F: NorFlash> BlobStore for FlashBlobs<F> {
 
 fn now_ms() -> u64 {
     Instant::now().as_millis()
+}
+
+/// The interface's current page with what it shows.
+fn build_view<B: Board>(
+    ui: &mut Ui, mesh: &Mesh<Companion>, board: &mut B, ble: BleState, fixed_pin: Option<u32>, pin: u32, now: u64,
+) -> View {
+    let app = &mesh.app;
+    let clock = mesh.ctx.current_time();
+    let message = |m: &RecentMessage| ui::Message {
+        from: m.from.clone(),
+        text: m.text.clone(),
+        age_min: ui::coarse_minutes(clock.saturating_sub(m.received)),
+    };
+    let body = match ui.page() {
+        Page::Home => Body::Home {
+            name: app.prefs.node_name.clone(),
+            // no age here: the home page stays up for long and would redraw every minute
+            last: app.recent.back().map(|m| ui::Message { age_min: 0, ..message(m) }),
+            contacts: app.num_contacts(),
+        },
+        Page::Messages => Body::Messages(app.recent.iter().rev().map(message).collect()),
+        Page::Nearby => Body::Nearby(
+            app.heard
+                .iter()
+                .map(|h| Node {
+                    name: h.name.clone(),
+                    hops: h.hops,
+                    age_min: ui::coarse_minutes(clock.saturating_sub(h.heard)),
+                })
+                .collect(),
+        ),
+        Page::Radio => {
+            let (s, r) = (&mesh.ctx.stats, &app.prefs.radio);
+            Body::Radio(RadioInfo {
+                freq_mhz: r.freq_mhz,
+                bw_khz: r.bw_khz,
+                sf: r.sf,
+                cr: r.cr,
+                tx_dbm: app.prefs.tx_power_dbm,
+                noise_dbm: s.noise_floor,
+                last_rssi: s.last_rssi as i16,
+                last_snr: (s.last_snr * 4.0) as i16,
+                rx: s.n_packets_recv,
+                tx: s.n_packets_sent,
+                tx_air_min: (s.total_air_time_ms / 60_000) as u32,
+                rx_air_min: (s.rx_air_time_ms / 60_000) as u32,
+                uptime_min: (now / 60_000) as u32,
+                batt_mv: app.board.batt_mv,
+                battery_pct: ui.battery_pct(app.board.batt_mv),
+            })
+        }
+        Page::Bluetooth => Body::Bluetooth {
+            state: ble,
+            name: alloc::format!("MeshCore-{}", app.prefs.node_name),
+            pin: fixed_pin,
+        },
+        Page::Gps => Body::Gps(board.gps()),
+        Page::Advert => Body::Advert,
+        Page::PowerOff => Body::PowerOff,
+    };
+    let (page_idx, pages, alert) = ui.view_frame();
+    View {
+        page: ui.page(),
+        page_idx,
+        pages,
+        bar: Bar { battery_pct: ui.battery_pct(app.board.batt_mv), ble, waiting: app.queued_messages() },
+        body,
+        alert,
+        pin: (pin != 0).then_some(pin),
+    }
 }
 
 fn comp_load<F: NorFlash>(store: &Option<SharedStore<F>>, blob: CompBlob) -> Option<Vec<u8>> {
@@ -321,6 +404,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             pin => Some(pin),
         },
     };
+    let fixed_pin = ble.pin;
     let links = platform.start_links(&spawner, &mesh.app.prefs, ble);
     info!(
         "Ready: companion frames on USB{}{}",
@@ -344,6 +428,8 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     // where replies go: the link of the latest request
     let mut reply_to = Link::Usb;
     let mut next_screen = 0u64;
+    let mut ui = Ui::new(board.ui_pages());
+    let mut button = Button::default();
     loop {
         platform.feed_watchdog();
         let now = now_ms();
@@ -434,22 +520,58 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             mesh.app.board.batt_mv = board.battery_mv().await;
         }
 
-        // button: a press wakes the screen, a long press sends a zero-hop advert
-        match (board.button_down(), button_down_at) {
-            (true, None) => {
-                button_down_at = Some(now);
-                screen_until = now + SCREEN_ON_MS;
+        let ble_state = match (links.ble && BLE_ENABLED.load(Ordering::Relaxed), ble_app) {
+            (false, _) => BleState::Off,
+            (true, false) => BleState::Waiting,
+            (true, true) => BleState::Connected,
+        };
+        if ui.enabled() {
+            ui.tick(now);
+            if let Some(press) = button.poll(board.button_down(), now) {
                 next_screen = 0;
-            }
-            (false, Some(t)) => {
-                button_down_at = None;
-                if now - t >= ADVERT_PRESS_MS {
-                    mesh.app.advert(&mut mesh.ctx);
+                match ui.press(press, now) {
+                    Some(Action::Advert) => {
+                        let sent = mesh.app.advert(&mut mesh.ctx);
+                        ui.alert(if sent { Alert::AdvertSent } else { Alert::AdvertFailed }, now);
+                    }
+                    Some(Action::ToggleBle) => {
+                        let on = !BLE_ENABLED.load(Ordering::Relaxed);
+                        BLE_ENABLED.store(on, Ordering::Relaxed);
+                        ui.alert(if on { Alert::BleOn } else { Alert::BleOff }, now);
+                    }
+                    Some(Action::ToggleGps) => {
+                        let on = !board.gps().on;
+                        board.set_gps(on);
+                        ui.alert(if on { Alert::GpsOn } else { Alert::GpsOff }, now);
+                    }
+                    Some(Action::PowerOff) => mesh.app.effects.power_off = true,
+                    None => {}
                 }
             }
-            _ => {}
+        } else {
+            // button: a press wakes the screen, a long press sends a zero-hop advert
+            match (board.button_down(), button_down_at) {
+                (true, None) => {
+                    button_down_at = Some(now);
+                    screen_until = now + SCREEN_ON_MS;
+                    next_screen = 0;
+                }
+                (false, Some(t)) => {
+                    button_down_at = None;
+                    if now - t >= ADVERT_PRESS_MS {
+                        mesh.app.advert(&mut mesh.ctx);
+                    }
+                }
+                _ => {}
+            }
         }
-        if now >= screen_until && !board.always_on() {
+        if ui.enabled() {
+            if now >= next_screen {
+                next_screen = now + 1000;
+                let view = build_view(&mut ui, &mesh, &mut board, ble_state, fixed_pin, pin, now);
+                board.show_view(&view);
+            }
+        } else if now >= screen_until && !board.always_on() {
             board.screen_off();
         } else if now >= next_screen {
             next_screen = now + 1000;
@@ -559,6 +681,12 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         }
         if fx.power_off {
             let _ = radio.sleep();
+            if ui.enabled() {
+                let mut view = build_view(&mut ui, &mesh, &mut board, BleState::Off, None, 0, now);
+                view.body = Body::Off { name: mesh.app.prefs.node_name.clone() };
+                (view.alert, view.pin) = (None, None);
+                board.show_view(&view);
+            }
             board.power_off();
             loop {
                 Timer::after_secs(3600).await;

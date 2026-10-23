@@ -3,8 +3,9 @@
 //! Wiring (upstream `variants/lilygo_techo`): SX1262 on SPI (SCK P0.19, MOSI P0.22, MISO P0.23,
 //! NSS P0.24), RESET P0.25, BUSY P0.17, DIO1 P0.20, DIO2 switching the antenna, a 1.8 V TCXO on
 //! DIO3 (its supply on P0.21), radio supply on P1.05; 2 MB QSPI flash (SCK P1.14, CS P1.15, IO
-//! P1.12 P1.13 P0.07 P0.05); peripherals' 3.3 V on P0.12; button P1.10; LEDs P0.13-15 (active
-//! low); battery on AIN2 (P0.04) behind a 1:2 divider.
+//! P1.12 P1.13 P0.07 P0.05); peripherals' 3.3 V on P0.12; button P1.10; touch pad P0.11 and the
+//! screen's light P1.11; GPS supply P1.02; LEDs P0.13-15 (active low); battery on AIN2 (P0.04)
+//! behind a 1:2 divider.
 
 #![no_std]
 #![no_main]
@@ -39,7 +40,7 @@ use nrf_sdc::mpsl::{self, MultiprotocolServiceLayer};
 use nrf_sdc::{self as sdc};
 use static_cell::StaticCell;
 use log::{info, warn};
-use t_echo::board::TEcho;
+use t_echo::board::{self as board, TEcho};
 use t_echo::diag;
 use t_echo::epaper::{self, Epaper};
 use t_echo::usb as frames_usb;
@@ -187,7 +188,7 @@ async fn main(spawner: Spawner) {
     // ---- power: peripherals, TCXO, radio; the GPS stays off
     let power = Output::new(p.P0_12, Level::High, OutputDrive::Standard);
     let _tcxo = Output::new(p.P0_21, Level::High, OutputDrive::Standard);
-    let _gps = Output::new(p.P1_02, Level::Low, OutputDrive::Standard);
+    let gps_power = Output::new(p.P1_02, Level::Low, OutputDrive::Standard);
     let _radio_power = Output::new(p.P1_05, Level::High, OutputDrive::Standard);
     let _red = Output::new(p.P0_13, Level::High, OutputDrive::Standard);
     Timer::after_millis(10).await; // the radio powers up
@@ -240,7 +241,11 @@ async fn main(spawner: Spawner) {
         button: Input::new(p.P1_10, Pull::Up),
         battery,
         power,
+        gps_power,
     };
+    let touch = Input::new(p.P0_11, Pull::Up);
+    let light = Output::new(p.P1_11, Level::Low, OutputDrive::Standard);
+    spawner.spawn(board::backlight_task(touch, light).unwrap());
 
     // ---- the e-paper, in its own task
     let mut ecfg = spim::Config::default();
