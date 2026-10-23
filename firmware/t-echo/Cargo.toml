@@ -47,5 +47,6 @@ lto           = "fat"
 opt-level     = "s"
 
 [patch.crates-io]
-# the identity-IRK patch, see ../vendor/README.md
+# the identity-IRK patch and the USB fixes, see ../vendor/README.md
 trouble-host = { path = "../vendor/trouble-host-0.8" }
+embassy-nrf = { path = "../vendor/embassy-nrf-0.11" }
