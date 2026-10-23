@@ -1,0 +1,9 @@
+[package]
+name = "companion-sim"
+version = "0.1.0"
+edition = "2024"
+description = "Simulated MeshCore network on a PC: companions reachable over TCP (the companion frame protocol) plus a repeater, for testing apps and clients"
+publish = false
+
+[dependencies]
+meshcore = { path = "../../crates/meshcore" }

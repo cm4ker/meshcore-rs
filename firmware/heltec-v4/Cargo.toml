@@ -1,0 +1,76 @@
+[package]
+edition      = "2024"
+name         = "heltec-v4"
+rust-version = "1.95"
+version      = "0.1.0"
+
+[[bin]]
+name = "heltec-v4"
+path = "./src/bin/main.rs"
+
+[[bin]]
+name = "companion"
+path = "./src/bin/companion.rs"
+
+[dependencies]
+esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }
+
+esp-rtos = { version = "0.4.0", features = [
+  "embassy",
+  "esp-alloc",
+  "esp-radio",
+  "esp32s3",
+  "log-04",
+] }
+
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3", "log-04"] }
+log                    = "0.4.27"
+
+embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-time = { version = "0.5.0", features = ["log"] }
+esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
+esp-backtrace = { version = "0.20.0", features = [
+  "esp32s3",
+  "panic-handler",
+  "println",
+] }
+esp-println = { version = "0.18.0", features = ["esp32s3", "log-04"] }
+
+critical-section = "1.2.0"
+static_cell      = "2.1.1"
+meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
+meshcore-fw = { version = "0.1.0", path = "../common", features = ["esp32s3"] }
+esp-storage = { version = "0.10.0", features = ["esp32s3"] }
+embassy-sync = "0.8.0"
+embassy-futures = "0.1.2"
+embedded-hal-async = "1.0.0"
+embedded-io-async = "0.7.0"
+embedded-hal = "1.0"
+libm = "0.2.16"
+# coex: the repeater runs BLE (`start ota ble`) next to its Wi-Fi station
+esp-radio = { version = "1.0.0-beta.1", features = ["esp32s3", "wifi", "ble", "coex", "log-04", "unstable"] }
+embassy-net = { version = "0.9", features = ["tcp", "udp", "dns", "dhcpv4", "medium-ethernet", "proto-ipv4"] }
+edge-dhcp = "0.8"
+edge-nal = "0.7"
+edge-nal-embassy = "0.9"
+ssd1306 = "0.10"
+embedded-graphics = "0.8"
+embedded-tls = { version = "0.19", default-features = false, features = ["log", "rsa", "p384"] }
+rand_core = { version = "0.6", default-features = false }
+
+
+# For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
+[profile.dev]
+# The default debug profile is too slow and too big for resource-constrained devices.
+# Always build with some optimizations enabled.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1     # LLVM can perform better optimizations using a single thread
+debug         = 2     # prefer slower builds but better debugging experience
+lto           = 'fat'
+opt-level     = 's'
+
+[patch.crates-io]
+# fixed BLE passkey support, see ../vendor/README.md
+trouble-host = { path = "../vendor/trouble-host" }

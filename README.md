@@ -1,0 +1,198 @@
+# MeshCore на Rust
+
+Прошивка [MeshCore](https://github.com/meshcore-dev/MeshCore), переписанная на Rust: репитер (с room server)
+и компаньон (companion radio).
+Совместима по эфиру с оригинальной C++ прошивкой (v1.18): тот же формат пакетов, та же
+криптография, та же логика маршрутизации. Железо: **Heltec WiFi LoRa 32 V4** (ESP32-S3 + SX1262 + FEM) и
+**Seeed XIAO ESP32-C6 + Waveshare Core2021-HF** (Semtech LR2021, компаньон).
+Проверена в живой сети: компаньон MeshCore v1.18 логинится, получает статус, телеметрию, ACL,
+выполняет CLI и TRACE через эту прошивку.
+
+## Возможности
+
+- репитер: flood/direct, TRACE, ACK, multipart, дедупликация, лимиты хопов, детектор петель, бюджет эфира;
+- соседи, discover, логин админа/гостя, запросы статуса/телеметрии/соседей/ACL/владельца, CLI по эфиру;
+- **регионы / transport codes** (roadmap): `region put|def|load|save|allowf|denyf|default|home|list`;
+- **динамический coding rate** (roadmap): `set dyncr on` — для direct-пакетов к соседу CR выбирается
+  по SNR линка (4/5 на сильных, 4/8 на слабых); приёмникам ничего настраивать не нужно;
+- **обновление по LoRa**: образ передаётся админскими запросами с любого компаньона (`tools/ota-lora`);
+  обычно только **дельта** к работающей прошивке (bsdiff + zlib): ~20 КБ и 3 минуты вместо часа;
+- **обновление по Wi-Fi**: `start ota` (можно и удалённо по LoRa) поднимает точку доступа
+  `MeshCore-OTA-<имя>` (WPA2, пароль = пароль админа) со страницей загрузки `http://192.168.4.1/`;
+- **обновление по BLE**: `start ota ble` (тоже можно удалённо) включает BLE на 15 минут с одноразовым
+  PIN в ответе; ретрансляция и Wi-Fi/MQTT при этом работают (`tools/ota-app`);
+- два слота прошивки и автооткат: новая прошивка стартует «на пробу», и если трижды не дожила до
+  проверки (зависания ловит watchdog), нода возвращается на прежнюю;
+- **Wi-Fi + MQTT-наблюдатель**, совместимый с MeshCoreTel: пакеты и статус
+  (`mqtt.packets`, `mqtt.tx`, `mqtt.raw`) в `meshcore/<IATA>/<ключ>/…` на meshcoretel.ru (TCP), ommesh и
+  LetsMesh EU/US (MQTT поверх WebSocket и TLS 1.3 с проверкой цепочки сертификатов, вход по JWT,
+  подписанному ключом ноды); время по SNTP;
+- **room server** и **несколько виртуальных нод на одном устройстве** (roadmap): `set room on` +
+  перезагрузка — рядом с репитером на том же радио поднимается комната со своим ключом, паролями и
+  ACL (посты, рассылка участникам с подтверждением, keep-alive, как upstream `simple_room_server`);
+  её CLI доступен по эфиру админу комнаты и в консоли как `room <команда>` (`room.post <текст>`);
+  радио, часы и регионы общие с репитером;
+- watchdog, часы переживают перезагрузки и пропадание питания, OLED-статус (кнопка PRG будит экран),
+  CAD перед передачей, сброс AGC, батарея в телеметрии;
+- **компаньон** (`companion`, отдельная прошивка): порт upstream `companion_radio`, протокол приложения
+  v14 целиком (контакты, личные сообщения с подтверждением, каналы, вход на репитеры и комнаты, статус,
+  телеметрия, CLI, трассировка, поиск пути, экспорт/импорт контактов, подпись, очередь сообщений).
+  Подключение: BLE (Nordic UART; PIN задаётся из приложения или `set pin`, без него — случайный на
+  экране или 123456 на платах без экрана; привязки сохраняются),
+  USB-serial, или TCP-порт 5000 вместо BLE при настроенном Wi-Fi (`set wifi.ssid`, `set wifi.pwd`).
+  Свои ключ, контакты и настройки — в отдельном разделе `companion`, данные репитера не трогаются.
+  Обновляется через то же подключение (BLE, USB или TCP), см. ниже.
+
+## Структура
+
+```
+crates/meshcore/        no_std-ядро протокола, без железа, тестируется на ПК
+  packet.rs crypto.rs   формат пакета; AES-128-ECB + HMAC-SHA256 (2 байта MAC)
+  identity.rs           Ed25519 (формат ключей orlp/ed25519), ECDH через X25519
+  mesh.rs               порт Dispatcher + Mesh
+  repeater.rs           порт simple_repeater + CommonCLI
+  repeater/room.rs      порт simple_room_server (режим той же ноды)
+  companion.rs          порт companion_radio + BaseChatMesh: контакты, каналы, кадры приложения
+  region.rs             регионы и transport codes
+  ota.rs                сессия обновления (куски в любом порядке, zlib, дельта, проверка SHA-256 и образа ESP)
+  uplink.rs             JSON/топики MeshCoreTel, JWT, кодек MQTT 3.1.1, кадры WebSocket
+  radio.rs prefs.rs     параметры LoRa и время в эфире; настройки узла
+firmware/common/        общее для плат (esp-hal 1.2 + embassy, ESP32-S3 и ESP32-C6)
+  radio.rs              интерфейс LoRa-трансивера
+  sx1262.rs lr2021.rs   драйверы SX1262 и LR2021
+  ota.rs storage.rs     слоты и откат; хранилище во flash (+ кольцевой журнал контактов)
+  net.rs                Wi-Fi-клиент, SNTP
+  ble.rs frames.rs      BLE (trouble-host): Nordic UART + сопряжение; кадры по USB и TCP
+  companion_app.rs      основной цикл компаньона для любой платы
+firmware/heltec-v4/     Heltec V4
+  board.rs display.rs   FEM GC1109/KCT8103L (V4.2/V4.3); OLED
+  wifi_ota.rs broker.rs точка доступа + HTTP-загрузка; MQTT по TCP или TLS 1.3 + WebSocket (embedded-tls)
+  bin/main.rs           прошивка репитера; bin/companion.rs — компаньона
+firmware/xiao-c6/       XIAO ESP32-C6 + LR2021 (Waveshare Core2021-HF): компаньон
+tools/provision/        образ раздела настроек (перенос ключа и конфигурации с другой прошивки)
+tools/ota-lora/         обновление репитера по LoRa через компаньон (Python, библиотека meshcore)
+tools/ota-app/          обновление компаньона по его подключению: BLE, USB или TCP
+tools/ota-delta/        дельта-патч для обновления по LoRa (bsdiff)
+tools/companion-sim/    сеть на ПК: компаньоны по TCP + репитер; interop.py гоняет её официальной
+                        Python-библиотекой meshcore (meshcore-cli тоже подключается)
+```
+
+## Сборка и прошивка по USB
+
+```powershell
+espup install --targets esp32s3      # один раз (на Windows ARM64 — x64-версия под эмуляцией)
+. $HOME\export-esp.ps1               # в каждой новой консоли
+cd firmware\heltec-v4
+cargo build --release
+espflash flash --erase-parts otadata target\xtensa-esp32s3-none-elf\release\heltec-v4
+# или компаньон:
+espflash flash --erase-parts otadata target\xtensa-esp32s3-none-elf\release\companion
+```
+
+XIAO ESP32-C6 + LR2021 (обычный stable-тулчейн, `rustup target add riscv32imac-unknown-none-elf`):
+
+```powershell
+cd firmware\xiao-c6
+cargo build --release
+espflash flash --erase-parts otadata,meshcore,companion target\riscv32imac-unknown-none-elf\release\companion
+```
+
+Подключение модуля (вывод XIAO -> GPIO): CLK D8 -> 19, MISO D9 -> 20, MOSI D10 -> 18, CS D3 -> 21,
+DIO11 (IRQ) D1 -> 1, RESET D2 -> 2, BUSY D0 -> 0.
+
+`--erase-parts otadata` нужен, чтобы загрузчик стартовал со слота 0. Ключ и настройки лежат в
+отдельном разделе `meshcore` и при прошивке не стираются.
+
+## Обновление по воздуху
+
+Образ для обновления: `espflash save-image --chip esp32s3 --flash-size 16mb <elf> firmware.bin`.
+
+**По LoRa**, через компаньон, у которого репитер в контактах и который знает пароль админа:
+
+```
+pip install meshcore
+cargo build --release -p ota-delta
+python tools/ota-lora/meshcore_ota.py --port COM4 --node PKIO --password-file pw.txt firmware.bin
+```
+
+Репитер сообщает SHA-256 работающего образа. Если этот образ есть в хранилище
+`firmware/heltec-v4/images/`, по эфиру уходит только дельта: при SF7/BW62.5 типичное обновление —
+~20 КБ, около 3 минут, плюс ~25 секунд на сборку и проверку образа на самом репитере. Каждый
+отправленный образ сохраняется в хранилище; прошитый по USB нужно добавить вручную:
+`meshcore_ota.py --register firmware.bin`. Если базы нет, уходит весь образ (сжатый, ~700 КБ,
+больше часа). Недостающие куски досылаются.
+
+**По BLE**: в консоли или удалённо (`cmd <нода> "start ota ble"`) выполнить `start ota ble`. Ответ —
+имя `MeshCore-OTA-<имя>` и одноразовый PIN; BLE работает 15 минут (пока идёт загрузка — дольше),
+потом выключается сам. Ретрансляция и Wi-Fi/MQTT не прерываются. Сопрячь ПК или телефон по PIN и:
+
+```
+python tools/ota-app/ota_app.py --ble <адрес> firmware.bin
+```
+
+Дельта ~50 КБ уходит за ~15 секунд, сборка и проверка образа на репитере — ещё ~30 секунд. Привязки
+хранятся в разделе `companion` и общие с прошивкой компаньона на той же плате.
+
+**По Wi-Fi**: в консоли (или удалённо через `cmd <нода> "start ota"`) выполнить `start ota`. Ответ —
+адрес страницы и одноразовый код. Без настроенного Wi-Fi нода поднимает точку доступа
+`MeshCore-OTA-<имя>` (страница `http://192.168.4.1/`), с подключённым — страницу на своём адресе в
+локальной сети. На странице ввести код и выбрать файл, либо
+`curl --data-binary @firmware.bin "http://192.168.4.1/update?code=<код>"`. После трёх неверных кодов
+загрузка блокируется до следующего `start ota` (он выдаёт новый код). Если за 15 минут ничего не
+загрузили, нода перезагружается и страница пропадает.
+
+**Компаньон** обновляется по тому же подключению, что и приложение (те же запросы, что и по LoRa,
+эфир не занимается):
+
+```
+python tools/ota-app/ota_app.py --port COM4 firmware.bin
+python tools/ota-app/ota_app.py --ble D8:E6:C5:14:21:A8 firmware.bin   # после сопряжения (PIN)
+python tools/ota-app/ota_app.py --tcp 192.168.1.50:5000 firmware.bin
+python tools/ota-app/ota_app.py --port COM4 --info                     # что сейчас работает
+```
+
+Дельты — как по LoRa, хранилище `firmware/<плата>/images/` выбирается по модели устройства. Дельта
+по BLE — секунды; целый образ — минуты (на время загрузки прошивка просит у телефона/ПК короткий
+интервал соединения). На XIAO C6 (слот 1.75 МБ) образ и его сжатая копия в слот вместе не помещаются,
+поэтому целый образ уходит без сжатия. Образ для C6:
+`espflash save-image --chip esp32c6 --flash-size 4mb <elf> firmware.bin`.
+
+После обновления репитера: `ota info` в консоли показывает слот и статус пробного запуска, `ota rollback` —
+вернуться на предыдущую прошивку.
+
+## Wi-Fi и MQTT
+
+```
+set wifi.ssid <сеть>
+set wifi.pwd <пароль>
+set mqtt.iata OMS            # код региона в топиках; UNSET — не публиковать
+set mqtt.ommesh on           # meshcoretel включён по умолчанию; ещё letsmesh-eu, letsmesh-us; не больше 3
+set mqtt.tx on               # публиковать и свои передачи
+get mqtt.status              # wifi:up ntp:up iata:OMS meshcoretel:up ... ommesh:up ...
+```
+
+Настройки сети применяются перезагрузкой. При подключённом Wi-Fi `start ota` поднимает страницу
+загрузки на адресе ноды в локальной сети вместо точки доступа (загрузка — только с кодом из ответа).
+
+## Перенос существующей ноды (с сохранением ID)
+
+```
+cargo run -p provision -- --prv <ключ из get prv.key> --prefs prefs.txt --admin <pubkey> --clock <unix-время> --out part.bin
+espflash write-bin 0x400000 part.bin
+```
+
+## Проверки
+
+`cargo test -p meshcore`: ключи/подписи/ECDH сверены байт-в-байт с C-библиотекой upstream,
+AES/HMAC — по FIPS-197/RFC 4231, регионы — с независимой реализацией; сквозные сценарии
+(пересылка, логин, CLI, TRACE, регионы, динамический CR, OTA по LoRa, очередь MQTT) в `tests/network.rs`,
+room server (логин, посты, рассылка и ACK, keep-alive, пароль комнаты, соседство с репитером) — в `tests/room.rs`,
+компаньон (сообщения напрямую и через репитер, каналы, вход/статус/CLI на репитере, телеметрия, поиск пути,
+импорт/экспорт, очередь, CLI и подпись) — в `tests/companion.rs`; дельта-обновление — в тестах `ota.rs`.
+Совместимость компаньона с приложениями: `cargo run -p companion-sim`, затем
+`python tools/companion-sim/interop.py` (официальная библиотека `meshcore`, 45 проверок).
+
+## Пока нет
+
+Энергосбережение/глубокий сон, GPS, сенсоры, мосты (RS232/ESP-NOW), протокол V2.
+Компаньон: BLE и Wi-Fi одновременно.

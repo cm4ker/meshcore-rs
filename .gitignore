@@ -1,0 +1,7 @@
+/target
+/firmware/*/target
+/reference
+/backups
+/firmware/*/images
+__pycache__/
+*.pyc

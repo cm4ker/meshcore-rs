@@ -1,0 +1,37 @@
+[package]
+edition      = "2024"
+name         = "meshcore-fw"
+rust-version = "1.88"
+version      = "0.1.0"
+description  = "Board-independent MeshCore firmware parts for ESP32 chips: radio drivers, storage, BLE/USB/TCP transports, the companion role"
+
+[dependencies]
+esp-hal = { version = "~1.2.2", features = ["log-04", "unstable"] }
+esp-radio = { version = "1.0.0-beta.1", features = ["wifi", "ble", "log-04", "unstable"] }
+esp-storage = "0.10.0"
+esp-println = { version = "0.18.0", features = ["log-04"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["log-04"] }
+log = "0.4.27"
+
+embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-time = { version = "0.5.0", features = ["log"] }
+embassy-sync = "0.8.0"
+embassy-futures = "0.1.2"
+embassy-net = { version = "0.9", features = ["tcp", "udp", "dns", "dhcpv4", "medium-ethernet", "proto-ipv4"] }
+embedded-hal = "1.0"
+embedded-io-async = "0.7.0"
+critical-section = "1.2.0"
+static_cell = "2.1.1"
+libm = "0.2.16"
+heapless = "0.9"
+# patched copy in ../vendor/trouble-host (fixed passkey), see the board crates' [patch.crates-io]
+trouble-host = { version = "=0.7.0", default-features = false, features = ["peripheral", "gatt", "derive", "security", "default-packet-pool-mtu-255", "log"] }
+meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
+
+[features]
+esp32s3 = ["esp-hal/esp32s3", "esp-radio/esp32s3", "esp-storage/esp32s3", "esp-println/esp32s3", "esp-bootloader-esp-idf/esp32s3"]
+esp32c6 = ["esp-hal/esp32c6", "esp-radio/esp32c6", "esp-storage/esp32c6", "esp-println/esp32c6", "esp-bootloader-esp-idf/esp32c6"]
+
+[patch.crates-io]
+# fixed BLE passkey support, see ../vendor/README.md (standalone builds of this crate, e.g. clippy)
+trouble-host = { path = "../vendor/trouble-host" }

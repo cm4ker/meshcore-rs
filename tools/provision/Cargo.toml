@@ -1,0 +1,9 @@
+[package]
+name = "provision"
+version = "0.1.0"
+edition = "2024"
+description = "Build a pre-filled `meshcore` flash partition image (identity, prefs, ACL, clock) for the firmware"
+publish = false
+
+[dependencies]
+meshcore = { path = "../../crates/meshcore" }

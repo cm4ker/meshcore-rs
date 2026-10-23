@@ -1,0 +1,9 @@
+[package]
+name = "ota-delta"
+version = "0.1.0"
+edition = "2024"
+description = "Make a delta firmware update (bsdiff patch) for LoRa OTA"
+publish = false
+
+[dependencies]
+bsdiff = "0.2.1"
