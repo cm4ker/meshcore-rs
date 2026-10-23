@@ -779,3 +779,23 @@ fn repeater_wifi_update_code() {
     assert_eq!(reply, format!("Started: http://10.0.0.5/update code {lan_code}"));
     assert_ne!(lan_code, code, "a new code each time");
 }
+
+/// `powersaving`: upstream's replies, only on a board that can sleep; the firmware's sleep summary.
+#[test]
+fn repeater_powersaving_cli() {
+    let mut r = repeater(4);
+    let cli = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
+    assert_eq!(cli(&mut r, "powersaving on"), "Board not supported");
+    assert_eq!(cli(&mut r, "powersaving"), "off");
+
+    r.app.board.powersaving_supported = true;
+    assert_eq!(cli(&mut r, "powersaving on"), "on - After 2 minutes");
+    assert!(r.app.prefs.powersaving_enabled);
+    assert!(r.app.take_effects().save_prefs);
+    assert_eq!(cli(&mut r, "powersaving"), "on");
+    assert_eq!(cli(&mut r, "powersaving stats"), "> no sleep yet");
+    r.app.board.power_status = "asleep 50%".into();
+    assert_eq!(cli(&mut r, "powersaving stats"), "> asleep 50%");
+    assert_eq!(cli(&mut r, "powersaving off"), "off");
+    assert_eq!(cli(&mut r, "powersaving"), "off");
+}

@@ -211,6 +211,10 @@ pub struct BoardInfo {
     pub ble_ota_name: Option<String>,
     /// LAN address while the Wi-Fi station is connected (`start ota` serves there instead of an AP).
     pub wifi_ip: Option<String>,
+    /// The board can light-sleep between packets (`powersaving on`).
+    pub powersaving_supported: bool,
+    /// How much the board slept, for `powersaving stats`, kept by the firmware.
+    pub power_status: String,
     /// Network status lines for `get wifi.status` / `get mqtt.status`, kept by the firmware.
     pub wifi_status: String,
     pub mqtt_status: String,
@@ -1427,15 +1431,27 @@ impl Repeater {
             return self.handle_region_command(ctx, cmd);
         }
         if cmd.starts_with("powersaving on") {
-            return "Board not supported".into();
+            if !self.board.powersaving_supported {
+                return "Board not supported".into();
+            }
+            self.prefs.powersaving_enabled = true;
+            self.save_prefs();
+            // upstream's ESP32 wording: the first sleep comes two minutes after boot
+            return "on - After 2 minutes".into();
         }
         if cmd.starts_with("powersaving off") {
             self.prefs.powersaving_enabled = false;
             self.save_prefs();
             return "off".into();
         }
+        if cmd.starts_with("powersaving stats") {
+            return match self.board.power_status.as_str() {
+                "" => "> no sleep yet".into(),
+                s => format!("> {s}"),
+            };
+        }
         if cmd.starts_with("powersaving") {
-            return "off".into();
+            return if self.prefs.powersaving_enabled { "on" } else { "off" }.into();
         }
         if cmd.starts_with("log start") {
             self.logging = true;

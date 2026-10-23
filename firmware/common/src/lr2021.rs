@@ -9,7 +9,7 @@
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embedded_hal::spi::SpiBus;
 use esp_hal::Blocking;
-use esp_hal::gpio::{Input, Output};
+use esp_hal::gpio::{Event, Input, Output};
 use esp_hal::spi::master::Spi;
 use meshcore::radio::RadioParams;
 
@@ -363,6 +363,15 @@ impl LoraRadio for Lr2021<'_> {
 
     async fn wait_irq(&mut self) {
         self.irq.wait_for_high().await
+    }
+
+    fn arm_wake(&mut self) -> bool {
+        if self.irq.is_high() {
+            return false;
+        }
+        // a listening pin wakes the chip; the next wait_irq takes the interrupt over
+        self.irq.listen(Event::HighLevel);
+        true
     }
 
     fn read_rx(&mut self) -> Result<RxEvent, Error> {

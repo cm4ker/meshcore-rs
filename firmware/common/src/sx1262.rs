@@ -6,7 +6,7 @@
 
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::Blocking;
-use esp_hal::gpio::{Input, Output};
+use esp_hal::gpio::{Event, Input, Output};
 use esp_hal::spi::master::Spi;
 use embedded_hal::spi::SpiBus;
 use meshcore::radio::RadioParams;
@@ -332,6 +332,15 @@ impl LoraRadio for Sx1262<'_> {
 
     async fn wait_irq(&mut self) {
         self.dio1.wait_for_high().await
+    }
+
+    fn arm_wake(&mut self) -> bool {
+        if self.dio1.is_high() {
+            return false;
+        }
+        // a listening pin wakes the chip; the next wait_irq takes the interrupt over
+        self.dio1.listen(Event::HighLevel);
+        true
     }
 
     /// Continuous receive; DIO1 rises on RX-done.

@@ -51,6 +51,10 @@ pub trait LoraRadio {
     /// Wait for the IRQ line (a frame arrived).
     async fn wait_irq(&mut self);
 
+    /// Let the IRQ line wake the chip from light sleep. False if an IRQ is already pending: then
+    /// do not sleep.
+    fn arm_wake(&mut self) -> bool;
+
     /// Read whatever completed (after [`Self::wait_irq`]); the radio stays in RX.
     fn read_rx(&mut self) -> Result<RxEvent, Error>;
 

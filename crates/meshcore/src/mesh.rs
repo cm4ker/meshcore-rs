@@ -596,17 +596,14 @@ impl<A: MeshApp> Mesh<A> {
 
     /// Earliest time `poll` or the TX path needs attention.
     pub fn next_wakeup(&self) -> u64 {
-        let mut t = self.ctx.now + 1000;
-        if let Some(d) = self.ctx.inbound.next_due() {
-            t = t.min(d);
-        }
-        if let Some(d) = self.ctx.outbound.next_due() {
-            t = t.min(d.max(self.ctx.next_tx_time));
-        }
-        if let Some(d) = self.app.next_timer() {
-            t = t.min(d);
-        }
-        t
+        self.next_deadline().unwrap_or(u64::MAX).min(self.ctx.now + 1000)
+    }
+
+    /// The earliest scheduled event (a queued packet, an app timer), without the once-a-second
+    /// poll of [`Self::next_wakeup`]: how long a sleeping board may stay asleep.
+    pub fn next_deadline(&self) -> Option<u64> {
+        let outbound = self.ctx.outbound.next_due().map(|d| d.max(self.ctx.next_tx_time));
+        [self.ctx.inbound.next_due(), outbound, self.app.next_timer()].into_iter().flatten().min()
     }
 
     fn process_recv_packet(&mut self, mut pkt: Box<Packet>) {

@@ -23,7 +23,7 @@ use esp_backtrace as _;
 use esp_hal::Blocking;
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
 use esp_hal::clock::CpuClock;
-use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pin, Pull};
+use esp_hal::gpio::{Event, Input, InputConfig, Level, Output, OutputConfig, Pin, Pull};
 use esp_hal::peripherals::ADC1;
 use esp_hal::rng::{Rng, Trng, TrngSource};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
@@ -44,6 +44,7 @@ use heltec_v4::common::{Battery, NoiseFloor, clock_cell};
 use heltec_v4::broker;
 use heltec_v4::display::{Oled, Status};
 use heltec_v4::ota::{self, FlashTarget, SharedStore};
+use heltec_v4::power::Sleeper;
 use heltec_v4::reset;
 use heltec_v4::frames::FRAMES_IN;
 use heltec_v4::storage::{Blob, CompBlob, Store};
@@ -139,6 +140,14 @@ impl WatchdogFeeder {
 
 /// The status screen stays on this long after boot or a button press.
 const SCREEN_ON_MS: u64 = 60_000;
+
+/// `powersaving on`: the first sleep comes this long after boot, a button press or a console line
+/// (upstream: two minutes after boot), and one sleep lasts at most this long (below the watchdog).
+const AWAKE_AFTER_ACTIVITY_MS: u64 = 120_000;
+const MAX_SLEEP_MS: u64 = 20_000;
+/// An update counts as abandoned (and no longer keeps the board awake) after this long without
+/// a request.
+const OTA_IDLE_MS: u64 = 300_000;
 
 /// A trial firmware that keeps running this long is kept.
 const TRIAL_HEALTHY_MS: u64 = 120_000;
@@ -452,6 +461,7 @@ async fn main(spawner: Spawner) -> ! {
         batt_mv,
         mcu_temp_c: None,
         fem_lna_controllable: fem.lna_controllable(),
+        powersaving_supported: true,
         build_date: BUILD_DATE.into(),
         wifi_ota_ssid: slots.map(|_| ota_ssid(&prefs.node_name)),
         ble_ota_name: slots.map(|_| ota_ssid(&prefs.node_name)),
@@ -588,8 +598,12 @@ async fn main(spawner: Spawner) -> ! {
         .ok()
         .map(|i2c| i2c.with_sda(p.GPIO17).with_scl(p.GPIO18))
         .and_then(|i2c| Oled::new(i2c, oled_rst));
-    let button = Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::Up));
+    let mut button = Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::Up));
     let mut button_was_down = false;
+    let mut sleeper = Sleeper::new(p.LPWR);
+    let mut awake_until = now_ms() + AWAKE_AFTER_ACTIVITY_MS;
+    let (mut ota_requests, mut ota_seen) = (0u32, 0u64);
+    let mut next_power_status = 0u64;
     let mut screen_until = now_ms() + SCREEN_ON_MS;
     let mut next_screen = 0u64;
     let mut oled_failures = 0u8;
@@ -669,6 +683,38 @@ async fn main(spawner: Spawner) -> ! {
         }
 
         prof.mark("wait");
+        // `powersaving on`: light sleep until the next timer or a packet, as upstream does, when
+        // nothing needs the chip awake (radios other than LoRa, a console, queued packets)
+        if mesh.app.ota.requests != ota_requests {
+            (ota_requests, ota_seen) = (mesh.app.ota.requests, now);
+        }
+        let usb_host = sleeper.usb_host_active();
+        if mesh.app.prefs.powersaving_enabled
+            && now >= awake_until
+            && now >= screen_until
+            && !usb_host
+            && station.is_none()
+            && wifi.is_some() // no update access point either
+            && ble_until.is_none()
+            && reboot_at.is_none()
+            && !(mesh.app.ota.busy() && now < ota_seen + OTA_IDLE_MS)
+            && mesh.ctx.outbound_len() == 0
+            && room.as_ref().is_none_or(|r| r.ctx.outbound_len() == 0)
+        {
+            let next = room.as_ref().and_then(|r| r.next_deadline()).into_iter().chain(mesh.next_deadline()).min();
+            let next = next.unwrap_or(u64::MAX);
+            let span = next.saturating_sub(now).min(MAX_SLEEP_MS);
+            if span >= 100 && radio.arm_wake() {
+                button.listen(Event::LowLevel);
+                sleeper.light_sleep(esp_hal::time::Duration::from_millis(span));
+                button.unlisten();
+                continue;
+            }
+        }
+        if now >= next_power_status {
+            next_power_status = now + 60_000;
+            mesh.app.board.power_status = sleeper.summary();
+        }
         // sleep until a frame arrives, a CLI line or a BLE frame comes in, or a timer is due
         let wake = room.as_ref().map_or(u64::MAX, |r| r.next_wakeup()).min(mesh.next_wakeup()).min(now + 50).max(now + 1);
         match select4(radio.wait_irq(), CLI_LINES.receive(), Timer::at(Instant::from_millis(wake)), FRAMES_IN.receive()).await {
@@ -685,6 +731,7 @@ async fn main(spawner: Spawner) -> ! {
                 Err(e) => warn!("rx: {e:?}"),
             },
             Either4::Second(line) => {
+                awake_until = now_ms() + AWAKE_AFTER_ACTIVITY_MS;
                 let cmd = String::from_utf8_lossy(&line);
                 if cmd.trim() == "ota info" || cmd.trim() == "ota rollback" {
                     let reply = match (slots, &store) {
@@ -779,6 +826,7 @@ async fn main(spawner: Spawner) -> ! {
         let down = button.is_low();
         if down && !button_was_down {
             screen_until = now + SCREEN_ON_MS;
+            awake_until = now + AWAKE_AFTER_ACTIVITY_MS;
             next_screen = 0;
         }
         button_was_down = down;

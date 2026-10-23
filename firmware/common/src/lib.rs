@@ -14,6 +14,7 @@ pub mod lr2021;
 pub mod net;
 pub mod noise;
 pub mod ota;
+pub mod power;
 pub mod radio;
 pub mod reset;
 pub mod storage;

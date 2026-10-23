@@ -459,6 +459,8 @@ pub struct OtaEndpoint {
     /// The inactive firmware slot, if the platform supports updates.
     pub target: Option<Box<dyn FirmwareTarget>>,
     session: Option<OtaSession>,
+    /// Requests handled so far: a platform can tell from it when an update was last active.
+    pub requests: u32,
     /// Length and hash of the running image, computed on the first INFO.
     running_image: Option<(u32, [u8; 32])>,
 }
@@ -468,8 +470,14 @@ impl OtaEndpoint {
         (REQ_TYPE_OTA_BEGIN..=REQ_TYPE_OTA_INFO).contains(&kind)
     }
 
+    /// An update has begun and is neither committed nor aborted.
+    pub fn busy(&self) -> bool {
+        self.session.is_some()
+    }
+
     /// Handle one request (`payload[0]` is its type); the reply body, if one is due.
     pub fn handle(&mut self, payload: &[u8], firmware_version: &str) -> (Option<Vec<u8>>, OtaOutcome) {
+        self.requests = self.requests.wrapping_add(1);
         let read_u32 = |i: usize| payload.get(i..i + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
         let u16_at = |i: usize| payload.get(i..i + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
         let status = |r: Result<(), OtaError>| match r {
