@@ -196,6 +196,9 @@ async def main():
     ap.add_argument("--images", type=pathlib.Path, help="image store (delta bases)")
     ap.add_argument("--delta-tool", type=pathlib.Path, default=DEFAULT_DELTA_TOOL)
     ap.add_argument("--no-delta", action="store_true", help="always send the whole image")
+    ap.add_argument("--raw", action="store_true",
+                    help="send the whole image uncompressed: the device only checks it at the end (slow, but "
+                    "it gets firmware whose commit of a compressed update fails onto a new one)")
     ap.add_argument("--info", action="store_true", help="only show the device and the image it runs")
     args = ap.parse_args()
     if not args.info and not args.image:
@@ -233,11 +236,11 @@ async def main():
         how = f"zlib {len(image)} -> {len(payload)} bytes"
         begin = struct.pack("<I", len(payload)) + sha + struct.pack("<HBI", CHUNK, FLAG_ZLIB | FLAG_CRC, len(image))
         # the device stages a compressed stream at the end of the slot and inflates it to the start
-        if sector_align(len(payload)) + sector_align(len(image)) > capacity:
+        if args.raw or sector_align(len(payload)) + sector_align(len(image)) > capacity:
             payload = image
-            how = f"raw {len(image)} bytes (image and its zlib stream do not both fit the slot)"
+            how = f"raw {len(image)} bytes" + ("" if args.raw else " (image and its zlib stream do not both fit the slot)")
             begin = struct.pack("<I", len(payload)) + sha + struct.pack("<HBI", CHUNK, FLAG_CRC, 0)
-        if len(running) >= 12 and not args.no_delta:
+        if len(running) >= 12 and not args.no_delta and not args.raw:
             run_len, run_sha8 = struct.unpack_from("<I", running)[0], running[4:12]
             base = find_base(images, run_len, run_sha8)
             if base == image:

@@ -121,18 +121,22 @@ impl FirmwareTarget for FlashTarget<'_> {
         self.slots.target.2
     }
 
+    // Committing a compressed or delta update rebuilds the image and reads it all back for the
+    // hash without returning to the main loop, for tens of seconds: every flash access feeds the
+    // watchdog.
     fn erase(&mut self, offset: u32, len: u32) -> bool {
-        // committing a compressed or delta update rewrites the whole slot in one go
         crate::reset::feed();
         let base = self.slots.target.1 + offset;
         self.store.borrow_mut().flash().erase(base, base + len).is_ok()
     }
 
     fn write(&mut self, offset: u32, data: &[u8]) -> bool {
+        crate::reset::feed();
         self.store.borrow_mut().flash().write_nor(self.slots.target.1 + offset, data).is_ok()
     }
 
     fn read(&mut self, offset: u32, buf: &mut [u8]) -> bool {
+        crate::reset::feed();
         self.store.borrow_mut().flash().read(self.slots.target.1 + offset, buf).is_ok()
     }
 
@@ -141,6 +145,7 @@ impl FirmwareTarget for FlashTarget<'_> {
     }
 
     fn read_running(&mut self, offset: u32, buf: &mut [u8]) -> bool {
+        crate::reset::feed();
         self.store.borrow_mut().flash().read(self.slots.current.0 + offset, buf).is_ok()
     }
 

@@ -732,7 +732,12 @@ fn inflate(target: &mut dyn FirmwareTarget, src: u32, len: u32, sink: &mut dyn S
     use miniz_oxide::inflate::core::{DecompressorOxide, decompress_with_limit};
 
     const WINDOW: usize = 32 * 1024; // deflate dictionary, wrapping output buffer
-    let mut state = alloc::boxed::Box::new(DecompressorOxide::new());
+    // straight on the heap: `Box::new(DecompressorOxide::new())` builds its ~11 KB on the stack
+    // first, and the firmware commits from its main loop, whose stack overflowed with it
+    // SAFETY: every field of the decompressor is an integer or an array of integers, and the
+    // state enum's first variant (Start) is 0, so all zeroes is a valid value; `init` resets it
+    let mut state: alloc::boxed::Box<DecompressorOxide> = unsafe { alloc::boxed::Box::new_zeroed().assume_init() };
+    state.init();
     let mut window = vec![0u8; WINDOW];
     let mut input = [0u8; 1024];
     let (mut in_read, mut in_pos, mut in_len) = (0u32, 0usize, 0usize);
