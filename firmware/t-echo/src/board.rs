@@ -6,7 +6,7 @@ use embassy_nrf::pac;
 use embassy_nrf::saadc::Saadc;
 use embassy_time::{Duration, Instant};
 use meshcore_fw_core::companion::Board;
-use meshcore_fw_core::ui::{Page, View};
+use meshcore_ui::{Page, View};
 
 use crate::epaper::SCREEN;
 use crate::gps::GPS_ON;

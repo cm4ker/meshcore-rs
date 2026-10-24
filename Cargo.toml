@@ -1,4 +1,4 @@
 [workspace]
 resolver = "2"
-members = ["crates/meshcore", "tools/provision", "tools/ota-delta", "tools/companion-sim"]
+members = ["crates/meshcore", "tools/provision", "tools/ota-delta", "tools/companion-sim", "tools/ui-preview"]
 exclude = ["firmware", "reference"]

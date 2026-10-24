@@ -44,6 +44,7 @@ critical-section = "1.2.0"
 static_cell      = "2.1.1"
 meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
 meshcore-fw = { version = "0.1.0", path = "../common", features = ["esp32s3"] }
+meshcore-ui = { version = "0.1.0", path = "../ui" }
 esp-storage = { version = "0.10.0", features = ["esp32s3"] }
 embassy-sync = "0.8.0"
 embassy-futures = "0.1.2"

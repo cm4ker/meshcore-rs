@@ -43,7 +43,7 @@ use heltec_v4::ble::{self, BLE_CONNECTED, BLE_OUT, BONDS_CHANGED};
 use heltec_v4::board::Fem;
 use heltec_v4::common::{Battery, NoiseFloor, clock_cell};
 use heltec_v4::broker;
-use heltec_v4::display::{Oled, Status};
+use heltec_v4::display::Oled;
 use heltec_v4::ota::{self, FlashTarget, SharedStore};
 use heltec_v4::power::Sleeper;
 use heltec_v4::reset;
@@ -61,6 +61,11 @@ use meshcore::prefs::{NAME_MAX, NodePrefs};
 use meshcore::repeater::{BLE_OTA_WINDOW_MINS, BoardInfo, Repeater};
 use meshcore::util::to_hex;
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE};
+use meshcore_ui::refresh::oled::Oled as ScreenPolicy;
+use meshcore_ui::{
+    Action, Alert, Bar, BleState, Body, Button, Health, NetInfo, OtaWindow, Page, Passport, PowerInfo, Traffic, Ui, UpdateInfo,
+    View, Wifi,
+};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -139,8 +144,12 @@ impl WatchdogFeeder {
     }
 }
 
-/// The status screen stays on this long after boot or a button press.
+/// The screen stays lit this long after boot or a button press.
 const SCREEN_ON_MS: u64 = 60_000;
+/// The screen's pages; the update page only with two firmware slots.
+const PAGES: &[Page] =
+    &[Page::Home, Page::Neighbours, Page::Traffic, Page::Radio, Page::Power, Page::Network, Page::Update, Page::Advert];
+const PAGES_SINGLE_SLOT: &[Page] = &[Page::Home, Page::Neighbours, Page::Traffic, Page::Radio, Page::Power, Page::Network, Page::Advert];
 
 /// `powersaving on`: the first sleep comes this long after boot, a button press or a console line
 /// (upstream: two minutes after boot), and one sleep lasts at most this long (below the watchdog).
@@ -195,6 +204,110 @@ fn ota_ssid(node_name: &str) -> String {
         s.pop();
     }
     s
+}
+
+/// What the screen shows that lives outside the repeater.
+struct ScreenInfo {
+    in_trial: bool,
+    /// The update window over BLE: its PIN, and when it closes.
+    ble_window: Option<(u32, u64)>,
+    /// The Wi-Fi station runs.
+    wifi: bool,
+    asleep_pct: u8,
+}
+
+/// Time on air as tenths of a percent of the uptime.
+fn permille(air_ms: u64, uptime_ms: u64) -> u16 {
+    (air_ms * 1000 / uptime_ms.max(1)).min(1000) as u16
+}
+
+/// The interface's current page with what it shows.
+fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64) -> View {
+    let (app, ctx) = (&mesh.app, &mesh.ctx);
+    let p = &app.prefs;
+    let key = ctx.self_id.pub_key();
+    // as paths and traces show nodes
+    let id_len = p.path_hash_mode as usize + 1;
+    let id = to_hex(&key[..id_len]);
+    let version = alloc::format!("{} {}", meshcore::FIRMWARE_VERSION, BUILD_DATE);
+    let passport = || Passport {
+        name: p.node_name.clone(),
+        freq_mhz: p.radio.freq_mhz,
+        bw_khz: p.radio.bw_khz,
+        sf: p.radio.sf,
+        cr: p.radio.cr,
+        tx_dbm: p.tx_power_dbm,
+        version: version.clone(),
+    };
+    let battery_pct = ui.battery_pct(app.board.batt_mv);
+    let uptime_min = (now / 60_000) as u32;
+    let s = &ctx.stats;
+    let ble_connected = BLE_CONNECTED.load(core::sync::atomic::Ordering::Relaxed);
+    let body = match ui.page() {
+        Page::Neighbours => {
+            let clock = ctx.current_time();
+            let mut list: Vec<_> = app.neighbours().iter().collect();
+            list.sort_by_key(|n| core::cmp::Reverse(n.heard_timestamp));
+            Body::Neighbours(
+                list.iter()
+                    .map(|n| meshcore_ui::Neighbour {
+                        id: to_hex(&n.id.pub_key[..id_len]),
+                        snr: n.snr as i16,
+                        age_min: meshcore_ui::coarse_minutes(clock.saturating_sub(n.heard_timestamp)),
+                    })
+                    .collect(),
+            )
+        }
+        Page::Traffic => Body::Traffic(Traffic {
+            rx: s.n_packets_recv,
+            tx: s.n_packets_sent,
+            rx_errors: s.n_recv_errors,
+            tx_air_permille: permille(s.total_air_time_ms, now),
+            rx_air_permille: permille(s.rx_air_time_ms, now),
+            queue: ctx.outbound_len() as u16,
+            noise_dbm: s.noise_floor,
+        }),
+        Page::Radio => Body::Preset(passport()),
+        Page::Power => Body::Power(PowerInfo {
+            batt_mv: app.board.batt_mv,
+            battery_pct,
+            powersaving: Some(p.powersaving_enabled),
+            asleep_pct: info.asleep_pct,
+            uptime_min,
+        }),
+        Page::Network => {
+            let up = |a: &core::sync::atomic::AtomicBool| a.load(core::sync::atomic::Ordering::Relaxed);
+            let wifi = match (info.wifi, up(&net::WIFI_UP)) {
+                (false, _) => Wifi::Off,
+                (true, false) => Wifi::Connecting { ssid: p.wifi_ssid.clone() },
+                (true, true) => Wifi::Up { ssid: p.wifi_ssid.clone(), ip: app.board.wifi_ip.clone().unwrap_or_default() },
+            };
+            let on: Vec<usize> = (0..meshcore::repeater::MQTT_BROKERS.len())
+                .filter(|&i| info.wifi && p.mqtt_brokers & meshcore::repeater::MQTT_BROKERS[i].1 != 0)
+                .collect();
+            Body::Network(NetInfo {
+                wifi,
+                mqtt_on: on.len() as u8,
+                mqtt_up: on.iter().filter(|&&i| BrokerState::load(i) == BrokerState::Up).count() as u8,
+                time_synced: up(&net::TIME_SYNCED),
+            })
+        }
+        Page::Update => Body::Update(UpdateInfo {
+            window: info.ble_window.map(|(pin, until)| OtaWindow {
+                name: ota_ssid(&p.node_name),
+                pin,
+                connected: ble_connected,
+                mins_left: until.saturating_sub(now).div_ceil(60_000) as u32,
+            }),
+            trial: info.in_trial,
+            version: version.clone(),
+        }),
+        Page::Advert => Body::Advert { flood: true },
+        _ => Body::Repeater(passport(), Health { neighbours: app.neighbours().len() as u16, battery_pct, uptime_min }),
+    };
+    let (page_idx, pages, alert) = ui.view_frame();
+    let ble = info.ble_window.map(|_| if ble_connected { BleState::Connected } else { BleState::Waiting });
+    View { page: ui.page(), page_idx, pages, bar: Bar { battery_pct, ble, id: Some(id) }, body, alert, pin: None }
 }
 
 fn now_ms() -> u64 {
@@ -609,15 +722,22 @@ async fn main(spawner: Spawner) -> ! {
         .map(|i2c| i2c.with_sda(p.GPIO17).with_scl(p.GPIO18))
         .and_then(|i2c| Oled::new(i2c, oled_rst));
     let mut button = Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::Up));
-    let mut button_was_down = false;
     let mut sleeper = Sleeper::new(p.LPWR);
     let mut awake_until = now_ms() + AWAKE_AFTER_ACTIVITY_MS;
     let (mut ota_requests, mut ota_seen) = (0u32, 0u64);
     let mut next_power_status = 0u64;
-    let mut screen_until = now_ms() + SCREEN_ON_MS;
-    let mut next_screen = 0u64;
-    let mut oled_failures = 0u8;
-    let id_prefix = alloc::format!("ID {}", to_hex(&self_id.pub_key()[..4]));
+    // the on-device interface: pages on the OLED, turned with the PRG button
+    let pages: &'static [Page] = match (&oled, slots) {
+        (None, _) => &[],
+        (Some(_), Some(_)) => PAGES,
+        (Some(_), None) => PAGES_SINGLE_SLOT,
+    };
+    let mut ui = Ui::new(pages).with_screen_timeout(SCREEN_ON_MS, now_ms());
+    let mut ui_button = Button::default();
+    let mut screen = ScreenPolicy::default();
+    let (mut next_view, mut next_oled_try, mut oled_failures) = (0u64, 0u64, 0u8);
+    // the PIN of the open update window, for the screen
+    let mut ble_pin: Option<u32> = None;
 
     info!("boot: console");
     wdt.feed();
@@ -705,7 +825,7 @@ async fn main(spawner: Spawner) -> ! {
         let usb_host = sleeper.usb_host_active();
         if mesh.app.prefs.powersaving_enabled
             && now >= awake_until
-            && now >= screen_until
+            && !ui.screen_on(now)
             && !usb_host
             && station.is_none()
             && wifi.is_some() // no update access point either
@@ -836,61 +956,70 @@ async fn main(spawner: Spawner) -> ! {
         }
 
         prof.mark("screen");
-        // status screen: PRG button wakes it, it sleeps after SCREEN_ON_MS
+        // the interface: the PRG button lights the screen and turns the pages
         let down = button.is_low();
-        if down && !button_was_down {
-            screen_until = now + SCREEN_ON_MS;
+        if down && !ui_button.is_down() {
+            ui.button_down(now);
             awake_until = now + AWAKE_AFTER_ACTIVITY_MS;
-            next_screen = 0;
+            next_view = 0;
         }
-        button_was_down = down;
+        ui.tick(now);
+        if let Some(intent) = ui_button.poll(down, now) {
+            next_view = 0;
+            match ui.press(intent, now) {
+                Some(Action::Advert) => {
+                    let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "advert");
+                    ui.alert(Alert::AdvertSent, now);
+                }
+                // opened with the other effects below, as by `start ota ble`; the PIN goes on the
+                // screen (whoever holds the board may update it anyway, over USB)
+                Some(Action::ToggleUpdate) if ble_until.is_none() => {
+                    let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "start ota ble");
+                }
+                Some(Action::ToggleUpdate) if !BLE_CONNECTED.load(core::sync::atomic::Ordering::Relaxed) => {
+                    (ble_until, ble_pin) = (None, None);
+                    ble::stop();
+                    println!("BLE update window closed with the button");
+                }
+                _ => {}
+            }
+        }
         if oled_failures >= 10 {
             warn!("OLED: disabled after repeated bus errors");
             oled = None;
             oled_failures = 0;
         }
         if let Some(o) = oled.as_mut() {
-            if now >= screen_until {
+            if !ui.screen_on(now) {
                 if o.is_on() {
                     info!("OLED: screen off ({} failed I2C transfers since boot)", o.bus_errors());
                 }
                 o.set_on(false);
-            } else if now >= next_screen {
-                next_screen = now + 1000;
-                o.set_on(true);
-                let p = &mesh.app.prefs;
-                let radio = alloc::format!(
-                    "{} {}k SF{} CR{}",
-                    meshcore::util::ftoa(p.radio.freq_mhz as f64, 3),
-                    meshcore::util::ftoa(p.radio.bw_khz as f64, 1),
-                    p.radio.sf,
-                    p.radio.cr
-                );
-                let s = &mesh.ctx.stats;
-                let ok = o.show(&Status {
-                    name: &p.node_name,
-                    radio: &radio,
-                    rx: s.n_packets_recv,
-                    tx: s.n_packets_sent,
-                    noise_floor: s.noise_floor,
-                    last_rssi: s.last_rssi,
-                    last_snr: s.last_snr,
-                    batt_mv: mesh.app.board.batt_mv,
-                    uptime_s: now / 1000,
-                    counter: ("N", mesh.app.neighbours().len()),
-                    id_prefix: &id_prefix,
-                    note: in_trial.then_some("OTA trial boot"),
-                });
-                if ok {
-                    if oled_failures > 0 {
-                        info!("OLED: back after {oled_failures} failed frames");
+                screen.forget();
+            } else if now >= next_view && now >= next_oled_try {
+                next_view = now + 250;
+                let info = ScreenInfo {
+                    in_trial,
+                    ble_window: ble_pin.zip(ble_until),
+                    wifi: station.is_some(),
+                    asleep_pct: sleeper.asleep_pct(),
+                };
+                let view = repeater_view(&mut ui, &mesh, &info, now);
+                if screen.due(&view, now) {
+                    o.set_on(true);
+                    if o.show(&view) {
+                        if oled_failures > 0 {
+                            info!("OLED: back after {oled_failures} failed frames");
+                        }
+                        oled_failures = 0;
+                        screen.drawn(view, now);
+                    } else {
+                        // the next frame resets the controller first; back off if that keeps failing
+                        oled_failures += 1;
+                        next_oled_try = now + 1000 * oled_failures as u64;
+                        screen.forget();
+                        warn!("OLED: no answer ({oled_failures}), resetting it");
                     }
-                    oled_failures = 0;
-                } else {
-                    // the next frame resets the controller first; back off if that keeps failing
-                    oled_failures += 1;
-                    next_screen = now + 1000 * oled_failures as u64;
-                    warn!("OLED: no answer ({oled_failures}), resetting it");
                 }
             }
         }
@@ -1065,6 +1194,8 @@ async fn main(spawner: Spawner) -> ! {
         }
         if let Some(pin) = fx.start_ble_ota {
             ble_until = Some(now + BLE_OTA_WINDOW_MINS as u64 * 60_000);
+            ble_pin = Some(pin);
+            next_view = 0;
             let params = ble::Params {
                 name: ota_ssid(&mesh.app.prefs.node_name),
                 address: ble::static_address(),
@@ -1081,7 +1212,7 @@ async fn main(spawner: Spawner) -> ! {
             if BLE_CONNECTED.load(core::sync::atomic::Ordering::Relaxed) {
                 ble_until = Some(now + 60_000); // let a running upload finish
             } else {
-                ble_until = None;
+                (ble_until, ble_pin) = (None, None);
                 ble::stop();
                 println!("BLE update window closed");
             }

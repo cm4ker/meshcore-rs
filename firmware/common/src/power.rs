@@ -51,6 +51,11 @@ impl<'d> Sleeper<'d> {
         self.wakes += 1;
     }
 
+    /// The share of the uptime spent asleep, in percent.
+    pub fn asleep_pct(&self) -> u8 {
+        (self.asleep.as_secs() * 100 / self.started.elapsed().as_secs().max(1)).min(100) as u8
+    }
+
     /// For `powersaving stats`.
     pub fn summary(&self) -> alloc::string::String {
         let up = self.started.elapsed().as_secs().max(1);

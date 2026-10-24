@@ -20,7 +20,7 @@ use log::warn;
 use meshcore::companion::CompanionPrefs;
 use meshcore::ota::FirmwareTarget;
 use meshcore_fw_core::companion::{self, BleSetup, Links, Platform, TCP_PORT};
-pub use meshcore_fw_core::companion::{Board, Config, Status};
+pub use meshcore_fw_core::companion::{Board, Config};
 
 use crate::ota::{self, SharedStore, Slots};
 use crate::radio::LoraRadio;

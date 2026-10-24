@@ -35,7 +35,7 @@ use crate::links::{BLE_CONNECTED, BLE_ENABLED, BLE_OUT, BLE_PASSKEY, BONDS_CHANG
 use crate::noise::NoiseFloor;
 use crate::radio::{LoraRadio, RxEvent};
 use crate::storage::{Blob, CompBlob, SharedStore};
-use crate::ui::{self, Action, Alert, Bar, BleState, Body, Button, GpsInfo, Node, Page, RadioInfo, Ui, View};
+use meshcore_ui::{self as ui, Action, Alert, Bar, BleState, Body, Button, GpsInfo, Node, Page, RadioInfo, Ui, View};
 
 const SCREEN_ON_MS: u64 = 60_000;
 const TRIAL_HEALTHY_MS: u64 = 120_000;
@@ -50,22 +50,6 @@ const ADVERT_PRESS_MS: u64 = 1500;
 const DEFAULT_BLE_PIN: u32 = 123_456;
 /// The clock follows the GPS this often (upstream `TIME_SYNC_INTERVAL`).
 const GPS_TIME_SYNC_MS: u64 = 30 * 60 * 1000;
-
-/// What the status screen shows (once a second while it is on).
-pub struct Status<'a> {
-    pub name: &'a str,
-    pub radio: &'a str,
-    pub rx: u32,
-    pub tx: u32,
-    pub noise_floor: i16,
-    pub last_rssi: f32,
-    pub last_snr: f32,
-    pub batt_mv: u16,
-    pub uptime_s: u64,
-    pub contacts: usize,
-    pub id_prefix: &'a str,
-    pub note: Option<&'a str>,
-}
 
 /// Board-specific hardware around the radio.
 // Only used generically (never as `dyn`), so the futures' `Send`-ness does not matter.
@@ -90,20 +74,20 @@ pub trait Board {
     fn has_screen(&self) -> bool {
         false
     }
-    fn show_status(&mut self, _status: &Status<'_>) {}
+    /// The screen went dark (a minute after the last press, unless it keeps its image).
     fn screen_off(&mut self) {}
-    /// A screen that keeps its image unpowered (e-paper): the status goes to it all the time, and
-    /// the board decides when to redraw.
+    /// A screen that keeps its image unpowered (e-paper): it never goes dark, and the board
+    /// decides when to redraw.
     fn always_on(&self) -> bool {
         false
     }
-    /// The pages of the on-device interface ([`ui`]), the home page first; none = the board only
-    /// shows the status ([`Self::show_status`]).
+    /// The pages of the on-device interface ([`meshcore_ui`]), the home page first; none = no
+    /// interface (a press of the button sends an advert).
     fn ui_pages(&self) -> &'static [Page] {
         &[]
     }
-    /// The interface's page, about once a second and right after a press: the board renders it
-    /// and decides when to redraw.
+    /// The interface's page while the screen is lit, about once a second and right after a
+    /// press: the board renders it and decides when to redraw.
     fn show_view(&mut self, _view: &View) {}
     /// A GPS receiver, whose readings the board's serial task hands to [`gps::publish`].
     fn has_gps(&self) -> bool {
@@ -264,15 +248,17 @@ fn build_view(
                 in_view: fix.map_or(0, |f| f.in_view),
             })
         }
-        Page::Advert => Body::Advert,
+        Page::Advert => Body::Advert { flood: false },
         Page::PowerOff => Body::PowerOff,
+        // repeater pages
+        _ => Body::Home { name: app.prefs.node_name.clone(), unread },
     };
     let (page_idx, pages, alert) = ui.view_frame();
     View {
         page: ui.page(),
         page_idx,
         pages,
-        bar: Bar { battery_pct: ui.battery_pct(app.board.batt_mv), ble },
+        bar: Bar { battery_pct: ui.battery_pct(app.board.batt_mv), ble: Some(ble), id: None },
         body,
         alert,
         pin: (pin != 0).then_some(pin),
@@ -428,7 +414,6 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     // from here on the USB port carries companion frames only
     log::set_max_level(log::LevelFilter::Off);
 
-    let id_prefix = alloc::format!("ID {}", to_hex(&self_id.pub_key()[..4]));
     let mut noise = NoiseFloor::new();
     let mut next_batt = now_ms() + 60_000;
     let mut next_clock_save = now_ms() + CLOCK_SAVE_INTERVAL_MS;
@@ -438,17 +423,20 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     let mut reboot_at: Option<u64> = None;
     let confirm_at = now_ms() + TRIAL_HEALTHY_MS;
     let mut button_down_at: Option<u64> = None;
-    let mut screen_until = now_ms() + SCREEN_ON_MS;
     // where replies go: the link of the latest request
     let mut reply_to = Link::Usb;
     let mut next_screen = 0u64;
     let mut ui = Ui::new(board.ui_pages());
+    if !board.always_on() {
+        ui = ui.with_screen_timeout(SCREEN_ON_MS, now_ms());
+    }
     let mut button = Button::default();
     let mut next_gps = 0u64;
     let mut next_gps_position = 0u64;
     let mut next_gps_time = 0u64;
     let mut gps_fix_secs = 0u32;
     let mut messages_seen = 0u32;
+    let mut messages_lit = 0u32;
     loop {
         platform.feed_watchdog();
         let now = now_ms();
@@ -489,7 +477,6 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
                 reply_to = link;
                 mesh.ctx.now = now_ms();
                 mesh.app.handle_frame(&mut mesh.ctx, &frame);
-                screen_until = screen_until.max(now_ms() + 10_000);
             }
             Either3::Third(()) => {}
         }
@@ -523,9 +510,12 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             comp_save(&store, CompBlob::Bonds, &bonds);
         }
         let pin = BLE_PASSKEY.load(Ordering::Relaxed);
-        if pin != 0 && screen_until < now + 5000 {
-            screen_until = now + 30_000; // the phone asks for the PIN on the screen
-            next_screen = 0;
+        if pin != 0 {
+            // the phone asks for the PIN on the screen: keep it lit while pairing
+            if !ui.screen_on(now) {
+                next_screen = 0;
+            }
+            ui.wake(now);
         }
 
         if !radio.is_receiving().unwrap_or(true)
@@ -546,9 +536,14 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         };
         if ui.enabled() {
             ui.tick(now);
-            if let Some(press) = button.poll(board.button_down(), now) {
+            let down = board.button_down();
+            if down && !button.is_down() {
+                ui.button_down(now);
                 next_screen = 0;
-                match ui.press(press, now) {
+            }
+            if let Some(intent) = button.poll(down, now) {
+                next_screen = 0;
+                match ui.press(intent, now) {
                     Some(Action::Advert) => {
                         let sent = mesh.app.advert(&mut mesh.ctx);
                         ui.alert(if sent { Alert::AdvertSent } else { Alert::AdvertFailed }, now);
@@ -565,17 +560,30 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
                         ui.alert(if on { Alert::GpsOn } else { Alert::GpsOff }, now);
                     }
                     Some(Action::PowerOff) => mesh.app.effects.power_off = true,
-                    None => {}
+                    Some(Action::ToggleUpdate) | None => {}
                 }
             }
+            if ui.page() == Page::Messages {
+                messages_seen = mesh.app.messages_received;
+            }
+            // a new message lights a dark screen
+            if mesh.app.messages_received != messages_lit {
+                messages_lit = mesh.app.messages_received;
+                ui.wake(now);
+                next_screen = 0;
+            }
+            if !ui.screen_on(now) {
+                board.screen_off();
+            } else if now >= next_screen {
+                next_screen = now + 1000;
+                let unread = mesh.app.messages_received.wrapping_sub(messages_seen);
+                let view = build_view(&mut ui, &mesh, ble_state, fixed_pin, pin, unread, now);
+                board.show_view(&view);
+            }
         } else {
-            // button: a press wakes the screen, a long press sends a zero-hop advert
+            // no interface: a long press of the button sends a zero-hop advert
             match (board.button_down(), button_down_at) {
-                (true, None) => {
-                    button_down_at = Some(now);
-                    screen_until = now + SCREEN_ON_MS;
-                    next_screen = 0;
-                }
+                (true, None) => button_down_at = Some(now),
                 (false, Some(t)) => {
                     button_down_at = None;
                     if now - t >= ADVERT_PRESS_MS {
@@ -584,59 +592,6 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
                 }
                 _ => {}
             }
-        }
-        if ui.enabled() {
-            if ui.page() == Page::Messages {
-                messages_seen = mesh.app.messages_received;
-            }
-            if now >= next_screen {
-                next_screen = now + 1000;
-                let unread = mesh.app.messages_received.wrapping_sub(messages_seen);
-                let view = build_view(&mut ui, &mesh, ble_state, fixed_pin, pin, unread, now);
-                board.show_view(&view);
-            }
-        } else if now >= screen_until && !board.always_on() {
-            board.screen_off();
-        } else if now >= next_screen {
-            next_screen = now + 1000;
-            let pr = &mesh.app.prefs;
-            let radio_line = alloc::format!(
-                "{} {}k SF{} CR{}",
-                meshcore::util::ftoa(pr.radio.freq_mhz as f64, 3),
-                meshcore::util::ftoa(pr.radio.bw_khz as f64, 1),
-                pr.radio.sf,
-                pr.radio.cr
-            );
-            let waiting = mesh.app.queued_messages();
-            let note = if pin != 0 {
-                Some(alloc::format!("BLE PIN {pin:06}"))
-            } else if in_trial {
-                Some(String::from("OTA trial boot"))
-            } else if waiting > 0 {
-                Some(alloc::format!("{waiting} new message(s)"))
-            } else if ble_app {
-                Some(String::from("BLE: app connected"))
-            } else {
-                (links.tcp)
-                    .then(|| mesh.app.board.wifi_ip.as_ref().map(|ip| alloc::format!("{ip}:{TCP_PORT}")))
-                    .flatten()
-                    .or_else(|| links.ble.then(|| String::from("BLE: waiting for app")))
-            };
-            let s = &mesh.ctx.stats;
-            board.show_status(&Status {
-                name: &pr.node_name,
-                radio: &radio_line,
-                rx: s.n_packets_recv,
-                tx: s.n_packets_sent,
-                noise_floor: s.noise_floor,
-                last_rssi: s.last_rssi,
-                last_snr: s.last_snr,
-                batt_mv: mesh.app.board.batt_mv,
-                uptime_s: now / 1000,
-                contacts: mesh.app.num_contacts(),
-                id_prefix: &id_prefix,
-                note: note.as_deref(),
-            });
         }
 
         // network: SNTP time, address for `get wifi.*`

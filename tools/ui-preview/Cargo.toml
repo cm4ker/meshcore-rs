@@ -1,0 +1,11 @@
+[package]
+edition     = "2024"
+name        = "ui-preview"
+version     = "0.1.0"
+publish     = false
+description = "Draws every page of the on-device interface in every screen class into PNG sheets, and checks that nothing runs off the screen or over something else"
+
+[dependencies]
+meshcore-ui = { path = "../../firmware/ui", features = ["samples"] }
+embedded-graphics = "0.8"
+png = "0.17"

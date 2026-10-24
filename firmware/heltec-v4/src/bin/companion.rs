@@ -32,13 +32,15 @@ use log::{info, warn};
 
 use heltec_v4::board::Fem;
 use heltec_v4::common::Battery;
-use heltec_v4::display::{Oled, Status as OledStatus};
+use heltec_v4::display::Oled;
 use heltec_v4::reset;
 use heltec_v4::radio::EspIrq;
 use heltec_v4::storage;
 use heltec_v4::sx1262::Sx1262;
 use meshcore::radio::RadioParams;
-use meshcore_fw::companion_app::{self, Board, Config, Hardware, Status};
+use meshcore_fw::companion_app::{self, Board, Config, Hardware};
+use meshcore_ui::refresh::oled::Oled as Policy;
+use meshcore_ui::{Page, View};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -48,6 +50,9 @@ const BUILD_DATE: &str = env!("BUILD_DATE");
 const WATCHDOG_SECS: u64 = 30;
 /// SX1262 output; the FEM's PA makes ~22 dBm of 10 dBm.
 const MAX_TX_POWER_DBM: i8 = 22;
+/// The on-device interface (no Bluetooth page: the ESP BLE task cannot be switched off yet; no
+/// power-off page: nothing but a reset would wake the board).
+const PAGES: &[Page] = &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Advert];
 
 struct HeltecV4<'d> {
     fem: Fem<'d>,
@@ -57,6 +62,7 @@ struct HeltecV4<'d> {
     oled: Option<Oled<'d>>,
     oled_failures: u8,
     next_oled_try: u64,
+    screen: Policy,
 }
 
 impl Board for HeltecV4<'_> {
@@ -102,35 +108,27 @@ impl Board for HeltecV4<'_> {
         self.oled.is_some()
     }
 
-    fn show_status(&mut self, s: &Status<'_>) {
+    fn ui_pages(&self) -> &'static [Page] {
+        if self.oled.is_some() { PAGES } else { &[] }
+    }
+
+    fn show_view(&mut self, v: &View) {
         let now = embassy_time::Instant::now().as_millis();
-        if now < self.next_oled_try {
+        if now < self.next_oled_try || !self.screen.due(v, now) {
             return;
         }
         let Some(o) = self.oled.as_mut() else {
             return;
         };
         o.set_on(true);
-        let ok = o.show(&OledStatus {
-            name: s.name,
-            radio: s.radio,
-            rx: s.rx,
-            tx: s.tx,
-            noise_floor: s.noise_floor,
-            last_rssi: s.last_rssi,
-            last_snr: s.last_snr,
-            batt_mv: s.batt_mv,
-            uptime_s: s.uptime_s,
-            counter: ("C", s.contacts),
-            id_prefix: s.id_prefix,
-            note: s.note,
-        });
-        if ok {
+        if o.show(v) {
             self.oled_failures = 0;
+            self.screen.drawn(v.clone(), now);
         } else {
             // the next frame resets the controller first; back off if that keeps failing
             self.oled_failures += 1;
             self.next_oled_try = now + 1000 * self.oled_failures as u64;
+            self.screen.forget();
             if self.oled_failures >= 10 {
                 warn!("OLED: disabled after repeated bus errors");
                 self.oled = None;
@@ -142,6 +140,7 @@ impl Board for HeltecV4<'_> {
         if let Some(o) = self.oled.as_mut() {
             o.set_on(false);
         }
+        self.screen.forget();
     }
 }
 
@@ -210,6 +209,7 @@ async fn main(spawner: Spawner) -> ! {
         oled,
         oled_failures: 0,
         next_oled_try: 0,
+        screen: Policy::default(),
     };
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(p.USB_DEVICE).split();
     let hw = Hardware { radio, store, usb_rx, wifi: p.WIFI, bt: p.BT, entropy };

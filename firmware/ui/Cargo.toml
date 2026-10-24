@@ -1,0 +1,14 @@
+[package]
+edition      = "2024"
+name         = "meshcore-ui"
+rust-version = "1.88"
+version      = "0.1.0"
+description  = "The on-device interface of the MeshCore firmware: each role's pages, input, layouts per screen class, refresh policies"
+
+[dependencies]
+embedded-graphics = "0.8"
+u8g2-fonts = "0.8.0"
+
+[features]
+# example views of every page (long names, empty and overfull lists), for tools/ui-preview
+samples = []

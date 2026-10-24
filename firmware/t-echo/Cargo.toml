@@ -30,9 +30,9 @@ log = "0.4.27"
 heapless = "0.9"
 embedded-graphics = "0.8"
 embedded-storage = "0.3"
-u8g2-fonts = "0.8.0"
 meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
 meshcore-fw-core = { version = "0.1.0", path = "../fw-core" }
+meshcore-ui = { version = "0.1.0", path = "../ui" }
 trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "derive", "security", "default-packet-pool-mtu-255", "log"] }
 nrf-sdc = { version = "0.4.0", default-features = false, features = ["nrf52840", "peripheral"] }
 nrf-mpsl = { version = "0.4.0", default-features = false, features = ["critical-section-impl"] }

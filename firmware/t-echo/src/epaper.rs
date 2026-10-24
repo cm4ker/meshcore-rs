@@ -1,15 +1,7 @@
 //! The T-Echo's 1.54" e-paper (GDEH0154D67, SSD1681 controller, 200 x 200): the interface's
-//! pages ([`crate::screen`]), drawn in their own task so a refresh (up to 2 s) never holds up the
-//! radio.
-//!
-//! A page turn, a notice, a pairing PIN, Bluetooth, the home page or new messages change the
-//! screen at once; anything else (counters, ages, the battery) at most every
-//! [`MIN_REFRESH_MS`]: an e-paper keeps its image without power, and refreshes are slow and wear
-//! it. Refreshes are partial, but a partial refresh drives only the pixels that change and the
-//! rest slowly fades, so now and then the page is redrawn in full, which flashes the screen: once
-//! nothing has changed for [`QUIET_MS`] after [`CLEAN_AFTER_PARTIALS`] partial refreshes (or
-//! after any, if the last full one is [`CLEAN_EVERY_MS`] old), and at every [`FULL_EVERY`]th
-//! refresh in a row.
+//! pages in the square e-paper layout ([`meshcore_ui::layout::Class::EpaperSquare`]), drawn in
+//! their own task so a refresh (up to 2 s) never holds up the radio, when the e-paper refresh
+//! policy ([`meshcore_ui::refresh::epaper`]) says so.
 
 use embassy_nrf::gpio::{Input, Output};
 use embassy_nrf::spim::Spim;
@@ -18,17 +10,12 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
-use meshcore_fw_core::ui::{Body, View};
-
-use crate::screen::render;
+use meshcore_ui::layout::Class;
+use meshcore_ui::refresh::epaper::Epaper as Policy;
+use meshcore_ui::{Body, View};
 
 pub const WIDTH: usize = 200;
 pub const HEIGHT: usize = 200;
-const MIN_REFRESH_MS: u64 = 30_000;
-const QUIET_MS: u64 = 20_000;
-const CLEAN_AFTER_PARTIALS: u32 = 15;
-const CLEAN_EVERY_MS: u64 = 60 * 60 * 1000;
-const FULL_EVERY: u32 = 30;
 
 pub static SCREEN: Signal<CriticalSectionRawMutex, View> = Signal::new();
 
@@ -141,74 +128,50 @@ impl Epaper {
     }
 }
 
-/// A change worth a refresh right away (else it waits for [`MIN_REFRESH_MS`]).
-fn urgent(old: &View, new: &View) -> bool {
-    old.page != new.page
-        || old.alert != new.alert
-        || old.pin != new.pin
-        || old.bar.ble != new.bar.ble
-        || matches!(new.body, Body::Home { .. } | Body::Off { .. })
-        || match (&old.body, &new.body) {
-            // a new message while the page is open (not the ages ticking)
-            (Body::Messages(a), Body::Messages(b)) => {
-                a.len() != b.len() || a.iter().zip(b).any(|(a, b)| a.from != b.from || a.text != b.text)
-            }
-            _ => false,
-        }
+fn render(v: &View) -> Frame {
+    let mut f = Frame::blank();
+    Class::EpaperSquare.render(v, &mut f);
+    f
+}
+
+fn now_ms() -> u64 {
+    Instant::now().as_millis()
 }
 
 #[embassy_executor::task]
 pub async fn task(mut epd: Epaper) {
     epd.init().await;
-    let mut shown: Option<View> = None;
-    let mut last = Instant::from_millis(0);
-    let mut last_full = Instant::from_millis(0);
-    let mut partials = 0u32; // since the last full refresh
+    let mut policy = Policy::default();
     loop {
-        let quiet = last + Duration::from_millis(QUIET_MS);
-        let clean_at = match partials {
-            0 => None,
-            n if n >= CLEAN_AFTER_PARTIALS => Some(quiet),
-            _ => Some(quiet.max(last_full + Duration::from_millis(CLEAN_EVERY_MS))),
-        };
-        let next = match clean_at {
-            Some(at) => embassy_time::with_deadline(at, SCREEN.wait()).await.ok(),
+        let next = match policy.clean_at() {
+            Some(at) => embassy_time::with_deadline(Instant::from_millis(at), SCREEN.wait()).await.ok(),
             None => Some(SCREEN.wait().await),
         };
         let Some(mut view) = next else {
             // nothing changed for a while: restore the contrast the partial refreshes wore off
-            if let Some(v) = &shown {
+            if let Some(v) = policy.shown() {
                 epd.show(&render(v), true).await;
             }
-            partials = 0;
-            last_full = Instant::now();
+            policy.cleaned(now_ms());
             continue;
         };
-        if shown.as_ref() == Some(&view) {
+        // show the latest state once its time has come (at once if it cannot wait)
+        loop {
+            match policy.due(&view) {
+                Some(at) if at > now_ms() => match embassy_time::with_deadline(Instant::from_millis(at), SCREEN.wait()).await {
+                    Ok(newer) => view = newer,
+                    Err(_) => break,
+                },
+                _ => break,
+            }
+        }
+        if policy.due(&view).is_none() {
             continue;
         }
-        if shown.as_ref().is_some_and(|s| !urgent(s, &view)) {
-            // show the latest state once the minimum interval is up, or as soon as it is urgent
-            let until = last + Duration::from_millis(MIN_REFRESH_MS);
-            while let Ok(newer) = embassy_time::with_deadline(until, SCREEN.wait()).await {
-                view = newer;
-                if shown.as_ref().is_some_and(|s| urgent(s, &view)) {
-                    break;
-                }
-            }
-            if shown.as_ref() == Some(&view) {
-                continue;
-            }
-        }
         let off = matches!(view.body, Body::Off { .. });
-        let full = shown.is_none() || off || partials + 1 >= FULL_EVERY;
+        let full = policy.full(&view);
         epd.show(&render(&view), full).await;
-        partials = if full { 0 } else { partials + 1 };
-        last = Instant::now();
-        if full {
-            last_full = last;
-        }
-        shown = Some(view);
+        policy.drawn(view, full, now_ms());
         if off {
             epd.sleep().await;
             crate::board::system_off();

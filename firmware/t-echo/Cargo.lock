@@ -1285,6 +1285,15 @@ dependencies = [
  "libm",
  "log",
  "meshcore",
+ "meshcore-ui",
+]
+
+[[package]]
+name = "meshcore-ui"
+version = "0.1.0"
+dependencies = [
+ "embedded-graphics",
+ "u8g2-fonts",
 ]
 
 [[package]]
@@ -1851,11 +1860,11 @@ dependencies = [
  "log",
  "meshcore",
  "meshcore-fw-core",
+ "meshcore-ui",
  "nrf-mpsl",
  "nrf-sdc",
  "static_cell",
  "trouble-host",
- "u8g2-fonts",
 ]
 
 [[package]]
