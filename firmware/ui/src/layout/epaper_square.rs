@@ -13,7 +13,7 @@ use crate::model::{BleState, Body, View, Wifi};
 use crate::text::{ago, clean, duration, micro_deg, permille, plural, quarter, quarter_signed, trim_float, volts};
 use crate::theme::Font;
 use crate::theme::square::{BIG, BIG_BOLD, FREQ_DIGITS, HUGE_DIGITS, SMALL, TEXT, TEXT_BOLD};
-use crate::widgets::{Canvas, fit, width, wrap};
+use crate::widgets::{Canvas, fit, qr_side, width, wrap};
 
 const MARGIN: i32 = 4;
 /// Where the page's content starts, under the bar.
@@ -22,6 +22,8 @@ const BODY_TOP: i32 = 30;
 const HINT_Y: i32 = 146;
 /// List rows.
 const ROW: i32 = 22;
+/// The contact's QR code, at most (with the caption under it and the dots below).
+const QR_MAX: i32 = 138;
 
 type C<'a, 'b, D> = &'a mut Canvas<'b, D>;
 
@@ -257,6 +259,13 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
             c.text(&TEXT_BOLD, &mqtt, MARGIN, BODY_TOP + 76);
             c.text(&TEXT, if n.time_synced { "Часы по сети" } else { "Часы ждут сети" }, MARGIN, BODY_TOP + 98);
         }
+        Body::Contact(link) => match qr_side(link, QR_MAX) {
+            Some(side) => {
+                c.qr(link, (w - side) / 2, BODY_TOP, QR_MAX, false);
+                c.centered(&SMALL, "Сканируйте телефоном", BODY_TOP + side + 1);
+            }
+            None => c.text(&TEXT, "Ссылка не помещается", MARGIN, BODY_TOP + 2),
+        },
         Body::Update(u) => match &u.window {
             None => {
                 c.text(&TEXT_BOLD, "Окно закрыто", MARGIN, BODY_TOP + 2);

@@ -10,8 +10,17 @@ use crate::model::*;
 
 pub const COMPANION_PAGES: &[Page] =
     &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Bluetooth, Page::Gps, Page::Advert, Page::PowerOff];
-pub const REPEATER_PAGES: &[Page] =
-    &[Page::Home, Page::Neighbours, Page::Traffic, Page::Radio, Page::Power, Page::Network, Page::Update, Page::Advert];
+pub const REPEATER_PAGES: &[Page] = &[
+    Page::Home,
+    Page::Contact,
+    Page::Neighbours,
+    Page::Traffic,
+    Page::Radio,
+    Page::Power,
+    Page::Network,
+    Page::Update,
+    Page::Advert,
+];
 
 fn frame(pages: &[Page], page: Page, bar: Bar, body: Body) -> View {
     let idx = pages.iter().position(|&p| p == page).unwrap_or(0);
@@ -110,6 +119,10 @@ pub fn repeater_view(page: Page) -> View {
         }),
         Page::Update => Body::Update(UpdateInfo { window: None, trial: false, version: "v1.18.0-rs (24 Oct 2026)".into() }),
         Page::Advert => Body::Advert { flood: true },
+        Page::Contact => Body::Contact(alloc::format!(
+            "meshcore://contact/add?name=Omsk-RPT&public_key={}&type=2",
+            "3fa2910c57e1d4b8a6f0c3e29b1d7a4c5e8f20b6d9c3a1e7f4b2c8d0e6a9f1b3"
+        )),
         _ => Body::Repeater(passport(), Health { neighbours: 5, batt_mv: 4050, uptime_min: 4400 }),
     };
     frame(REPEATER_PAGES, page, repeater_bar(), body)
@@ -203,6 +216,29 @@ pub fn all() -> Vec<(String, View)> {
         v.bar.id = Some(id.into());
         add(&format!("repeater-home-id-{}-bytes", id.len() / 2), v);
     }
+    add(
+        "contact-fitted",
+        with(
+            r(Page::Contact),
+            Body::Contact(alloc::format!(
+                "meshcore://contact/add?name={}&public_key={}&type=2",
+                "Wan3-SVOBODA-%F0%9F%8F%A2%F0%9F%94%8B%D0%9E",
+                "3fa2910c57e1d4b8a6f0c3e29b1d7a4c5e8f20b6d9c3a1e7f4b2c8d0e6a9f1b3"
+            )),
+        ),
+    );
+    // a name of emoji and Cyrillic makes the link long (each byte as %XX)
+    add(
+        "contact-long-name",
+        with(
+            r(Page::Contact),
+            Body::Contact(alloc::format!(
+                "meshcore://contact/add?name={}&public_key={}&type=2",
+                "Wan3-SVOBODA-%F0%9F%8F%A2%F0%9F%94%8B%D0%9E%D1%87%D0%B5%D0%BD%D1%8C",
+                "3fa2910c57e1d4b8a6f0c3e29b1d7a4c5e8f20b6d9c3a1e7f4b2c8d0e6a9f1b3"
+            )),
+        ),
+    );
     add("neighbours-empty", with(r(Page::Neighbours), Body::Neighbours(vec![])));
     let many: Vec<Neighbour> = (0..12).map(|i| neighbour("3FA291", -80 + i * 13, i as u32 * 300)).collect();
     add("neighbours-many", with(r(Page::Neighbours), Body::Neighbours(many)));

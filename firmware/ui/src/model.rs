@@ -21,6 +21,8 @@ pub enum Page {
     Power,
     Network,
     Update,
+    /// The node's contact as a QR code.
+    Contact,
 }
 
 /// What a long press on a page asks the firmware to do.
@@ -249,6 +251,8 @@ pub enum Body {
     Power(PowerInfo),
     Network(NetInfo),
     Update(UpdateInfo),
+    /// A QR code of the node's contact link (`meshcore://contact/add?...`), for the app's camera.
+    Contact(String),
 }
 
 /// Everything a screen shows, for the board to render.

@@ -8,6 +8,7 @@ description  = "The on-device interface of the MeshCore firmware: each role's pa
 [dependencies]
 embedded-graphics = "0.8"
 u8g2-fonts = "0.8.0"
+qrcodegen-no-heap = "1.8"
 
 [features]
 # example views of every page (long names, empty and overfull lists), for tools/ui-preview

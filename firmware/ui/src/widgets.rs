@@ -13,6 +13,8 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{Circle, Line, Polyline, PrimitiveStyle, Rectangle};
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
+use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
+
 use crate::model::BleState;
 use crate::text::cp1251;
 use crate::theme::Font;
@@ -85,6 +87,35 @@ pub fn wrap(font: &Font, text: &str, max: i32, max_lines: usize) -> Vec<String> 
         lines.push(fit(font, &format!("{last} ..."), max));
     }
     lines
+}
+
+/// The largest QR code drawn (version 10, 57 modules: a contact link with a long name).
+const QR_MAX_VERSION: Version = Version::new(10);
+/// Light modules around the code, which scanners need to find it (the standard asks for 4).
+const QR_QUIET: i32 = 2;
+
+/// Side and pixels per module of a QR code of `n` modules in at most `max` pixels.
+fn qr_fit(n: i32, max: i32) -> Option<(i32, i32)> {
+    let scale = max / (n + 2 * QR_QUIET);
+    (scale > 0).then_some(((n + 2 * QR_QUIET) * scale, scale))
+}
+
+/// Encode `text` into `buf` (two buffers of [`QR_MAX_VERSION`]'s size, on the heap: on the stack
+/// they would grow every caller's frame, and the firmware's main loop draws the screen).
+fn qr_encode<'a>(text: &str, buf: &'a mut [u8]) -> Option<QrCode<'a>> {
+    let (out, temp) = buf.split_at_mut(QR_MAX_VERSION.buffer_len());
+    QrCode::encode_text(text, temp, out, QrCodeEcc::Low, Version::MIN, QR_MAX_VERSION, None, true).ok()
+}
+
+fn qr_buffer() -> Vec<u8> {
+    alloc::vec![0; 2 * QR_MAX_VERSION.buffer_len()]
+}
+
+/// The side [`Canvas::qr`] would draw `text` at in at most `max` pixels.
+pub fn qr_side(text: &str, max: i32) -> Option<i32> {
+    let mut buf = qr_buffer();
+    let qr = qr_encode(text, &mut buf)?;
+    qr_fit(qr.size(), max).map(|(side, _)| side)
 }
 
 /// Where texts and icons landed, layer by layer (a box over the page starts a new one).
@@ -234,6 +265,30 @@ impl<'a, D: DrawTarget<Color = BinaryColor>> Canvas<'a, D> {
         if state == BleState::Off {
             self.line(Point::new(x - 1, y + 9), Point::new(x + 5, y - 1));
         }
+    }
+
+    /// `text` as a QR code at (`x`, `y`) in at most `max` x `max` pixels, with its quiet zone, in
+    /// whole pixels per module; returns its side, or none if it does not fit. `light_is_ink`:
+    /// a screen whose ink is light (an OLED) draws the light modules, so the code reads dark on
+    /// light as on paper.
+    #[inline(never)]
+    pub fn qr(&mut self, text: &str, x: i32, y: i32, max: i32, light_is_ink: bool) -> Option<i32> {
+        let mut buf = qr_buffer();
+        let qr = qr_encode(text, &mut buf)?;
+        let n = qr.size();
+        let (side, scale) = qr_fit(n, max)?;
+        self.mark(Rectangle::new(Point::new(x, y), Size::new(side as u32, side as u32)), "qr");
+        let (dark, light) = if light_is_ink { (PAPER, INK) } else { (INK, PAPER) };
+        self.rect(x, y, side as u32, side as u32, Some(light));
+        for my in 0..n {
+            for mx in 0..n {
+                if qr.get_module(mx, my) {
+                    let (px, py) = (x + (QR_QUIET + mx) * scale, y + (QR_QUIET + my) * scale);
+                    self.rect(px, py, scale as u32, scale as u32, Some(dark));
+                }
+            }
+        }
+        Some(side)
     }
 
     /// Page dots centred at `y`: `pitch` apart, the current one filled and larger.

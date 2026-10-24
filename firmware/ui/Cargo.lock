@@ -57,6 +57,7 @@ name = "meshcore-ui"
 version = "0.1.0"
 dependencies = [
  "embedded-graphics",
+ "qrcodegen-no-heap",
  "u8g2-fonts",
 ]
 
@@ -74,6 +75,12 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "qrcodegen-no-heap"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0e2c0bf8be8a1c4a4f48973dabf26943f05da2bfc2d3180aae62409dbba6f0c"
 
 [[package]]
 name = "u8g2-fonts"

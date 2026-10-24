@@ -19,6 +19,10 @@ use crate::widgets::{Canvas, fit, width, wrap};
 /// The rows under the bar: a heading row in [`TEXT`] or [`TEXT_BOLD`] (13 px), then rows in
 /// [`SMALL`] (11 px).
 const ROWS: [i32; 4] = [16, 29, 40, 51];
+/// The longest contact link the class shows as a QR code (version 7 with low error correction:
+/// 49 px with its margin, the height under the bar).
+pub const CONTACT_LINK_MAX: usize = 154;
+
 /// Four rows of [`SMALL`].
 const SMALL_ROWS: [i32; 4] = [17, 28, 39, 50];
 
@@ -240,6 +244,14 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
             };
             small_lines(c, &[clean(ssid), second, mqtt], 1);
         }
+        Body::Contact(link) => match c.qr(link, 0, 15, c.h - 15, true) {
+            Some(side) => {
+                for (l, y) in ["Добавить", "в контакты", "камерой", "телефона"].iter().zip(SMALL_ROWS) {
+                    c.text(&SMALL, l, side + 3, y);
+                }
+            }
+            None => c.text(&SMALL, "Ссылка не помещается", 0, ROWS[1]),
+        },
         Body::Update(u) => match &u.window {
             None => {
                 c.text(&TEXT_BOLD, "Окно закрыто", 0, ROWS[0]);

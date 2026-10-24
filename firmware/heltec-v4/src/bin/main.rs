@@ -148,9 +148,19 @@ impl WatchdogFeeder {
 /// The screen stays lit this long after boot or a button press.
 const SCREEN_ON_MS: u64 = 60_000;
 /// The screen's pages; the update page only with two firmware slots.
-const PAGES: &[Page] =
-    &[Page::Home, Page::Neighbours, Page::Traffic, Page::Radio, Page::Power, Page::Network, Page::Update, Page::Advert];
-const PAGES_SINGLE_SLOT: &[Page] = &[Page::Home, Page::Neighbours, Page::Traffic, Page::Radio, Page::Power, Page::Network, Page::Advert];
+const PAGES: &[Page] = &[
+    Page::Home,
+    Page::Contact,
+    Page::Neighbours,
+    Page::Traffic,
+    Page::Radio,
+    Page::Power,
+    Page::Network,
+    Page::Update,
+    Page::Advert,
+];
+const PAGES_SINGLE_SLOT: &[Page] =
+    &[Page::Home, Page::Contact, Page::Neighbours, Page::Traffic, Page::Radio, Page::Power, Page::Network, Page::Advert];
 
 /// `powersaving on`: the first sleep comes this long after boot, a button press or a console line
 /// (upstream: two minutes after boot), and one sleep lasts at most this long (below the watchdog).
@@ -302,6 +312,12 @@ fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64
             version: version.clone(),
         }),
         Page::Advert => Body::Advert { flood: true },
+        Page::Contact => Body::Contact(meshcore::util::contact_link_within(
+            &p.node_name,
+            key,
+            meshcore::advert::ADV_TYPE_REPEATER,
+            meshcore_ui::layout::mono_128x64::CONTACT_LINK_MAX,
+        )),
         _ => Body::Repeater(passport(), Health { neighbours: app.neighbours().len() as u16, batt_mv: ui.battery_mv(app.board.batt_mv), uptime_min }),
     };
     let (page_idx, pages, alert) = ui.view_frame();

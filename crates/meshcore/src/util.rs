@@ -139,6 +139,38 @@ pub fn truncate_str(s: &str, max_len: usize) -> String {
     String::from(&s[..n])
 }
 
+/// The link the MeshCore app adds a contact from (`docs/qr_codes.md`): its name, public key and
+/// type (`ADV_TYPE_*`).
+pub fn contact_link(name: &str, pub_key: &[u8], adv_type: u8) -> String {
+    let mut s = String::from("meshcore://contact/add?name=");
+    for b in name.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => s.push(b as char),
+            b' ' => s.push('+'),
+            _ => {
+                let _ = core::fmt::Write::write_fmt(&mut s, format_args!("%{b:02X}"));
+            }
+        }
+    }
+    s.push_str("&public_key=");
+    s.push_str(&to_hex(pub_key).to_ascii_lowercase());
+    let _ = core::fmt::Write::write_fmt(&mut s, format_args!("&type={adv_type}"));
+    s
+}
+
+/// [`contact_link`] at most `max_len` bytes long (what a small screen's QR code holds), the name
+/// shortened by whole characters to fit.
+pub fn contact_link_within(name: &str, pub_key: &[u8], adv_type: u8, max_len: usize) -> String {
+    let mut name = name;
+    loop {
+        let link = contact_link(name, pub_key, adv_type);
+        if link.len() <= max_len || name.is_empty() {
+            return link;
+        }
+        name = &name[..name.char_indices().last().map_or(0, |(i, _)| i)];
+    }
+}
+
 /// Days-from-civil inverse: epoch seconds to (year, month, day, hour, minute, second), UTC.
 pub fn epoch_to_datetime(t: u32) -> (i32, u32, u32, u32, u32, u32) {
     let days = (t / 86400) as i64;
@@ -159,6 +191,19 @@ pub fn epoch_to_datetime(t: u32) -> (i32, u32, u32, u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contact_links_as_the_app_reads_them() {
+        let key = [0x9c; 32];
+        assert_eq!(
+            contact_link("Example Contact", &key, 1),
+            alloc::format!("meshcore://contact/add?name=Example+Contact&public_key={}&type=1", "9c".repeat(32))
+        );
+        assert!(contact_link("Ёлка 🎃", &key, 2).starts_with("meshcore://contact/add?name=%D0%81%D0%BB%D0%BA%D0%B0+%F0%9F%8E%83&"));
+        let short = contact_link_within("Ёлка 🎃🎃🎃🎃🎃", &key, 2, 154);
+        assert!(short.len() <= 154);
+        assert!(short.starts_with("meshcore://contact/add?name=%D0%81%D0%BB%D0%BA%D0%B0+%F0%9F%8E%83&"), "one pumpkin left");
+    }
 
     #[test]
     fn parsing_like_c() {
