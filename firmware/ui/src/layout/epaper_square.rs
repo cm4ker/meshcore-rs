@@ -209,8 +209,8 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
                 ("Принято", format!("{}", t.rx)),
                 ("Передано", format!("{}", t.tx)),
                 ("Ошибки CRC", format!("{}", t.rx_errors)),
-                ("Эфир, передача", permille(t.tx_air_permille)),
-                ("Эфир, прием", permille(t.rx_air_permille)),
+                ("Эфир TX", permille(t.tx_air_permille)),
+                ("Эфир RX", permille(t.rx_air_permille)),
                 ("Шум", format!("{} дБм", t.noise_dbm)),
                 ("Очередь", format!("{}", t.queue)),
             ],
@@ -282,6 +282,10 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
         },
     }
     c.dots(v.page_idx, v.pages, h - 8, 14, 9, 6);
+    if v.pin.is_some() || v.alert.is_some() {
+        // a box over the page leaves the page's big numbers showing around it: clear the page
+        c.rect(0, 27, w as u32, (h - 27) as u32, Some(crate::widgets::PAPER));
+    }
     if let Some(pin) = v.pin {
         c.overlay(&[("PIN для телефона".into(), &TEXT), (format!("{pin:06}"), &HUGE_DIGITS)], 4, 3, 9);
     } else if let Some(a) = v.alert {
