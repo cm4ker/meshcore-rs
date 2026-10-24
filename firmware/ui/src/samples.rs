@@ -28,11 +28,11 @@ fn frame(pages: &[Page], page: Page, bar: Bar, body: Body) -> View {
 }
 
 fn companion_bar() -> Bar {
-    Bar { ble: Some(BleState::Connected), id: None }
+    Bar { ble: Some(BleState::Connected), batt_mv: Some(4050) }
 }
 
 fn repeater_bar() -> Bar {
-    Bar { ble: None, id: Some("3F".into()) }
+    Bar { ble: None, batt_mv: Some(4050) }
 }
 
 fn msg(from: &str, text: &str, age_min: u32) -> Message {
@@ -65,6 +65,7 @@ fn radio() -> RadioInfo {
 pub fn passport() -> Passport {
     Passport {
         name: "Omsk-RPT".into(),
+        id: "3F".into(),
         freq_mhz: 868.731,
         bw_khz: 62.5,
         sf: 7,
@@ -123,7 +124,7 @@ pub fn repeater_view(page: Page) -> View {
             "meshcore://contact/add?name=Omsk-RPT&public_key={}&type=2",
             "3fa2910c57e1d4b8a6f0c3e29b1d7a4c5e8f20b6d9c3a1e7f4b2c8d0e6a9f1b3"
         )),
-        _ => Body::Repeater(passport(), Health { neighbours: 5, batt_mv: 4050, uptime_min: 4400 }),
+        _ => Body::Repeater(passport(), Health { neighbours: 5, uptime_min: 4400 }),
     };
     frame(REPEATER_PAGES, page, repeater_bar(), body)
 }
@@ -207,15 +208,27 @@ pub fn all() -> Vec<(String, View)> {
 
     add("repeater-home-long", {
         let mut v = r(Page::Home);
-        v.bar.id = Some("3FA291".into());
-        let p = Passport { name: long.into(), freq_mhz: 2400.0, bw_khz: 812.5, sf: 12, cr: 8, tx_dbm: -9, ..passport() };
-        with(v, Body::Repeater(p, Health { neighbours: 101, batt_mv: 12_850, uptime_min: 400_000 }))
+        v.bar.batt_mv = Some(12_850);
+        let p = Passport {
+            name: long.into(),
+            id: "3FA291".into(),
+            freq_mhz: 2400.0,
+            bw_khz: 812.5,
+            sf: 12,
+            cr: 8,
+            tx_dbm: -9,
+            ..passport()
+        };
+        with(v, Body::Repeater(p, Health { neighbours: 101, uptime_min: 400_000 }))
     });
     for id in ["3FA2", "3FA291"] {
-        let mut v = r(Page::Home);
-        v.bar.id = Some(id.into());
+        let p = Passport { id: id.into(), ..passport() };
+        let v = with(r(Page::Home), Body::Repeater(p, Health { neighbours: 5, uptime_min: 4400 }));
         add(&format!("repeater-home-id-{}-bytes", id.len() / 2), v);
     }
+    let mut v = r(Page::Neighbours);
+    v.bar.batt_mv = None;
+    add("bar-no-battery", v);
     add(
         "contact-fitted",
         with(

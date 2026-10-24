@@ -243,6 +243,7 @@ fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64
     let version = alloc::format!("{} {}", meshcore::FIRMWARE_VERSION, BUILD_DATE);
     let passport = || Passport {
         name: p.node_name.clone(),
+        id: id.clone(),
         freq_mhz: p.radio.freq_mhz,
         bw_khz: p.radio.bw_khz,
         sf: p.radio.sf,
@@ -318,11 +319,12 @@ fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64
             meshcore::advert::ADV_TYPE_REPEATER,
             meshcore_ui::layout::mono_128x64::CONTACT_LINK_MAX,
         )),
-        _ => Body::Repeater(passport(), Health { neighbours: app.neighbours().len() as u16, batt_mv: ui.battery_mv(app.board.batt_mv), uptime_min }),
+        _ => Body::Repeater(passport(), Health { neighbours: app.neighbours().len() as u16, uptime_min }),
     };
     let (page_idx, pages, alert) = ui.view_frame();
     let ble = info.ble_window.map(|_| if ble_connected { BleState::Connected } else { BleState::Waiting });
-    View { page: ui.page(), page_idx, pages, bar: Bar { ble, id: Some(id) }, body, alert, pin: None }
+    let batt_mv = ui.battery_mv(app.board.batt_mv);
+    View { page: ui.page(), page_idx, pages, bar: Bar { ble, batt_mv: (batt_mv > 0).then_some(batt_mv) }, body, alert, pin: None }
 }
 
 fn now_ms() -> u64 {

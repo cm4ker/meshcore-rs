@@ -195,6 +195,7 @@ fn build_view(
 ) -> View {
     let app = &mesh.app;
     let clock = mesh.ctx.current_time();
+    let batt_mv = ui.battery_mv(app.board.batt_mv);
     let message = |m: &RecentMessage| ui::Message {
         from: m.from.clone(),
         text: m.text.clone(),
@@ -257,7 +258,7 @@ fn build_view(
         page: ui.page(),
         page_idx,
         pages,
-        bar: Bar { ble: Some(ble), id: None },
+        bar: Bar { ble: Some(ble), batt_mv: (batt_mv > 0).then_some(batt_mv) },
         body,
         alert,
         pin: (pin != 0).then_some(pin),

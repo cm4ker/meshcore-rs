@@ -59,15 +59,6 @@ pub fn duration(min: u32) -> String {
     }
 }
 
-/// A duration in its largest unit only ("3 д"), for tight spaces.
-pub fn duration_short(min: u32) -> String {
-    match min {
-        0..60 => format!("{min} мин"),
-        60..1440 => format!("{} ч", min / 60),
-        _ => format!("{} д", min / 1440),
-    }
-}
-
 /// x.y from a value multiplied by 4 (SNR).
 pub fn quarter(v: i16) -> String {
     let tenths = v as i32 * 10 / 4;

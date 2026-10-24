@@ -1,4 +1,4 @@
-//! Monochrome 128 x 64 (Heltec OLED): a bar on top (page title, the node's ID or Bluetooth)
+//! Monochrome 128 x 64 (Heltec OLED): a bar on top (page title, the battery's voltage, Bluetooth)
 //! whose rule thickens under the current page's share of the width (page dots would
 //! take a row), then four short rows. A long-press hint takes the last row.
 
@@ -11,7 +11,7 @@ use embedded_graphics::prelude::*;
 
 use super::{alert_text, title};
 use crate::model::{BleState, Body, View, Wifi};
-use crate::text::{ago, clean, duration, duration_short, micro_deg, permille, plural, quarter, quarter_signed, trim_float, volts};
+use crate::text::{ago, clean, duration, micro_deg, permille, plural, quarter, quarter_signed, trim_float, volts};
 use crate::theme::Font;
 use crate::theme::mono::{BIG_BOLD, DIGITS, MID_DIGITS, SMALL, SMALL_BOLD, TEXT, TEXT_BOLD};
 use crate::widgets::{Canvas, fit, width, wrap};
@@ -40,10 +40,11 @@ fn bar<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View) {
         c.ble_small(ble_x, 2, ble);
         end = ble_x - 2;
     }
-    if let Some(id) = &v.bar.id {
-        let id = clean(id);
-        c.right(&TEXT_BOLD, &id, end - 3, 0);
-        end -= 3 + width(&TEXT_BOLD, &id);
+    if let Some(mv) = v.bar.batt_mv {
+        // small and without the space, leaving the title room
+        let batt = volts(mv).replace(' ', "");
+        c.right(&SMALL, &batt, end - 3, 2);
+        end -= 3 + width(&SMALL, &batt);
     }
     let title = fit(&TEXT_BOLD, &clean(title(v)), end - 4);
     c.text(&TEXT_BOLD, &title, 0, 0);
@@ -179,7 +180,8 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
             c.right(&SMALL, &tx, w - 1, ROWS[0] + 1);
             c.text(&SMALL, &format!("BW {}  SF{}  CR{}", trim_float(p.bw_khz, 1), p.sf, p.cr), 0, ROWS[1]);
             let n = health.neighbours as u32;
-            let rest = format!("{}, {}", volts(health.batt_mv), duration_short(health.uptime_min));
+            // the uptime is on the power page
+            let rest = format!("ID {}", clean(&p.id));
             let neighbours = format!("{n} {}", plural(n, "сосед", "соседа", "соседей"));
             let room = w - width(&SMALL, &rest) - 6;
             let font = if width(&TEXT_BOLD, &neighbours) <= room { &TEXT_BOLD } else { &SMALL_BOLD };

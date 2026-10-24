@@ -1,5 +1,5 @@
-//! Square e-paper, 200 x 200 (T-Echo), in large type: a bar on top (page title, the node's ID or
-//! Bluetooth), the page, the page dots at the bottom; a long-press hint in two lines.
+//! Square e-paper, 200 x 200 (T-Echo), in large type: a bar on top (page title, the battery's
+//! voltage, Bluetooth), the page, the page dots at the bottom; a long-press hint in two lines.
 
 use alloc::format;
 use alloc::string::String;
@@ -40,10 +40,11 @@ fn bar<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View) {
         c.ble_large(ble_x, 4, ble);
         end = ble_x - 3;
     }
-    if let Some(id) = &v.bar.id {
-        let id = clean(id);
-        c.right(&TEXT_BOLD, &id, end - 6, 4);
-        end -= 6 + width(&TEXT_BOLD, &id);
+    if let Some(mv) = v.bar.batt_mv {
+        // small and without the space, leaving the title room
+        let batt = volts(mv).replace(' ', "");
+        c.right(&SMALL, &batt, end - 6, 8);
+        end -= 6 + width(&SMALL, &batt);
     }
     let title_end = end - 5;
     let title = fit(&TEXT_BOLD, &clean(title(v)), title_end - MARGIN);
@@ -183,7 +184,7 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
                 c,
                 &[
                     (plural(n, "Сосед", "Соседа", "Соседей"), format!("{n}")),
-                    ("Батарея", volts(health.batt_mv)),
+                    ("ID", clean(&p.id)),
                     ("В сети", duration(health.uptime_min)),
                 ],
                 BODY_TOP + 84,

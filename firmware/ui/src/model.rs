@@ -69,15 +69,14 @@ pub enum BleState {
     Connected,
 }
 
-/// Always shown: the top bar. No battery: its charge cannot be told from the voltage without
-/// knowing the cell (Li-ion, LiFePO4...), and the voltage is on the pages.
+/// Always shown: the top bar. The battery as its voltage, not a charge: the charge cannot be told
+/// from the voltage without knowing the cell (Li-ion, LiFePO4...).
 #[derive(Clone, PartialEq, Debug)]
 pub struct Bar {
     /// The Bluetooth icon; none on a repeater while its update window is closed.
     pub ble: Option<BleState>,
-    /// The node's ID next to the battery (repeaters), in hex: 1 to 3 bytes by `path.hash.mode`,
-    /// as paths and traces show it.
-    pub id: Option<String>,
+    /// See [`crate::Ui::battery_mv`]; none when the board cannot measure it.
+    pub batt_mv: Option<u16>,
 }
 
 // ---- the companion's pages
@@ -131,11 +130,12 @@ pub struct GpsInfo {
 
 // ---- the repeater's pages
 
-/// Which node this is and how it is set up: changes only with the settings. Its ID is in the
-/// bar ([`Bar::id`]).
+/// Which node this is and how it is set up: changes only with the settings.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Passport {
     pub name: String,
+    /// The node's ID in hex: 1 to 3 bytes by `path.hash.mode`, as paths and traces show it.
+    pub id: String,
     pub freq_mhz: f32,
     pub bw_khz: f32,
     pub sf: u8,
@@ -148,8 +148,6 @@ pub struct Passport {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Health {
     pub neighbours: u16,
-    /// See [`crate::Ui::battery_mv`].
-    pub batt_mv: u16,
     /// See [`crate::coarse_minutes`].
     pub uptime_min: u32,
 }
