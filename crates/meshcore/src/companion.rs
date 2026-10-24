@@ -182,6 +182,8 @@ pub const PUSH_CODE_SEND_CONFIRMED: u8 = 0x82;
 pub const PUSH_CODE_MSG_WAITING: u8 = 0x83;
 pub const PUSH_CODE_RAW_DATA: u8 = 0x84;
 pub const PUSH_CODE_LOGIN_SUCCESS: u8 = 0x85;
+/// A packet that follows a round-trip return path waits this long, so the path gets there first.
+const RT_PATH_GAP_MILLIS: u32 = 300;
 pub const PUSH_CODE_LOGIN_FAIL: u8 = 0x86;
 pub const PUSH_CODE_STATUS_RESPONSE: u8 = 0x87;
 pub const PUSH_CODE_LOG_RX_DATA: u8 = 0x88;
@@ -224,6 +226,9 @@ pub struct ContactInfo {
     pub gps_lon: i32,
     pub sync_since: u32,
     secret: Option<Secret>,
+    /// The app set the out-path: the contact may not know its way back (see
+    /// [`CompanionPrefs::round_trip_path`]). Not stored.
+    rt_pending: bool,
 }
 
 impl ContactInfo {
@@ -241,6 +246,7 @@ impl ContactInfo {
             gps_lon: 0,
             sync_since: 0,
             secret: None,
+            rt_pending: false,
         }
     }
 
@@ -308,6 +314,14 @@ impl ContactInfo {
         c.sync_since = read_u32(rec, 147);
         c
     }
+}
+
+/// A path the other way: the hop hashes of `path` (`path_len` encoded as in packets) reversed.
+pub fn reverse_path(path_len: u8, path: &[u8]) -> (u8, Vec<u8>) {
+    let size = (path_len >> 6) as usize + 1;
+    let n = Packet::path_bytes_for(path_len).min(path.len());
+    let back = path[..n].chunks(size).rev().flatten().copied().collect();
+    (path_len, back)
 }
 
 /// A group channel slot (`ChannelDetails`); an empty name marks an unused slot.
@@ -884,6 +898,12 @@ impl Companion {
         let c = &self.contacts[idx];
         if c.has_out_path() {
             let (len, path) = (c.out_path_len, c.out_path);
+            let mut delay_ms = delay_ms;
+            // a login is the exception: a server takes paths only from clients it knows
+            if self.prefs.round_trip_path && c.rt_pending && pkt.payload_type() != PAYLOAD_TYPE_ANON_REQ {
+                self.send_return_path(ctx, idx);
+                delay_ms += RT_PATH_GAP_MILLIS;
+            }
             ctx.send_direct(pkt, len, &path, delay_ms);
             Sent::Direct
         } else {
@@ -942,6 +962,20 @@ impl Companion {
         let dest = self.contacts[idx].id.hash();
         if let Some(path) = ctx.create_path_return(dest, secret, pkt.path_len, &pkt.path, extra_type, extra) {
             self.send_flood_scoped(ctx, path, delay_ms);
+        }
+    }
+
+    /// Round-trip manual path: the app's path to the contact, reversed, sent to the contact as a
+    /// PATH packet along that path, so the contact replies direct (upstream nodes store the path
+    /// of any PATH packet from a known peer, as with `handleReturnPathRetry` below).
+    fn send_return_path(&mut self, ctx: &mut MeshCtx, idx: usize) {
+        let secret = self.secret_of(ctx, idx);
+        let c = &mut self.contacts[idx];
+        c.rt_pending = false;
+        let (back_len, back) = reverse_path(c.out_path_len, &c.out_path);
+        let (dest, out_len, out_path) = (c.id.hash(), c.out_path_len, c.out_path);
+        if let Some(p) = ctx.create_path_return(dest, &secret, back_len, &back, 0, &[]) {
+            ctx.send_direct(p, out_len, &out_path, 0);
         }
     }
 
@@ -1188,6 +1222,7 @@ impl Companion {
     /// `onContactPathRecv` (base behaviour): store the new out-path and handle the extra.
     fn on_contact_path_recv(&mut self, ctx: &MeshCtx, idx: usize, path_len: u8, path: &[u8], extra_type: u8, extra: &[u8]) {
         let c = &mut self.contacts[idx];
+        c.rt_pending = false; // the contact found its own way here
         let n = Packet::path_bytes_for(path_len).min(path.len());
         c.out_path[..n].copy_from_slice(&path[..n]);
         c.out_path_len = path_len;

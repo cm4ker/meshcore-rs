@@ -210,6 +210,7 @@ impl Companion {
             CMD_RESET_PATH if len > PUB_KEY_SIZE => match self.lookup_contact(&frame[1..33]) {
                 Some(idx) => {
                     self.contacts[idx].out_path_len = OUT_PATH_UNKNOWN;
+                    self.contacts[idx].rt_pending = false;
                     self.mark_contacts_dirty(ctx);
                     self.write_ok();
                 }
@@ -219,8 +220,14 @@ impl Companion {
                 let mut last_mod = ctx.current_time(); // if not in the frame
                 match self.lookup_contact(&frame[1..33]) {
                     Some(idx) => {
+                        let before = (self.contacts[idx].out_path_len, self.contacts[idx].out_path);
                         update_contact_from_frame(&mut self.contacts[idx], &mut last_mod, frame);
-                        self.contacts[idx].lastmod = last_mod;
+                        let c = &mut self.contacts[idx];
+                        c.lastmod = last_mod;
+                        // a path the app set (or changed): the contact gets it reversed
+                        if (c.out_path_len, c.out_path) != before && c.has_out_path() {
+                            c.rt_pending = true;
+                        }
                         self.mark_contacts_dirty(ctx);
                         self.write_ok();
                     }
@@ -229,6 +236,7 @@ impl Companion {
                         update_contact_from_frame(&mut c, &mut last_mod, frame);
                         c.lastmod = last_mod;
                         c.sync_since = 0;
+                        c.rt_pending = c.has_out_path();
                         if self.add_contact(c) {
                             self.mark_contacts_dirty(ctx);
                             self.write_ok();
@@ -951,6 +959,12 @@ impl Companion {
             } else {
                 "Error, bad chars".into()
             }
+        } else if let Some(v) = cmd.strip_prefix("set rtpath ") {
+            p.round_trip_path = v.starts_with("on");
+            self.effects.save_prefs = true;
+            "OK".into()
+        } else if cmd == "get rtpath" {
+            format!("> {}", if p.round_trip_path { "on" } else { "off" })
         } else if cmd == "get name" {
             format!("> {}", p.node_name)
         } else if let Some(v) = cmd.strip_prefix("set pin ") {

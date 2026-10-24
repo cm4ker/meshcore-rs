@@ -843,3 +843,57 @@ fn gps_setting_position_and_telemetry() {
     let t = cmd(&mut b, &[CMD_SEND_TELEMETRY_REQ, 0, 0, 0]);
     assert_eq!(&t[0][8..], &[1, 116, 0x01, 0x86]);
 }
+
+#[test]
+fn round_trip_manual_path() {
+    // Alice -- Repeater -- Bob; the app gives Alice a path to Bob, and Bob learns the way back
+    for on in [false, true] {
+        let mut air = Air::new();
+        air.link(0, 1);
+        air.link(1, 2);
+        let mut a = companion(1, "Alice");
+        let mut r = repeater(9);
+        let mut b = companion(2, "Bob");
+        cmd(&mut a, &[CMD_SEND_SELF_ADVERT, 1]);
+        cmd(&mut b, &[CMD_SEND_SELF_ADVERT, 1]);
+        air.run(&mut [&mut a, &mut r, &mut b], 5000);
+        frames(&mut a);
+        frames(&mut b);
+        let mut cli = vec![CMD_RUN_CLI_COMMAND];
+        cli.extend_from_slice(if on { b"set rtpath on" } else { b"set rtpath off" });
+        assert_eq!(cmd(&mut a, &cli)[0][1..], *b"OK");
+
+        let contact = |m: &mut Mesh<Companion>, key: [u8; 32]| {
+            cmd(m, &[CMD_GET_CONTACT_BY_KEY].iter().copied().chain(key).collect::<Vec<_>>()).remove(0)
+        };
+        let mut c = contact(&mut a, pub_key(&b));
+        c[0] = CMD_ADD_UPDATE_CONTACT;
+        (c[35], c[36]) = (1, pub_key(&r)[0]);
+        assert_eq!(cmd(&mut a, &c), vec![vec![RESP_CODE_OK]]);
+        assert_eq!(contact(&mut b, pub_key(&a))[35], 0xFF, "Bob has no way back yet");
+
+        let floods = r.ctx.stats.n_sent_flood;
+        cmd(&mut a, &txt_msg(&pub_key(&b), "round trip"));
+        air.run(&mut [&mut a, &mut r, &mut b], 10_000);
+        assert_eq!(&sync_messages(&mut b)[0][16..], b"round trip");
+        assert_eq!(only(&frames(&mut a), PUSH_CODE_SEND_CONFIRMED).len(), 1);
+        let back = contact(&mut b, pub_key(&a));
+        if on {
+            assert_eq!((back[35], back[36]), (1, pub_key(&r)[0]), "Bob learnt the way back");
+            assert_eq!(r.ctx.stats.n_sent_flood, floods, "and the ACK came back direct");
+        } else {
+            // upstream behaviour: the ACK floods, and Alice then sends Bob the path it came by
+            // (`handleReturnPathRetry`)
+            assert!(r.ctx.stats.n_sent_flood > floods, "the ACK floods");
+            assert_eq!(back[35], 1, "Bob learns the way back after the flood");
+        }
+    }
+}
+
+#[test]
+fn reverse_path_keeps_the_hash_size() {
+    assert_eq!(reverse_path(3, &[1, 2, 3]), (3, vec![3, 2, 1]));
+    // two 2-byte hashes: path_len = (2 - 1) << 6 | 2
+    assert_eq!(reverse_path(0x42, &[1, 2, 3, 4]), (0x42, vec![3, 4, 1, 2]));
+    assert_eq!(reverse_path(0, &[]), (0, vec![]));
+}

@@ -65,6 +65,9 @@ pub struct CompanionPrefs {
     pub gps_enabled: bool,
     /// Seconds between GPS position updates; 0 = every second.
     pub gps_interval: u32,
+    /// Round-trip manual paths (`set rtpath on`): a path the app sets for a contact also goes to
+    /// the contact, reversed, so its replies come back direct. Off by default.
+    pub round_trip_path: bool,
 }
 
 impl Default for CompanionPrefs {
@@ -104,6 +107,7 @@ impl Default for CompanionPrefs {
             wifi_enabled: true,
             gps_enabled: false,
             gps_interval: 0,
+            round_trip_path: false,
         }
     }
 }
@@ -170,6 +174,7 @@ impl CompanionPrefs {
         let _ = writeln!(s, "wifi_enabled={}", b(self.wifi_enabled));
         let _ = writeln!(s, "gps={}", b(self.gps_enabled));
         let _ = writeln!(s, "gps_int={}", self.gps_interval);
+        let _ = writeln!(s, "rt_path={}", b(self.round_trip_path));
         s
     }
 
@@ -223,6 +228,7 @@ impl CompanionPrefs {
                 "wifi_enabled" => p.wifi_enabled = flag(),
                 "gps" => p.gps_enabled = flag(),
                 "gps_int" => p.gps_interval = atoi(v),
+                "rt_path" => p.round_trip_path = flag(),
                 _ => {}
             }
         }
