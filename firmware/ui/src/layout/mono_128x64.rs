@@ -1,5 +1,5 @@
-//! Monochrome 128 x 64 (Heltec OLED): a bar on top (page title, the node's ID or Bluetooth,
-//! battery) whose rule thickens under the current page's share of the width (page dots would
+//! Monochrome 128 x 64 (Heltec OLED): a bar on top (page title, the node's ID or Bluetooth)
+//! whose rule thickens under the current page's share of the width (page dots would
 //! take a row), then four short rows. A long-press hint takes the last row.
 
 use alloc::format;
@@ -30,11 +30,9 @@ fn hint<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, action: &str) {
 
 fn bar<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View) {
     let w = c.w;
-    let battery_x = w - 15;
-    c.battery_small(battery_x, 2, v.bar.battery_pct);
-    let mut end = battery_x;
+    let mut end = w;
     if let Some(ble) = v.bar.ble {
-        let ble_x = battery_x - 9;
+        let ble_x = end - 7;
         c.ble_small(ble_x, 2, ble);
         end = ble_x - 2;
     }
@@ -121,7 +119,7 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
                 format!("{} МГц  {} дБм", trim_float(r.freq_mhz, 3), r.tx_dbm),
                 format!("SF{}  BW {}  CR{}", r.sf, trim_float(r.bw_khz, 1), r.cr),
                 format!("RSSI {}  SNR {}", r.last_rssi, quarter(r.last_snr)),
-                format!("Батарея {}%  {}", r.battery_pct, volts(r.batt_mv)),
+                format!("Батарея {}", volts(r.batt_mv)),
             ];
             for (l, y) in lines.iter().zip(SMALL_ROWS) {
                 c.text(&SMALL, &fit(&SMALL, l, w), 0, y);
@@ -177,7 +175,7 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
             c.right(&SMALL, &tx, w - 1, ROWS[0] + 1);
             c.text(&SMALL, &format!("BW {}  SF{}  CR{}", trim_float(p.bw_khz, 1), p.sf, p.cr), 0, ROWS[1]);
             let n = health.neighbours as u32;
-            let rest = format!("{}%, {}", health.battery_pct, duration_short(health.uptime_min));
+            let rest = format!("{}, {}", volts(health.batt_mv), duration_short(health.uptime_min));
             let neighbours = format!("{n} {}", plural(n, "сосед", "соседа", "соседей"));
             let room = w - width(&SMALL, &rest) - 6;
             let font = if width(&TEXT_BOLD, &neighbours) <= room { &TEXT_BOLD } else { &SMALL_BOLD };
@@ -215,8 +213,7 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
             c.text(&SMALL, &format!("{} дБм", p.tx_dbm), 0, ROWS[3]);
         }
         Body::Power(pw) => {
-            c.text(&TEXT_BOLD, &format!("Заряд {}%", pw.battery_pct), 0, ROWS[0]);
-            c.right(&SMALL, &volts(pw.batt_mv), w - 1, ROWS[0] + 1);
+            c.text(&TEXT_BOLD, &format!("Батарея {}", volts(pw.batt_mv)), 0, ROWS[0]);
             let sleep = match pw.powersaving {
                 None => String::from("недоступен"),
                 Some(false) => String::from("выключен"),

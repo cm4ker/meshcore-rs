@@ -28,4 +28,4 @@ pub mod widgets;
 pub use input::{Button, Intent};
 pub use model::*;
 pub use nav::Ui;
-pub use text::{battery_percent, coarse_minutes};
+pub use text::coarse_minutes;

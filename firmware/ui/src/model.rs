@@ -67,10 +67,10 @@ pub enum BleState {
     Connected,
 }
 
-/// Always shown: the top bar.
+/// Always shown: the top bar. No battery: its charge cannot be told from the voltage without
+/// knowing the cell (Li-ion, LiFePO4...), and the voltage is on the pages.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Bar {
-    pub battery_pct: u8,
     /// The Bluetooth icon; none on a repeater while its update window is closed.
     pub ble: Option<BleState>,
     /// The node's ID next to the battery (repeaters), in hex: 1 to 3 bytes by `path.hash.mode`,
@@ -112,7 +112,6 @@ pub struct RadioInfo {
     pub rx_air_min: u32,
     pub uptime_min: u32,
     pub batt_mv: u16,
-    pub battery_pct: u8,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -147,7 +146,8 @@ pub struct Passport {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Health {
     pub neighbours: u16,
-    pub battery_pct: u8,
+    /// See [`crate::Ui::battery_mv`].
+    pub batt_mv: u16,
     /// See [`crate::coarse_minutes`].
     pub uptime_min: u32,
 }
@@ -178,7 +178,6 @@ pub struct Traffic {
 #[derive(Clone, PartialEq, Debug)]
 pub struct PowerInfo {
     pub batt_mv: u16,
-    pub battery_pct: u8,
     /// Light sleep between packets (`powersaving`): none = the board cannot.
     pub powersaving: Option<bool>,
     /// The share of the uptime spent asleep.

@@ -99,22 +99,6 @@ pub fn volts(mv: u16) -> String {
     format!("{}.{:02} В", mv / 1000, mv % 1000 / 10)
 }
 
-/// A single-cell LiPo's charge from its voltage under light load.
-pub fn battery_percent(mv: u16) -> u8 {
-    const CURVE: [(u16, u8); 9] =
-        [(4200, 100), (4100, 90), (4000, 80), (3900, 65), (3800, 50), (3700, 30), (3600, 15), (3500, 5), (3300, 0)];
-    if mv >= CURVE[0].0 {
-        return 100;
-    }
-    for w in CURVE.windows(2) {
-        let ((hi_mv, hi), (lo_mv, lo)) = (w[0], w[1]);
-        if mv >= lo_mv {
-            return lo + ((mv - lo_mv) as u32 * (hi - lo) as u32 / (hi_mv - lo_mv) as u32) as u8;
-        }
-    }
-    0
-}
-
 /// Minutes since something happened, coarse enough that it changes rarely: whole minutes in the
 /// first hour, then whole hours, then whole days (in minutes).
 pub fn coarse_minutes(secs: u32) -> u32 {

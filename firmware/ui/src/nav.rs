@@ -3,7 +3,6 @@
 
 use crate::input::Intent;
 use crate::model::{Action, Alert, Page};
-use crate::text::battery_percent;
 
 /// Without a press for this long, the interface returns to the home page.
 const HOME_AFTER_MS: u64 = 60_000;
@@ -15,7 +14,7 @@ pub struct Ui {
     idx: usize,
     last_press: u64,
     alert: Option<(Alert, u64)>,
-    battery_pct: Option<u8>,
+    battery_mv: Option<u16>,
     /// A screen that goes dark (OLED, TFT): how long it stays lit after a press, and until when.
     lit_ms: Option<u64>,
     lit_until: u64,
@@ -27,7 +26,7 @@ impl Ui {
     /// `pages` in the order [`Intent::Next`] goes through them, the home page first; none = the
     /// board has no interface of its own.
     pub fn new(pages: &'static [Page]) -> Self {
-        Self { pages, idx: 0, last_press: 0, alert: None, battery_pct: None, lit_ms: None, lit_until: 0, waking: false }
+        Self { pages, idx: 0, last_press: 0, alert: None, battery_mv: None, lit_ms: None, lit_until: 0, waking: false }
     }
 
     /// The screen goes dark `ms` after the last press (lit from `now` on); a press on a dark
@@ -96,16 +95,16 @@ impl Ui {
         }
     }
 
-    /// Battery level to show, in steps of 5 % that move only once the reading has clearly
-    /// crossed into the next step (a reading near a step's edge would flip it back and forth).
-    pub fn battery_pct(&mut self, mv: u16) -> u8 {
-        let pct = battery_percent(mv);
-        let shown = match self.battery_pct {
-            Some(s) if pct.abs_diff(s) < 5 + 2 => s,
-            _ => (pct + 2) / 5 * 5,
+    /// Battery voltage for pages that stay up (home), in steps of 50 mV that move only once the
+    /// reading has clearly left the step (a reading near a step's edge would flip it back and
+    /// forth, redrawing the screen).
+    pub fn battery_mv(&mut self, mv: u16) -> u16 {
+        let shown = match self.battery_mv {
+            Some(s) if mv.abs_diff(s) < 50 + 20 => s,
+            _ => (mv + 25) / 50 * 50,
         };
-        self.battery_pct = Some(shown.min(100));
-        shown.min(100)
+        self.battery_mv = Some(shown);
+        shown
     }
 
     /// The page's position and the notice, for the [`crate::View`].

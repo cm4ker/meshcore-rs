@@ -230,7 +230,6 @@ fn build_view(
                 rx_air_min: (s.rx_air_time_ms / 60_000) as u32,
                 uptime_min: (now / 60_000) as u32,
                 batt_mv: app.board.batt_mv,
-                battery_pct: ui.battery_pct(app.board.batt_mv),
             })
         }
         Page::Bluetooth => Body::Bluetooth {
@@ -258,7 +257,7 @@ fn build_view(
         page: ui.page(),
         page_idx,
         pages,
-        bar: Bar { battery_pct: ui.battery_pct(app.board.batt_mv), ble: Some(ble), id: None },
+        bar: Bar { ble: Some(ble), id: None },
         body,
         alert,
         pin: (pin != 0).then_some(pin),

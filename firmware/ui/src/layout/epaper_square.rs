@@ -1,5 +1,5 @@
 //! Square e-paper, 200 x 200 (T-Echo), in large type: a bar on top (page title, the node's ID or
-//! Bluetooth, battery), the page, the page dots at the bottom; a long-press hint in two lines.
+//! Bluetooth), the page, the page dots at the bottom; a long-press hint in two lines.
 
 use alloc::format;
 use alloc::string::String;
@@ -32,11 +32,9 @@ fn hint<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, action: &str) {
 
 fn bar<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View) {
     let w = c.w;
-    let battery_x = w - MARGIN - 29;
-    c.battery_large(battery_x, 6, v.bar.battery_pct);
-    let mut end = battery_x;
+    let mut end = w - MARGIN;
     if let Some(ble) = v.bar.ble {
-        let ble_x = battery_x - 18;
+        let ble_x = end - 12;
         c.ble_large(ble_x, 4, ble);
         end = ble_x - 3;
     }
@@ -118,7 +116,7 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
                 format!("{} дБм, шум {}", r.tx_dbm, r.noise_dbm),
                 format!("RSSI {}  SNR {}", r.last_rssi, quarter(r.last_snr)),
                 format!("Пакеты {} / {}", r.rx, r.tx),
-                format!("Батарея {}% {}", r.battery_pct, volts(r.batt_mv)),
+                format!("Батарея {}", volts(r.batt_mv)),
                 format!("Работает {}", duration(r.uptime_min)),
             ];
             let lines: Vec<String> = lines.iter().map(|l| fit(&TEXT, l, full)).collect();
@@ -183,7 +181,7 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
                 c,
                 &[
                     (plural(n, "Сосед", "Соседа", "Соседей"), format!("{n}")),
-                    ("Заряд", format!("{}%", health.battery_pct)),
+                    ("Батарея", volts(health.batt_mv)),
                     ("В сети", duration(health.uptime_min)),
                 ],
                 BODY_TOP + 84,
@@ -234,7 +232,6 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
             rows(
                 c,
                 &[
-                    ("Заряд", format!("{}%", pw.battery_pct)),
                     ("Батарея", volts(pw.batt_mv)),
                     ("Сон", sleep),
                     ("В сети", duration(pw.uptime_min)),

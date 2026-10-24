@@ -239,7 +239,6 @@ fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64
         tx_dbm: p.tx_power_dbm,
         version: version.clone(),
     };
-    let battery_pct = ui.battery_pct(app.board.batt_mv);
     let uptime_min = (now / 60_000) as u32;
     let s = &ctx.stats;
     let ble_connected = BLE_CONNECTED.load(core::sync::atomic::Ordering::Relaxed);
@@ -270,7 +269,6 @@ fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64
         Page::Radio => Body::Preset(passport()),
         Page::Power => Body::Power(PowerInfo {
             batt_mv: app.board.batt_mv,
-            battery_pct,
             powersaving: Some(p.powersaving_enabled),
             asleep_pct: info.asleep_pct,
             uptime_min,
@@ -303,11 +301,11 @@ fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64
             version: version.clone(),
         }),
         Page::Advert => Body::Advert { flood: true },
-        _ => Body::Repeater(passport(), Health { neighbours: app.neighbours().len() as u16, battery_pct, uptime_min }),
+        _ => Body::Repeater(passport(), Health { neighbours: app.neighbours().len() as u16, batt_mv: ui.battery_mv(app.board.batt_mv), uptime_min }),
     };
     let (page_idx, pages, alert) = ui.view_frame();
     let ble = info.ble_window.map(|_| if ble_connected { BleState::Connected } else { BleState::Waiting });
-    View { page: ui.page(), page_idx, pages, bar: Bar { battery_pct, ble, id: Some(id) }, body, alert, pin: None }
+    View { page: ui.page(), page_idx, pages, bar: Bar { ble, id: Some(id) }, body, alert, pin: None }
 }
 
 fn now_ms() -> u64 {

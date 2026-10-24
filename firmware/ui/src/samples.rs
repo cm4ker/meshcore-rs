@@ -19,11 +19,11 @@ fn frame(pages: &[Page], page: Page, bar: Bar, body: Body) -> View {
 }
 
 fn companion_bar() -> Bar {
-    Bar { battery_pct: 85, ble: Some(BleState::Connected), id: None }
+    Bar { ble: Some(BleState::Connected), id: None }
 }
 
 fn repeater_bar() -> Bar {
-    Bar { battery_pct: 70, ble: None, id: Some("3F".into()) }
+    Bar { ble: None, id: Some("3F".into()) }
 }
 
 fn msg(from: &str, text: &str, age_min: u32) -> Message {
@@ -50,7 +50,6 @@ fn radio() -> RadioInfo {
         rx_air_min: 13,
         uptime_min: 135,
         batt_mv: 4050,
-        battery_pct: 85,
     }
 }
 
@@ -102,7 +101,7 @@ pub fn repeater_view(page: Page) -> View {
             noise_dbm: -112,
         }),
         Page::Radio => Body::Preset(passport()),
-        Page::Power => Body::Power(PowerInfo { batt_mv: 4050, battery_pct: 85, powersaving: Some(true), asleep_pct: 94, uptime_min: 4400 }),
+        Page::Power => Body::Power(PowerInfo { batt_mv: 4050, powersaving: Some(true), asleep_pct: 94, uptime_min: 4400 }),
         Page::Network => Body::Network(NetInfo {
             wifi: Wifi::Up { ssid: "MikroTik-Home".into(), ip: "192.168.88.21".into() },
             mqtt_on: 2,
@@ -111,7 +110,7 @@ pub fn repeater_view(page: Page) -> View {
         }),
         Page::Update => Body::Update(UpdateInfo { window: None, trial: false, version: "v1.18.0-rs (24 Oct 2026)".into() }),
         Page::Advert => Body::Advert { flood: true },
-        _ => Body::Repeater(passport(), Health { neighbours: 5, battery_pct: 85, uptime_min: 4400 }),
+        _ => Body::Repeater(passport(), Health { neighbours: 5, batt_mv: 4050, uptime_min: 4400 }),
     };
     frame(REPEATER_PAGES, page, repeater_bar(), body)
 }
@@ -188,7 +187,6 @@ pub fn all() -> Vec<(String, View)> {
     add("pairing-pin", v);
     for (i, ble) in [Some(BleState::Off), Some(BleState::Waiting), None].into_iter().enumerate() {
         let mut v = c(Page::Radio);
-        v.bar.battery_pct = [0, 5, 100][i];
         v.bar.ble = ble;
         add(&format!("bar-{i}"), v);
     }
@@ -198,7 +196,7 @@ pub fn all() -> Vec<(String, View)> {
         let mut v = r(Page::Home);
         v.bar.id = Some("3FA291".into());
         let p = Passport { name: long.into(), freq_mhz: 2400.0, bw_khz: 812.5, sf: 12, cr: 8, tx_dbm: -9, ..passport() };
-        with(v, Body::Repeater(p, Health { neighbours: 101, battery_pct: 100, uptime_min: 400_000 }))
+        with(v, Body::Repeater(p, Health { neighbours: 101, batt_mv: 12_850, uptime_min: 400_000 }))
     });
     for id in ["3FA2", "3FA291"] {
         let mut v = r(Page::Home);
@@ -230,7 +228,7 @@ pub fn all() -> Vec<(String, View)> {
     for (i, ps) in [None, Some(false)].into_iter().enumerate() {
         add(
             &format!("power-{i}"),
-            with(r(Page::Power), Body::Power(PowerInfo { batt_mv: 3300, battery_pct: 0, powersaving: ps, asleep_pct: 0, uptime_min: 59 })),
+            with(r(Page::Power), Body::Power(PowerInfo { batt_mv: 3300, powersaving: ps, asleep_pct: 0, uptime_min: 59 })),
         );
     }
     for (i, wifi) in [Wifi::Off, Wifi::Connecting { ssid: format!("Сеть {long}") }].into_iter().enumerate() {

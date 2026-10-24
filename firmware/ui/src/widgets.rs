@@ -1,5 +1,5 @@
-//! The blocks layouts are built from: text that is cut or wrapped to fit, the battery and
-//! Bluetooth icons, page dots, a box over the page.
+//! The blocks layouts are built from: text that is cut or wrapped to fit, the Bluetooth icon,
+//! page dots, a box over the page.
 //!
 //! A [`Recorder`] (tests, `tools/ui-preview`) collects where each text and icon landed and
 //! reports any two that overlap.
@@ -183,29 +183,6 @@ impl<'a, D: DrawTarget<Color = BinaryColor>> Canvas<'a, D> {
             None => PrimitiveStyle::with_stroke(INK, 1),
         };
         let _ = Rectangle::new(Point::new(x, y), Size::new(w, h)).into_styled(style).draw(self.d);
-    }
-
-    /// 29 x 14: a double outline, the tip, a bar of 20 px.
-    pub fn battery_large(&mut self, x: i32, y: i32, pct: u8) {
-        self.mark(Rectangle::new(Point::new(x, y), Size::new(29, 14)), "battery");
-        self.rect(x, y, 26, 14, None);
-        self.rect(x + 1, y + 1, 24, 12, None);
-        self.rect(x + 26, y + 4, 3, 6, Some(INK));
-        let fill = 20 * pct.min(100) as u32 / 100;
-        if fill > 0 {
-            self.rect(x + 3, y + 3, fill, 8, Some(INK));
-        }
-    }
-
-    /// 15 x 8: an outline, the tip, a bar of 10 px.
-    pub fn battery_small(&mut self, x: i32, y: i32, pct: u8) {
-        self.mark(Rectangle::new(Point::new(x, y), Size::new(15, 8)), "battery");
-        self.rect(x, y, 13, 8, None);
-        self.rect(x + 13, y + 2, 2, 4, Some(INK));
-        let fill = 9 * pct.min(100) as u32 / 100;
-        if fill > 0 {
-            self.rect(x + 2, y + 2, fill, 4, Some(INK));
-        }
     }
 
     /// The Bluetooth rune, 10 x 18 (on a dark square while connected, struck through while off).
