@@ -12,6 +12,7 @@
 extern crate alloc;
 
 pub mod advert;
+pub mod bridge;
 pub mod companion;
 pub mod crypto;
 pub mod identity;

@@ -8,6 +8,7 @@ extern crate alloc;
 
 pub mod ble;
 pub mod clock_cell;
+pub mod espnow;
 pub mod companion_app;
 pub mod frames;
 pub mod net;

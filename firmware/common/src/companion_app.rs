@@ -99,9 +99,10 @@ impl Platform for Esp {
                 ssid: prefs.wifi_ssid.clone(),
                 password: prefs.wifi_pwd.clone(),
                 power_save: false, // the app connects in
+                esp_now: false,
             };
             match net::start(spawner, wifi, seed, params) {
-                Ok(stack) => {
+                Ok((stack, _)) => {
                     self.station = Some(stack);
                     spawner.spawn(frames::tcp_server_task(stack, TCP_PORT).unwrap());
                 }

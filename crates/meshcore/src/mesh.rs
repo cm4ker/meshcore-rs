@@ -582,6 +582,16 @@ impl<A: MeshApp> Mesh<A> {
         }
     }
 
+    /// A packet that came in over a bridge: processed like one heard on LoRa, `delay_ms` from now,
+    /// without the RX log, counters and score delay (upstream `BridgeBase::handleReceivedPacket`
+    /// queues it as an inbound packet).
+    pub fn queue_bridged(&mut self, now: u64, pkt: Packet, delay_ms: u64) {
+        self.enter(now);
+        if self.ctx.inbound.add(Box::new(pkt), 0, now + delay_ms).is_err() {
+            self.ctx.stats.err_flags |= ERR_EVENT_FULL;
+        }
+    }
+
     /// Periodic processing: delayed inbound packets and app timers.
     pub fn poll(&mut self, now: u64) {
         self.enter(now);

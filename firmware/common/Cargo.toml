@@ -7,8 +7,9 @@ description  = "MeshCore firmware parts for ESP32 chips: the chip side of radio 
 
 [dependencies]
 esp-hal = { version = "~1.2.2", features = ["log-04", "unstable"] }
-# coex: BLE next to Wi-Fi (companion apps on both, the repeater's `start ota ble`)
-esp-radio = { version = "1.0.0-beta.1", features = ["wifi", "ble", "coex", "log-04", "unstable"] }
+# coex: BLE next to Wi-Fi (companion apps on both, the repeater's `start ota ble`); esp-now: the
+# repeater's bridge
+esp-radio = { version = "1.0.0-beta.1", features = ["wifi", "ble", "coex", "esp-now", "log-04", "unstable"] }
 esp-storage = { version = "0.10.0", features = ["embedded-storage"] }
 esp-println = { version = "0.18.0", features = ["log-04"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["log-04"] }

@@ -12,6 +12,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::bridge::Bridge;
 use crate::advert::{ADV_TYPE_REPEATER, ADV_TYPE_ROOM, AdvertData, is_valid_name};
 use crate::companion::{CMD_DEVICE_QUERY, RESP_CODE_DEVICE_INFO};
 use crate::crypto::{self, Secret};
@@ -175,6 +176,8 @@ pub struct Effects {
     pub save_regions: bool,
     /// Wi-Fi or MQTT settings changed: reconnect.
     pub network_changed: bool,
+    /// The bridge was switched on or off, or moved to another channel: restart its medium.
+    pub bridge_changed: bool,
     /// Publish a status message now (`send mqtt.status`).
     pub send_mqtt_status: bool,
     /// Lines for the serial console (packet log, ACL dumps).
@@ -194,6 +197,8 @@ pub struct UplinkPacket {
 /// MQTT broker names and their bits (`MQTTUplink.h`); at most 3 enabled at once.
 /// How long `start ota ble` keeps BLE up.
 pub const BLE_OTA_WINDOW_MINS: u32 = 15;
+/// Frames waiting for the bridge's medium; more are dropped (the firmware drains it every pass).
+const BRIDGE_QUEUE_MAX: usize = 16;
 
 pub const MQTT_BROKERS: [(&str, u8); 4] = [("meshcoretel", 0x01), ("letsmesh-eu", 0x02), ("letsmesh-us", 0x04), ("ommesh", 0x08)];
 
@@ -213,6 +218,8 @@ pub struct BoardInfo {
     pub wifi_ip: Option<String>,
     /// The board can light-sleep between packets (`powersaving on`).
     pub powersaving_supported: bool,
+    /// The bridge the board can run (`get bridge.type`): `espnow`; none = no bridge.
+    pub bridge: Option<&'static str>,
     /// How much the board slept, for `powersaving stats`, kept by the firmware.
     pub power_status: String,
     /// Network status lines for `get wifi.status` / `get mqtt.status`, kept by the firmware.
@@ -253,6 +260,9 @@ pub struct Repeater {
     pub uplink_enabled: bool,
     /// Room server state: `Some` when this node is a room server.
     room: Option<Box<room::Room>>,
+    bridge: Bridge,
+    /// Frames for the bridge's medium, taken by the firmware.
+    bridge_out: Vec<Vec<u8>>,
 }
 
 fn read_u32(b: &[u8], at: usize) -> u32 {
@@ -281,6 +291,7 @@ fn fmt_time(t: u32) -> String {
 impl Repeater {
     pub fn new(prefs: NodePrefs, board: BoardInfo) -> Self {
         let pending_radio = prefs.radio;
+        let bridge = Bridge::new(&prefs.bridge_secret);
         Self {
             prefs,
             board,
@@ -307,6 +318,37 @@ impl Repeater {
             uplink: Vec::new(),
             uplink_enabled: false,
             room: None,
+            bridge,
+            bridge_out: Vec::new(),
+        }
+    }
+
+    /// The bridge is on and the board has one.
+    pub fn bridge_active(&self) -> bool {
+        self.prefs.bridge_enabled && self.board.bridge.is_some()
+    }
+
+    /// Frames to send over the bridge.
+    pub fn take_bridge_out(&mut self) -> Vec<Vec<u8>> {
+        core::mem::take(&mut self.bridge_out)
+    }
+
+    /// A frame from the bridge: the packet to process (see [`Mesh::queue_bridged`]), after
+    /// `bridge.delay` milliseconds, if the frame is ours and the packet new.
+    ///
+    /// [`Mesh::queue_bridged`]: crate::mesh::Mesh::queue_bridged
+    pub fn bridge_receive(&mut self, frame: &[u8]) -> Option<(Packet, u64)> {
+        if !self.bridge_active() {
+            return None;
+        }
+        self.bridge.decode(frame).map(|p| (p, self.prefs.bridge_delay as u64))
+    }
+
+    fn bridge_send(&mut self, pkt: &Packet) {
+        if self.bridge_out.len() < BRIDGE_QUEUE_MAX
+            && let Some(frame) = self.bridge.encode(pkt)
+        {
+            self.bridge_out.push(frame);
         }
     }
 
@@ -907,7 +949,8 @@ impl MeshApp for Repeater {
             }
         } else if pkt.is_route_direct() && kind == ANON_REQ_TYPE_BASIC {
             self.anon_prologue(ctx, timestamp, &data[5..], &mut reply) && {
-                reply.push(if self.prefs.disable_fwd { 0x80 } else { 0 }); // feature bits
+                let bridge = if self.bridge_active() { 0x03 } else { 0 }; // bridge, over ESP-NOW
+                reply.push(if self.prefs.disable_fwd { 0x80 } else { 0 } | bridge); // feature bits
                 true
             }
         } else {
@@ -1139,6 +1182,9 @@ impl MeshApp for Repeater {
     }
 
     fn log_rx(&mut self, ctx: &MeshCtx, pkt: &Packet, len: usize, score: f32) {
+        if self.bridge_active() && self.prefs.bridge_source_rx {
+            self.bridge_send(pkt);
+        }
         if self.uplink_enabled && self.prefs.mqtt_packets && self.uplink.len() < UPLINK_QUEUE_MAX {
             let mut raw = [0u8; crate::MAX_TRANS_UNIT];
             if let Some(n) = pkt.write_to(&mut raw) {
@@ -1174,6 +1220,9 @@ impl MeshApp for Repeater {
     }
 
     fn log_tx(&mut self, ctx: &MeshCtx, pkt: &Packet, len: usize, _airtime_ms: usize) {
+        if self.bridge_active() && !self.prefs.bridge_source_rx {
+            self.bridge_send(pkt);
+        }
         if self.uplink_enabled && self.prefs.mqtt_packets && self.prefs.mqtt_tx && self.uplink.len() < UPLINK_QUEUE_MAX {
             let mut raw = [0u8; crate::MAX_TRANS_UNIT];
             if let Some(n) = pkt.write_to(&mut raw) {
@@ -1433,6 +1482,9 @@ impl Repeater {
         if cmd.starts_with("powersaving on") {
             if !self.board.powersaving_supported {
                 return "Board not supported".into();
+            }
+            if self.bridge_active() {
+                return "Bridge not supported".into();
             }
             self.prefs.powersaving_enabled = true;
             self.save_prefs();
@@ -1706,7 +1758,17 @@ impl Repeater {
         } else if cfg.starts_with("role") {
             format!("> {FIRMWARE_ROLE}")
         } else if cfg.starts_with("bridge.type") {
-            "> none".into()
+            format!("> {}", self.board.bridge.unwrap_or("none"))
+        } else if self.board.bridge.is_some() && cfg.starts_with("bridge.enabled") {
+            format!("> {}", onoff(p.bridge_enabled))
+        } else if self.board.bridge.is_some() && cfg.starts_with("bridge.delay") {
+            format!("> {}", p.bridge_delay)
+        } else if self.board.bridge.is_some() && cfg.starts_with("bridge.source") {
+            format!("> {}", if p.bridge_source_rx { "logRx" } else { "logTx" })
+        } else if self.board.bridge.is_some() && cfg.starts_with("bridge.channel") {
+            format!("> {}", p.bridge_channel)
+        } else if self.board.bridge.is_some() && cfg.starts_with("bridge.secret") {
+            format!("> {}", p.bridge_secret)
         } else if cfg.starts_with("bootloader.ver") || cfg.starts_with("adc.multiplier") {
             "Error: unsupported".into()
         } else if cfg.starts_with("pwrmgt.support") {
@@ -1732,6 +1794,8 @@ impl Repeater {
             self.prefs.room = v.starts_with("on");
             self.save_prefs();
             format!("OK - room server {}, reboot to apply", if self.prefs.room { "on" } else { "off" })
+        } else if let Some(r) = self.handle_set_bridge(cfg) {
+            r
         } else if let Some(v) = cfg.strip_prefix("dyncr ") {
             self.prefs.dynamic_cr = v.starts_with("on");
             self.save_prefs();
@@ -1987,6 +2051,51 @@ impl Repeater {
             }
             _ => "Err - ??".into(),
         }
+    }
+
+    /// `set bridge.*` (upstream's), on boards with a bridge.
+    fn handle_set_bridge(&mut self, cfg: &str) -> Option<String> {
+        self.board.bridge?;
+        let (key, value) = cfg.split_once(' ')?;
+        let value = value.trim();
+        let reply = match key {
+            "bridge.enabled" => {
+                self.prefs.bridge_enabled = value.starts_with("on");
+                if self.prefs.bridge_enabled {
+                    self.prefs.powersaving_enabled = false; // the bridge keeps the Wi-Fi radio on
+                }
+                self.effects.bridge_changed = true;
+                "OK - rebooting to apply".into()
+            }
+            "bridge.delay" => match value.parse::<u16>() {
+                Ok(ms) if ms <= 10_000 => {
+                    self.prefs.bridge_delay = ms;
+                    "OK".into()
+                }
+                _ => return Some("Error: delay must be between 0-10000 ms".into()),
+            },
+            // upstream takes "rx" for received packets and anything else for transmitted ones
+            "bridge.source" => {
+                self.prefs.bridge_source_rx = value.eq_ignore_ascii_case("rx") || value.eq_ignore_ascii_case("logrx");
+                "OK".into()
+            }
+            "bridge.channel" => match value.parse::<u8>() {
+                Ok(ch) if (1..15).contains(&ch) => {
+                    self.prefs.bridge_channel = ch;
+                    self.effects.bridge_changed = true;
+                    "OK - rebooting to apply".into()
+                }
+                _ => return Some("Error: channel must be between 1-14".into()),
+            },
+            "bridge.secret" => {
+                self.prefs.bridge_secret = truncate_str(value, crate::prefs::BRIDGE_SECRET_MAX);
+                self.bridge.set_secret(&self.prefs.bridge_secret);
+                "OK".into()
+            }
+            _ => return None,
+        };
+        self.save_prefs();
+        Some(reply)
     }
 
     /// `get wifi.*` / `get mqtt.*` (MeshCoreTel command set).

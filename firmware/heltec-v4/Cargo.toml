@@ -52,8 +52,8 @@ embedded-hal-async = "1.0.0"
 embedded-io-async = "0.7.0"
 embedded-hal = "1.0"
 libm = "0.2.16"
-# coex: the repeater runs BLE (`start ota ble`) next to its Wi-Fi station
-esp-radio = { version = "1.0.0-beta.1", features = ["esp32s3", "wifi", "ble", "coex", "log-04", "unstable"] }
+# coex: the repeater runs BLE (`start ota ble`) next to its Wi-Fi station; esp-now: its bridge
+esp-radio = { version = "1.0.0-beta.1", features = ["esp32s3", "wifi", "ble", "coex", "esp-now", "log-04", "unstable"] }
 embassy-net = { version = "0.9", features = ["tcp", "udp", "dns", "dhcpv4", "medium-ethernet", "proto-ipv4"] }
 edge-dhcp = "0.8"
 edge-nal = "0.7"

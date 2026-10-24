@@ -21,6 +21,8 @@ pub const LOOP_DETECT_STRICT: u8 = 3;
 pub const NAME_MAX: usize = 32;
 pub const PASSWORD_MAX: usize = 16;
 pub const OWNER_INFO_MAX: usize = 120;
+/// Upstream keeps the bridge secret in 16 bytes with the terminating zero.
+pub const BRIDGE_SECRET_MAX: usize = 15;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodePrefs {
@@ -75,6 +77,16 @@ pub struct NodePrefs {
     pub mqtt_email: String,
     /// Also host a room server on this device (a second node with its own identity).
     pub room: bool,
+    /// Bridge to other repeaters over ESP-NOW (upstream `bridge.*`, see [`crate::bridge`]).
+    pub bridge_enabled: bool,
+    /// Packets from the bridge are processed this many milliseconds after they come in.
+    pub bridge_delay: u16,
+    /// Bridge the packets this node receives (`bridge.source rx`), not those it transmits.
+    pub bridge_source_rx: bool,
+    /// Wi-Fi channel of the ESP-NOW bridge (the router's while the Wi-Fi station runs).
+    pub bridge_channel: u8,
+    /// Shared by the bridged repeaters.
+    pub bridge_secret: String,
 }
 
 impl Default for NodePrefs {
@@ -123,6 +135,12 @@ impl Default for NodePrefs {
             mqtt_owner: String::new(),
             mqtt_email: String::new(),
             room: false,
+            // upstream's bridge defaults, but off: bridging is a build of its own there
+            bridge_enabled: false,
+            bridge_delay: 500,
+            bridge_source_rx: false,
+            bridge_channel: 1,
+            bridge_secret: "LVSITANOS".into(),
         }
     }
 }
@@ -179,6 +197,9 @@ impl NodePrefs {
         self.password = truncate_str(&self.password, PASSWORD_MAX);
         self.guest_password = truncate_str(&self.guest_password, PASSWORD_MAX);
         self.owner_info = truncate_str(&self.owner_info, OWNER_INFO_MAX);
+        self.bridge_delay = self.bridge_delay.min(10_000);
+        self.bridge_channel = self.bridge_channel.clamp(1, 14);
+        self.bridge_secret = truncate_str(&self.bridge_secret, BRIDGE_SECRET_MAX);
     }
 
     pub fn serialize(&self) -> String {
@@ -229,6 +250,11 @@ impl NodePrefs {
         let _ = writeln!(s, "mqtt_status={}", b(self.mqtt_status));
         let _ = writeln!(s, "mqtt_owner={}", self.mqtt_owner);
         let _ = writeln!(s, "mqtt_email={}", escape(&self.mqtt_email));
+        let _ = writeln!(s, "bridge={}", b(self.bridge_enabled));
+        let _ = writeln!(s, "bridge_delay={}", self.bridge_delay);
+        let _ = writeln!(s, "bridge_src={}", b(self.bridge_source_rx));
+        let _ = writeln!(s, "bridge_ch={}", self.bridge_channel);
+        let _ = writeln!(s, "bridge_secret={}", escape(&self.bridge_secret));
         s
     }
 
@@ -286,6 +312,11 @@ impl NodePrefs {
                 "mqtt_status" => p.mqtt_status = flag(),
                 "mqtt_owner" => p.mqtt_owner = v.into(),
                 "mqtt_email" => p.mqtt_email = unescape(v),
+                "bridge" => p.bridge_enabled = flag(),
+                "bridge_delay" => p.bridge_delay = atoi(v).min(u16::MAX as u32) as u16,
+                "bridge_src" => p.bridge_source_rx = flag(),
+                "bridge_ch" => p.bridge_channel = u8v(),
+                "bridge_secret" => p.bridge_secret = unescape(v),
                 _ => {}
             }
         }

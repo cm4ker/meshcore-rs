@@ -17,6 +17,7 @@ use embassy_sync::pubsub::PubSubChannel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::peripherals::WIFI;
+use esp_radio::esp_now::EspNow;
 use esp_radio::wifi::sta::StationConfig;
 use esp_radio::wifi::{AuthenticationMethodConfig, Config, ControllerConfig, Interface, WifiController};
 use static_cell::StaticCell;
@@ -84,10 +85,14 @@ pub struct StationParams {
     /// Modem sleep between beacons (the ESP-IDF station default). Off where clients connect in:
     /// with it the XIAO C6 missed ARP requests and could not be reached at all.
     pub power_save: bool,
+    /// Also hand out ESP-NOW (the repeater's bridge), on the router's channel.
+    pub esp_now: bool,
 }
 
-/// Bring up the station; returns the network stack (for LAN updates).
-pub fn start(spawner: &Spawner, wifi: WIFI<'static>, seed: u64, params: StationParams) -> Result<Stack<'static>, &'static str> {
+/// Bring up the station; returns the network stack (for LAN updates) and ESP-NOW if asked for.
+pub fn start(
+    spawner: &Spawner, wifi: WIFI<'static>, seed: u64, params: StationParams,
+) -> Result<(Stack<'static>, Option<EspNow>), &'static str> {
     let auth = if params.password.is_empty() {
         AuthenticationMethodConfig::Open
     } else {
@@ -98,6 +103,7 @@ pub fn start(spawner: &Spawner, wifi: WIFI<'static>, seed: u64, params: StationP
         .with_authentication(auth);
     let controller = WifiController::new(wifi, ControllerConfig::default().with_initial_config(Config::Station(sta)))
         .map_err(|_| "Wi-Fi init failed")?;
+    let esp_now = params.esp_now.then(|| controller.esp_now());
     static RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         Interface::station(),
@@ -108,7 +114,23 @@ pub fn start(spawner: &Spawner, wifi: WIFI<'static>, seed: u64, params: StationP
     spawner.spawn(station_task(controller, params.power_save).map_err(|_| "task busy")?);
     spawner.spawn(net_task(runner).map_err(|_| "task busy")?);
     spawner.spawn(sntp_task(stack).map_err(|_| "task busy")?);
-    Ok(stack)
+    Ok((stack, esp_now))
+}
+
+/// Wi-Fi without a network, for ESP-NOW alone (the repeater's bridge) on `channel`.
+pub fn start_esp_now(spawner: &Spawner, wifi: WIFI<'static>, channel: u8) -> Result<EspNow, &'static str> {
+    let controller = WifiController::new(wifi, ControllerConfig::default().with_initial_config(Config::Station(StationConfig::default())))
+        .map_err(|_| "Wi-Fi init failed")?;
+    let esp_now = controller.esp_now();
+    esp_now.set_channel(channel).map_err(|_| "channel not set")?;
+    spawner.spawn(idle_task(controller).map_err(|_| "task busy")?);
+    Ok(esp_now)
+}
+
+/// Keeps the controller (and with it the radio) alive.
+#[embassy_executor::task]
+async fn idle_task(_controller: WifiController<'static>) {
+    core::future::pending::<()>().await
 }
 
 #[embassy_executor::task]

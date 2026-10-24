@@ -49,6 +49,7 @@ use heltec_v4::power::Sleeper;
 use heltec_v4::reset;
 use heltec_v4::frames::FRAMES_IN;
 use heltec_v4::storage::{self, Blob, CompBlob};
+use heltec_v4::espnow;
 use heltec_v4::net::{self, BrokerState};
 use heltec_v4::wifi_ota;
 use meshcore::uplink;
@@ -583,6 +584,7 @@ async fn main(spawner: Spawner) -> ! {
         mcu_temp_c: None,
         fem_lna_controllable: fem.lna_controllable(),
         powersaving_supported: true,
+        bridge: Some("espnow"),
         build_date: BUILD_DATE.into(),
         wifi_ota_ssid: slots.map(|_| ota_ssid(&prefs.node_name)),
         ble_ota_name: slots.map(|_| ota_ssid(&prefs.node_name)),
@@ -618,19 +620,44 @@ async fn main(spawner: Spawner) -> ! {
     let device_id = to_hex(self_id.pub_key());
     let model = alloc::string::String::from(fem.name());
     let mut station: Option<embassy_net::Stack<'static>> = None;
+    // the bridge (ESP-NOW) shares the Wi-Fi radio: on the router's channel next to the station,
+    // else on `bridge.channel`
+    let bridge_on = mesh.app.prefs.bridge_enabled;
+    let mut bridge_radio = false;
     if !mesh.app.prefs.wifi_ssid.is_empty() {
         let seed = (Rng::new().random() as u64) << 32 | Rng::new().random() as u64;
         let params = net::StationParams {
             ssid: mesh.app.prefs.wifi_ssid.clone(),
             password: mesh.app.prefs.wifi_pwd.clone(),
-            power_save: true,
+            // modem sleep would miss bridge frames between beacons
+            power_save: !bridge_on,
+            esp_now: bridge_on,
         };
         info!("boot: Wi-Fi station");
         wdt.feed();
         match net::start(&spawner, wifi.take().unwrap(), seed, params) {
-            Ok(stack) => station = Some(stack),
+            Ok((stack, esp_now)) => {
+                station = Some(stack);
+                if let Some(e) = esp_now {
+                    match espnow::spawn(&spawner, e) {
+                        Ok(()) => info!("bridge: ESP-NOW on the router's channel"),
+                        Err(e) => warn!("bridge: {e}"),
+                    }
+                }
+            }
             Err(e) => warn!("Wi-Fi station: {e}"),
         }
+    }
+    if bridge_on
+        && station.is_none()
+        && let Some(w) = wifi.take()
+    {
+        let channel = mesh.app.prefs.bridge_channel;
+        match net::start_esp_now(&spawner, w, channel).and_then(|e| espnow::spawn(&spawner, e)) {
+            Ok(()) => info!("bridge: ESP-NOW on channel {channel}"),
+            Err(e) => warn!("bridge: {e}"),
+        }
+        bridge_radio = true;
     }
     let iata = mesh.app.prefs.mqtt_iata.clone();
     if let Some(stack) = station
@@ -919,6 +946,15 @@ async fn main(spawner: Spawner) -> ! {
         if let Some(r) = room.as_mut() {
             r.poll(now);
         }
+        // the bridge: frames out for what the repeater sent (or heard), packets in from others
+        for frame in mesh.app.take_bridge_out() {
+            let _ = espnow::OUT.try_send(frame);
+        }
+        while let Ok(frame) = espnow::IN.try_receive() {
+            if let Some((pkt, delay)) = mesh.app.bridge_receive(&frame) {
+                mesh.queue_bridged(now, pkt, delay);
+            }
+        }
 
         prof.mark("noise");
         if !radio.is_receiving().unwrap_or(true)
@@ -1182,6 +1218,7 @@ async fn main(spawner: Spawner) -> ! {
                         Err(e) => println!("Wi-Fi OTA failed: {e}"),
                     }
                 }
+                (None, ..) if bridge_radio => println!("Wi-Fi OTA unavailable while the bridge holds the radio (start ota ble)"),
                 (None, ..) => {
                     wifi_ota::set_code(code);
                     println!("Wi-Fi OTA already running (new code set)");
@@ -1220,7 +1257,7 @@ async fn main(spawner: Spawner) -> ! {
         {
             s.borrow_mut().comp_save(CompBlob::Bonds, &bonds);
         }
-        if fx.network_changed {
+        if fx.network_changed || fx.bridge_changed {
             reboot_at = Some(now + 3000);
         }
         if fx.erase {
