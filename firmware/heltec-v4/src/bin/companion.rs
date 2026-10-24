@@ -187,8 +187,7 @@ async fn main(spawner: Spawner) -> ! {
     }
     let mut adc_cfg = AdcConfig::new();
     let bat_pin = adc_cfg.enable_pin_with_cal::<_, AdcCalCurve<ADC1>>(p.GPIO1, Attenuation::_11dB);
-    let battery =
-        Battery { adc: Adc::new(p.ADC1, adc_cfg), pin: bat_pin, ctrl: Output::new(p.GPIO37, Level::Low, OutputConfig::default()) };
+    let battery = Battery::new(Adc::new(p.ADC1, adc_cfg), bat_pin, p.GPIO37);
 
     // OLED: Vext on with GPIO36 LOW (see the repeater firmware); bounded I2C transfers
     let _vext = Output::new(p.GPIO36, Level::Low, OutputConfig::default());

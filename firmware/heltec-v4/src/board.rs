@@ -1,13 +1,17 @@
 //! Heltec WiFi LoRa 32 V4 specifics: LoRa front-end module (PA/LNA), TX LED, battery ADC.
+//! With the `heltec-v3` feature: the V3, the same board without the FEM and with 8 MB of flash.
 //!
-//! Pin map (from upstream `variants/heltec_v4`):
+//! Pin map (from upstream `variants/heltec_v4`, the V3 shares all but the FEM pins):
 //! - SX1262: NSS 8, SCK 9, MOSI 10, MISO 11, RESET 12, BUSY 13, DIO1 14 (DIO2 = RF switch, DIO3 = TCXO 1.8 V)
 //! - FEM LDO enable 7; GPIO2 = FEM chip enable (CSD), and its idle level tells the FEM type:
 //!   pulled low = GC1109 (V4.2, PA mode on GPIO46), pulled high = KCT8103L (V4.3, CTX on GPIO5)
 //! - TX LED 35, battery divider enable 37, battery sense 1
 
+#[cfg(not(feature = "heltec-v3"))]
 use embassy_time::Timer;
-use esp_hal::gpio::{AnyPin, Flex, InputConfig, Level, Output, OutputConfig, Pull};
+#[cfg(not(feature = "heltec-v3"))]
+use esp_hal::gpio::{Flex, InputConfig, Level, Output, OutputConfig, Pull};
+use esp_hal::gpio::AnyPin;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FemType {
@@ -15,8 +19,12 @@ pub enum FemType {
     Gc1109,
     /// Heltec V4.3
     Kct8103l,
+    /// Heltec V3: no FEM
+    #[cfg(feature = "heltec-v3")]
+    None,
 }
 
+#[cfg(not(feature = "heltec-v3"))]
 pub struct Fem<'d> {
     pub kind: FemType,
     _ldo: Output<'d>,
@@ -26,6 +34,7 @@ pub struct Fem<'d> {
     lna_enabled: bool,
 }
 
+#[cfg(not(feature = "heltec-v3"))]
 impl<'d> Fem<'d> {
     /// Power the FEM, detect its type and put it into RX mode.
     pub async fn init(
@@ -90,5 +99,43 @@ impl<'d> Fem<'d> {
     }
 }
 
-/// Battery voltage divider on the V4 is 390k/100k.
+/// The V3 has no FEM: the SX1262 reaches the antenna through its DIO2 RF switch, so this is the
+/// V4 API with nothing behind it. The V4's FEM pins stay untouched.
+#[cfg(feature = "heltec-v3")]
+pub struct Fem<'d> {
+    pub kind: FemType,
+    _pins: core::marker::PhantomData<AnyPin<'d>>,
+}
+
+#[cfg(feature = "heltec-v3")]
+impl<'d> Fem<'d> {
+    pub async fn init(_ldo: AnyPin<'d>, _csd: AnyPin<'d>, _cps: AnyPin<'d>, _ctx: AnyPin<'d>, _lna: bool) -> Self {
+        Self { kind: FemType::None, _pins: core::marker::PhantomData }
+    }
+
+    pub fn lna_controllable(&self) -> bool {
+        false
+    }
+
+    pub fn tx_mode(&mut self) {}
+
+    pub fn rx_mode(&mut self) {}
+
+    pub fn set_lna(&mut self, _enabled: bool) {}
+
+    pub fn shutdown(&mut self) {}
+
+    pub fn name(&self) -> &'static str {
+        "Heltec V3"
+    }
+}
+
+/// Default SX1262 output for a fresh node: the V4's FEM PA turns 10 dBm into ~22 dBm,
+/// the V3 radio drives the antenna itself.
+#[cfg(not(feature = "heltec-v3"))]
+pub const DEFAULT_TX_DBM: i8 = 10;
+#[cfg(feature = "heltec-v3")]
+pub const DEFAULT_TX_DBM: i8 = 22;
+
+/// Battery voltage divider on the V3 and V4 is 390k/100k.
 pub const BATTERY_DIVIDER: f32 = 4.9;

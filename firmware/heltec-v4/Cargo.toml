@@ -12,6 +12,10 @@ path = "./src/bin/main.rs"
 name = "companion"
 path = "./src/bin/companion.rs"
 
+[features]
+# Heltec V3: no LoRa FEM, 8 MB flash (flash with partitions-v3.csv, see README)
+heltec-v3 = []
+
 [dependencies]
 esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }
 

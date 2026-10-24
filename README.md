@@ -3,7 +3,7 @@
 Прошивка [MeshCore](https://github.com/meshcore-dev/MeshCore), переписанная на Rust: репитер (с room server)
 и компаньон (companion radio).
 Совместима по эфиру с оригинальной C++ прошивкой (v1.18): тот же формат пакетов, та же
-криптография, та же логика маршрутизации. Железо: **Heltec WiFi LoRa 32 V4** (ESP32-S3 + SX1262 + FEM) и
+криптография, та же логика маршрутизации. Железо: **Heltec WiFi LoRa 32 V4** (ESP32-S3 + SX1262 + FEM; V3 без FEM — тоже) и
 **Seeed XIAO ESP32-C6 + Waveshare Core2021-HF** (Semtech LR2021, компаньон).
 Проверена в живой сети: компаньон MeshCore v1.18 логинится, получает статус, телеметрию, ACL,
 выполняет CLI и TRACE через эту прошивку.
@@ -105,6 +105,20 @@ espflash flash --erase-parts otadata target\xtensa-esp32s3-none-elf\release\helt
 # или компаньон:
 espflash flash --erase-parts otadata target\xtensa-esp32s3-none-elf\release\companion
 ```
+
+Heltec V3 собирается из того же крейта с фичей `heltec-v3`: FEM нет, флеш 8 МБ (своя разметка
+`partitions-v3.csv`, те же разделы, слоты по 3,4 МБ), консоль на UART0 через CP2102 (на Windows нужен
+драйвер Silicon Labs CP210x), мощность новой ноды по умолчанию 22 dBm. Прошивка upstream на V3
+размечена иначе, поэтому при первой прошивке флеш стирается целиком (сначала снять дамп
+`espflash read-flash 0 0x800000`):
+
+```powershell
+cargo build --release --features heltec-v3
+espflash erase-flash                 # только в первый раз
+espflash flash --flash-size 8mb --partition-table partitions-v3.csv --erase-parts otadata target\xtensa-esp32s3-none-elf\release\heltec-v4
+```
+
+Образ для обновления по воздуху — тоже с `--flash-size 8mb --partition-table partitions-v3.csv`.
 
 XIAO ESP32-C6 + LR2021 (обычный stable-тулчейн, `rustup target add riscv32imac-unknown-none-elf`):
 

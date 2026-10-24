@@ -30,6 +30,7 @@ use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
+#[cfg(not(feature = "heltec-v3"))]
 use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx};
 use esp_println::{print, println};
 use esp_storage::FlashStorage;
@@ -200,13 +201,26 @@ fn now_ms() -> u64 {
     Instant::now().as_millis()
 }
 
-/// Read the USB Serial/JTAG console, echo, and hand complete lines to the main loop.
+#[cfg(not(feature = "heltec-v3"))]
+type ConsoleRx = UsbSerialJtagRx<'static, Blocking>;
+/// The V3's USB port is a CP2102 bridge to UART0 (TX 43, RX 44).
+#[cfg(feature = "heltec-v3")]
+type ConsoleRx = esp_hal::uart::UartRx<'static, Blocking>;
+
+fn console_read(rx: &mut ConsoleRx, buf: &mut [u8]) -> usize {
+    #[cfg(not(feature = "heltec-v3"))]
+    return rx.drain_rx_fifo(buf);
+    #[cfg(feature = "heltec-v3")]
+    return rx.read_buffered(buf).unwrap_or(0);
+}
+
+/// Read the USB console, echo, and hand complete lines to the main loop.
 #[embassy_executor::task]
-async fn console_task(mut rx: UsbSerialJtagRx<'static, Blocking>) {
+async fn console_task(mut rx: ConsoleRx) {
     let mut line: Vec<u8> = Vec::with_capacity(160);
     let mut buf = [0u8; 64];
     loop {
-        let n = rx.drain_rx_fifo(&mut buf);
+        let n = console_read(&mut rx, &mut buf);
         if n == 0 {
             Timer::after_millis(20).await;
             continue;
@@ -359,7 +373,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let prefs = load(&store, Blob::Prefs)
         .map(|d| NodePrefs::deserialize(&String::from_utf8_lossy(&d)))
-        .unwrap_or_default();
+        .unwrap_or_else(|| NodePrefs { tx_power_dbm: heltec_v4::board::DEFAULT_TX_DBM, ..Default::default() });
 
     // ---- board
     let mut led = Output::new(p.GPIO35, Level::Low, OutputConfig::default());
@@ -432,11 +446,7 @@ async fn main(spawner: Spawner) -> ! {
     // ---- battery
     let mut adc_cfg = AdcConfig::new();
     let bat_pin = adc_cfg.enable_pin_with_cal::<_, AdcCalCurve<ADC1>>(p.GPIO1, Attenuation::_11dB);
-    let mut battery = Battery {
-        adc: Adc::new(p.ADC1, adc_cfg),
-        pin: bat_pin,
-        ctrl: Output::new(p.GPIO37, Level::Low, OutputConfig::default()),
-    };
+    let mut battery = Battery::new(Adc::new(p.ADC1, adc_cfg), bat_pin, p.GPIO37);
     info!("boot: battery");
     let batt_mv = battery.read_mv().await;
     wdt.feed();
@@ -612,8 +622,12 @@ async fn main(spawner: Spawner) -> ! {
     info!("boot: console");
     wdt.feed();
     // ---- console
-    let (usb_rx, _usb_tx) = UsbSerialJtag::new(p.USB_DEVICE).split();
-    spawner.spawn(console_task(usb_rx).unwrap());
+    #[cfg(not(feature = "heltec-v3"))]
+    let (console_rx, _usb_tx) = UsbSerialJtag::new(p.USB_DEVICE).split();
+    // esp-println keeps writing to UART0's TX on its own
+    #[cfg(feature = "heltec-v3")]
+    let console_rx = esp_hal::uart::UartRx::new(p.UART0, esp_hal::uart::Config::default()).unwrap().with_rx(p.GPIO44);
+    spawner.spawn(console_task(console_rx).unwrap());
     println!("Ready. Type CLI commands (e.g. 'get name', 'set name X', 'get radio', 'neighbors').");
 
     // ---- main loop
