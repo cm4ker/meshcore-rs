@@ -472,8 +472,10 @@ async fn main(spawner: Spawner) -> ! {
     let mut p = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
-    // Wi-Fi (only for `start ota`) needs a large heap
-    esp_alloc::heap_allocator!(size: 150 * 1024);
+    // Wi-Fi, MQTT over TLS and BLE need a large heap (about 140 KB of it stays free with TLS up),
+    // but the main task's stack is what DRAM leaves after the heap, and a TLS handshake needs
+    // about 30 KB of stack: 150 KB of heap left 28 KB and overflowed it on connecting
+    esp_alloc::heap_allocator!(size: 126 * 1024);
 
     let timg0 = TimerGroup::new(p.TIMG0);
     esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
