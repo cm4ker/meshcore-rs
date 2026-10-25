@@ -247,7 +247,10 @@ async def main():
             log(describe_envelope(envelope))
         elif roots:
             sys.exit("the device only takes signed releases: give the release's .mcfw")
-        if envelope:
+        if envelope and roots is None:
+            # firmware from before signed releases knows no MANIFEST request: the image alone
+            log("the device predates signed releases: sending the release's image without its envelope")
+        elif envelope:
             for piece in envelope_pieces(envelope, ENVELOPE_PIECE):
                 reply = await link.request(bytes([OTA_MANIFEST]) + piece)
             if reply[0]:

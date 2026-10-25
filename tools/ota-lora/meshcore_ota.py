@@ -222,7 +222,10 @@ async def main():
         log(about)
         if roots and not envelope:
             sys.exit("the repeater only takes signed releases: give the release's .mcfw")
-        if envelope:
+        if envelope and roots is None:
+            # firmware from before signed releases knows no MANIFEST request: the image alone
+            log("the repeater predates signed releases: sending the release's image without its envelope")
+        elif envelope:
             for piece in envelope_pieces(envelope, ENVELOPE_PIECE):
                 body = await ota.request(REQ_OTA_MANIFEST, piece)
             if body[0]:
