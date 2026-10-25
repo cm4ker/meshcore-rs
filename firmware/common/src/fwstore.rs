@@ -43,11 +43,12 @@ struct Key {
     role: u8,
     base_len: u32,
     base_sha8: [u8; 8],
+    channel: u8,
 }
 
 impl From<&FwQuery> for Key {
     fn from(q: &FwQuery) -> Self {
-        Self { board: q.board, role: q.role, base_len: q.base_len, base_sha8: q.base_sha8 }
+        Self { board: q.board, role: q.role, base_len: q.base_len, base_sha8: q.base_sha8, channel: q.channel }
     }
 }
 
@@ -220,10 +221,11 @@ async fn fetch(
         return Err("no connection");
     }
     let path = format!(
-        "/fw/next/{}/{}/{}?counter={counter}",
+        "/fw/next/{}/{}/{}?counter={counter}&channel={}",
         release::board_name(key.board),
         release::role_name(key.role),
-        to_hex(&key.base_sha8).to_ascii_lowercase()
+        to_hex(&key.base_sha8).to_ascii_lowercase(),
+        release::channel_name(key.channel)
     );
     let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: meshcore-rs\r\nConnection: close\r\n\r\n");
     socket.write_all(request.as_bytes()).await.map_err(|_| "request not sent")?;
@@ -297,6 +299,9 @@ async fn fetch(
     let m = &h.envelope.manifest;
     if (m.board, m.role, h.base_len) != (key.board, key.role, key.base_len) || h.base_sha256[..8] != key.base_sha8 {
         return Err("the server sent a delta for another image");
+    }
+    if !m.fits_channel(key.channel) {
+        return Err("the server sent a dev release for a stable node");
     }
     let id = u32::from_le_bytes(m.image_sha256[..4].try_into().unwrap()) ^ len;
     Ok(Some(File { key, len, id, counter: m.counter, version: m.version.clone() }))

@@ -29,6 +29,7 @@ use crate::rtc::DEFAULT_EPOCH;
 use crate::util::{atof, atoi, atoi_signed, epoch_to_datetime, from_hex, ftoa, to_hex, truncate_str};
 use crate::{FIRMWARE_VERSION, MAX_ADVERT_DATA_SIZE, MAX_PACKET_PAYLOAD, MAX_PATH_SIZE, PRV_KEY_SIZE, PUB_KEY_SIZE};
 
+mod autoupdate;
 pub mod room;
 pub use room::{FIRMWARE_ROLE_ROOM, MAX_POST_TEXT_LEN, RoomClient};
 
@@ -260,9 +261,10 @@ pub struct Repeater {
     reply_path: Option<(u8, [u8; MAX_PATH_SIZE])>,
     /// Firmware updates over LoRa; set its `target` if the platform supports updates.
     pub ota: OtaEndpoint,
-    /// The updates this node hands on to its neighbours (`set fw.serve on`), if the platform
-    /// can fetch them.
+    /// The updates this node hands on to its neighbours (`set fw.serve on`), and installs itself
+    /// (`set fw.auto on`), if the platform can fetch them.
     pub fw_store: Option<Box<dyn FwStore>>,
+    autoupdate: autoupdate::AutoUpdate,
     /// Packets heard/sent, waiting for the MQTT observer (drained by the firmware).
     pub uplink: Vec<UplinkPacket>,
     /// Collect packets into `uplink` (an observer is connected).
@@ -327,6 +329,7 @@ impl Repeater {
             reply_path: None,
             ota,
             fw_store: None,
+            autoupdate: autoupdate::AutoUpdate::new(),
             uplink: Vec::new(),
             uplink_enabled: false,
             room: None,
@@ -1217,10 +1220,11 @@ impl MeshApp for Repeater {
             self.effects.save_acl = true;
         }
         self.room_loop(ctx);
+        self.auto_update_loop(ctx);
     }
 
     fn next_timer(&self) -> Option<u64> {
-        self.timers().chain(self.room.as_ref().and_then(|r| r.next_timer())).min()
+        self.timers().chain(self.room.as_ref().and_then(|r| r.next_timer())).chain(self.auto_update_timer()).min()
     }
 
     fn log_rx(&mut self, ctx: &MeshCtx, pkt: &Packet, len: usize, score: f32) {
@@ -1412,6 +1416,9 @@ impl Repeater {
             } else {
                 "ERR: clock cannot go backwards".into()
             };
+        }
+        if cmd == "fw update" {
+            return self.auto_update_now(ctx);
         }
         if cmd.starts_with("start ota ble") {
             return match self.board.ble_ota_name.clone() {
@@ -1760,10 +1767,14 @@ impl Repeater {
         if cfg.starts_with("ota.root") {
             return self.ota_root_status();
         }
-        if cfg.starts_with("fw.serve") {
-            format!("> {}", onoff(p.fw_serve))
+        if cfg.starts_with("fw.auto") {
+            self.auto_update_status()
+        } else if cfg.starts_with("fw.channel") {
+            format!("> {}", release::channel_name(p.fw_channel))
         } else if cfg.starts_with("fw.server") {
             format!("> {}", p.fw_server)
+        } else if cfg.starts_with("fw.serve") {
+            format!("> {}", onoff(p.fw_serve))
         } else if cfg.starts_with("fw.status") {
             match (p.fw_serve, self.fw_store.is_some()) {
                 (_, false) => "> no update store on this board".into(),
@@ -1892,6 +1903,27 @@ impl Repeater {
                 (true, true) => format!("OK - updates from {} handed on to neighbours", self.prefs.fw_server),
                 (false, _) => "OK - updates not handed on".into(),
             };
+        }
+        if let Some(v) = cfg.strip_prefix("fw.auto ") {
+            self.prefs.fw_auto = v.starts_with("on");
+            self.save_prefs();
+            return match (self.prefs.fw_auto, self.prefs.ota_roots.is_empty()) {
+                (true, true) => "OK - but nothing is installed until a root is pinned (set ota.root)".into(),
+                (true, false) => format!(
+                    "OK - this node updates itself from {}, {} releases",
+                    self.prefs.fw_server,
+                    release::channel_name(self.prefs.fw_channel)
+                ),
+                (false, _) => "OK - no updates by itself".into(),
+            };
+        }
+        if let Some(v) = cfg.strip_prefix("fw.channel ") {
+            let Some(ch) = release::channel_by_name(v.trim()) else {
+                return "Error: stable or dev".into();
+            };
+            self.prefs.fw_channel = ch;
+            self.save_prefs();
+            return format!("OK - following {} releases", release::channel_name(ch));
         }
         if let Some(v) = cfg.strip_prefix("fw.server ") {
             let v = v.trim();

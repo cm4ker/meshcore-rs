@@ -97,6 +97,11 @@ pub struct NodePrefs {
     pub fw_serve: bool,
     /// Host of the release server (plain HTTP: what it serves is signed).
     pub fw_server: String,
+    /// Update this node by itself from the release server (`set fw.auto on`): only with a pinned
+    /// root. Off by default.
+    pub fw_auto: bool,
+    /// The release channel followed (`release::channel`): stable by default.
+    pub fw_channel: u8,
 }
 
 impl Default for NodePrefs {
@@ -154,6 +159,8 @@ impl Default for NodePrefs {
             ota_roots: Vec::new(),
             fw_serve: false,
             fw_server: "nw.ommesh.ru".into(),
+            fw_auto: false,
+            fw_channel: 0,
         }
     }
 }
@@ -271,6 +278,8 @@ impl NodePrefs {
         let _ = writeln!(s, "ota_root={}", join_fingerprints(&self.ota_roots, ","));
         let _ = writeln!(s, "fw_serve={}", b(self.fw_serve));
         let _ = writeln!(s, "fw_server={}", escape(&self.fw_server));
+        let _ = writeln!(s, "fw_auto={}", b(self.fw_auto));
+        let _ = writeln!(s, "fw_channel={}", self.fw_channel);
         s
     }
 
@@ -336,6 +345,8 @@ impl NodePrefs {
                 "ota_root" => p.ota_roots = parse_fingerprints(v).unwrap_or_default(),
                 "fw_serve" => p.fw_serve = flag(),
                 "fw_server" => p.fw_server = unescape(v),
+                "fw_auto" => p.fw_auto = flag(),
+                "fw_channel" => p.fw_channel = u8v().min(1),
                 _ => {}
             }
         }
@@ -357,6 +368,8 @@ mod tests {
         p.ota_roots = alloc::vec![[0xA5; 32], [7; 32]];
         p.fw_serve = true;
         p.fw_server = "fw.example:8080".into();
+        p.fw_auto = true;
+        p.fw_channel = 1;
         let q = NodePrefs::deserialize(&p.serialize());
         assert_eq!(p, q);
     }

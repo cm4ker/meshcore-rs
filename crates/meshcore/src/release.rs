@@ -46,6 +46,31 @@ pub mod role {
     pub const COMPANION: u8 = 2;
 }
 
+/// Bits of [`Manifest::flags`].
+pub mod flags {
+    /// A release of the dev channel: devices that update by themselves take it only when they
+    /// follow that channel (`fw.channel dev`); a stable release has the bit clear.
+    pub const DEV: u8 = 0x01;
+}
+
+/// The release channels a device that updates by itself may follow.
+pub mod channel {
+    pub const STABLE: u8 = 0;
+    pub const DEV: u8 = 1;
+}
+
+pub fn channel_name(channel: u8) -> &'static str {
+    if channel == channel::DEV { "dev" } else { "stable" }
+}
+
+pub fn channel_by_name(name: &str) -> Option<u8> {
+    match name {
+        "stable" => Some(channel::STABLE),
+        "dev" => Some(channel::DEV),
+        _ => None,
+    }
+}
+
 /// Release number of this build, from `MCFW_COUNTER` at build time (0 for local builds).
 pub const RELEASE_COUNTER: u32 = parse_u32(option_env!("MCFW_COUNTER"));
 
@@ -136,6 +161,12 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// A device following `channel` takes this release by itself: a dev device every release, a
+    /// stable one only the stable ones.
+    pub fn fits_channel(&self, channel: u8) -> bool {
+        channel == channel::DEV || self.flags & flags::DEV == 0
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let version = &self.version.as_bytes()[..self.version.len().min(VERSION_MAX)];
         let mut b = Vec::with_capacity(FIXED_LEN + version.len());

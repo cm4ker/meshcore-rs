@@ -3,7 +3,7 @@
 //! ```text
 //! ota-sign keygen <key-file>                 new root key (32-byte seed, hex); prints its fingerprint
 //! ota-sign fingerprint (--key <file> | --key-env VAR)
-//! ota-sign bundle <image> --board heltec-v4 --role repeater --counter 42 --version 0.5.0 -o <out.mcfw>
+//! ota-sign bundle <image> --board heltec-v4 --role repeater --counter 42 --version 0.5.0 [--channel dev] -o <out.mcfw>
 //! ota-sign sign <file.mcfw> (--key <file> | --key-env VAR)
 //! ota-sign verify <file.mcfw> [--root <fingerprint>]...
 //! ota-sign extract <file.mcfw> -o <image>
@@ -129,11 +129,12 @@ fn print_key(id: &LocalIdentity) {
 fn show(envelope: &Envelope, image: &[u8], roots: &[Fingerprint]) -> bool {
     let m = &envelope.manifest;
     println!(
-        "{}/{} {} #{} issued {}  {} bytes  sha256 {}",
+        "{}/{} {} #{} ({}) issued {}  {} bytes  sha256 {}",
         release::board_name(m.board),
         release::role_name(m.role),
         m.version,
         m.counter,
+        if m.flags & release::flags::DEV != 0 { "dev" } else { "stable" },
         m.issued,
         m.image_len,
         to_hex(&m.image_sha256).to_ascii_lowercase()
@@ -230,10 +231,15 @@ fn main() -> ExitCode {
                 Some(v) => v.parse().unwrap_or_else(|_| fail("--issued: unix time")),
                 None => SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as u32),
             };
+            let flags = match args.get("channel").unwrap_or("stable") {
+                "stable" => 0,
+                "dev" => release::flags::DEV,
+                _ => fail("--channel: stable or dev"),
+            };
             let manifest = Manifest {
                 board,
                 role,
-                flags: 0,
+                flags,
                 counter,
                 image_len: image.len() as u32,
                 image_sha256: sha256(&image),

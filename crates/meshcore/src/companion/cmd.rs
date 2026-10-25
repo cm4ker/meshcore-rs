@@ -634,6 +634,7 @@ impl Companion {
                     true => String::from("fw_source:auto"),
                     false => alloc::format!("fw_source:{}", crate::util::to_hex(&self.prefs.fw_source)),
                 });
+                vars.push(alloc::format!("fw_channel:{}", release::channel_name(self.prefs.fw_channel)));
                 vars.push(alloc::format!("fw_status:{}", self.fw_status_text()));
                 let mut f = alloc::vec![RESP_CODE_CUSTOM_VARS];
                 f.extend_from_slice(vars.join(",").as_bytes());
@@ -677,6 +678,13 @@ impl Companion {
                             b"on" | b"1" => Some(FW_PULL_ON),
                             b"auto" | b"2" => Some(FW_PULL_AUTO),
                             b"check" => None,
+                            // one check that installs what it finds (`fw update`)
+                            b"update" => {
+                                return match self.fw_update_now() {
+                                    Ok(_) => self.write_ok(),
+                                    Err(_) => self.write_err(ERR_CODE_BAD_STATE),
+                                };
+                            }
                             _ => return self.write_err(ERR_CODE_ILLEGAL_ARG),
                         };
                         if let Some(mode) = mode {
@@ -698,6 +706,14 @@ impl Companion {
                         self.effects.save_prefs = true;
                         self.write_ok();
                     }
+                    b"fw_channel" => match core::str::from_utf8(value).ok().and_then(release::channel_by_name) {
+                        Some(ch) => {
+                            self.prefs.fw_channel = ch;
+                            self.effects.save_prefs = true;
+                            self.write_ok();
+                        }
+                        None => self.write_err(ERR_CODE_ILLEGAL_ARG),
+                    },
                     b"fw_install" => match self.fw_install() {
                         Ok(()) => self.write_ok(),
                         Err(_) => self.write_err(ERR_CODE_BAD_STATE),
@@ -998,9 +1014,59 @@ impl Companion {
         reply
     }
 
+    /// Updates pulled from a neighbouring repeater: `fw update`, `fw status`, `set|get fw.pull`,
+    /// `fw.channel`, `fw.source`.
+    fn handle_fw_command(&mut self, cmd: &str) -> Option<String> {
+        let save = |c: &mut Self, r: &str| {
+            c.effects.save_prefs = true;
+            String::from(r)
+        };
+        Some(match cmd {
+            "fw update" => match self.fw_update_now() {
+                Ok(r) => format!("OK - {r}"),
+                Err(e) => format!("Error: {e}"),
+            },
+            "fw status" => format!("> {}", self.fw_status_text()),
+            "get fw.pull" => format!("> {}", ["off", "on", "auto"][self.prefs.fw_pull.min(2) as usize]),
+            "get fw.channel" => format!("> {}", release::channel_name(self.prefs.fw_channel)),
+            "get fw.source" if self.prefs.fw_source.is_empty() => "> auto".into(),
+            "get fw.source" => format!("> {}", crate::util::to_hex(&self.prefs.fw_source)),
+            _ => {
+                if let Some(v) = cmd.strip_prefix("set fw.pull ") {
+                    match v.trim() {
+                        "off" => self.prefs.fw_pull = FW_PULL_OFF,
+                        "on" => self.prefs.fw_pull = FW_PULL_ON,
+                        "auto" => self.prefs.fw_pull = FW_PULL_AUTO,
+                        _ => return Some("Error: off, on or auto".into()),
+                    }
+                    save(self, "OK")
+                } else if let Some(v) = cmd.strip_prefix("set fw.channel ") {
+                    let Some(ch) = release::channel_by_name(v.trim()) else {
+                        return Some("Error: stable or dev".into());
+                    };
+                    self.prefs.fw_channel = ch;
+                    save(self, "OK")
+                } else {
+                    let v = cmd.strip_prefix("set fw.source ")?.trim();
+                    let mut key = alloc::vec![0u8; (v.len() / 2).min(PUB_KEY_SIZE)];
+                    if v == "auto" {
+                        key.clear();
+                    } else if key.len() < 4 || !crate::util::from_hex(&mut key, &v[..(v.len() / 2).min(PUB_KEY_SIZE) * 2]) {
+                        return Some("Error: a key prefix of 8+ hex digits, or auto".into());
+                    }
+                    self.prefs.fw_source = key;
+                    save(self, "OK")
+                }
+            }
+        })
+    }
+
     fn handle_command_inner(&mut self, cmd: &str) -> Option<String> {
         if let Some(r) = self.handle_radio_command(cmd) {
             self.effects.save_prefs = true;
+            return Some(r);
+        }
+        if let Some(r) = self.handle_fw_command(cmd) {
             return Some(r);
         }
         let p = &mut self.prefs;

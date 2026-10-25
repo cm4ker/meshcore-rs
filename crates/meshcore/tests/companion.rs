@@ -834,7 +834,7 @@ fn companion_ota_root_custom_var() {
     assert_eq!(set(&mut a, &fp), RESP_CODE_OK);
     assert!(a.app.take_effects().save_prefs);
     assert_eq!(a.app.ota.roots, vec![[0x9a; 32]]);
-    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], format!("ota_root:{fp},fw_pull:off,fw_source:auto,fw_status:off").as_bytes());
+    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], format!("ota_root:{fp},fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off").as_bytes());
     assert_eq!(set(&mut a, "off"), RESP_CODE_OK);
     assert!(a.app.ota.roots.is_empty());
 }
@@ -843,7 +843,7 @@ fn companion_ota_root_custom_var() {
 fn gps_setting_position_and_telemetry() {
     // no GPS: no GPS settings to offer
     let mut a = companion(1, "Alice");
-    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:off,fw_pull:off,fw_source:auto,fw_status:off");
+    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
     assert_eq!(cmd(&mut a, b"\x29gps:1")[0][0], RESP_CODE_ERR);
 
     let mut air = Air::new();
@@ -852,11 +852,11 @@ fn gps_setting_position_and_telemetry() {
     b.app.board.has_gps = true;
     b.app.prefs.telemetry_mode_base = TELEM_MODE_ALLOW_ALL;
     b.app.prefs.telemetry_mode_loc = TELEM_MODE_ALLOW_ALL;
-    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:0,ota_root:off,fw_pull:off,fw_source:auto,fw_status:off");
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:0,ota_root:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
     assert_eq!(cmd(&mut b, b"\x29gps:1")[0][0], RESP_CODE_OK);
     let fx = b.app.take_effects();
     assert!(fx.gps && fx.save_prefs && b.app.prefs.gps_enabled);
-    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:1,ota_root:off,fw_pull:off,fw_source:auto,fw_status:off");
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:1,ota_root:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
     assert_eq!(cmd(&mut b, b"\x29gps_interval:30")[0][0], RESP_CODE_OK);
     assert_eq!(b.app.prefs.gps_interval, 30);
     assert_eq!(cmd(&mut b, b"\x29alt:1")[0][0], RESP_CODE_ERR);
@@ -995,15 +995,21 @@ impl meshcore::ota::FirmwareTarget for RamSlots {
 
 /// A release of `image` for a T-Echo companion, signed by `key`, as a delta from `base`.
 fn delta_release(key: &LocalIdentity, counter: u32, base: &[u8], image: &[u8]) -> Vec<u8> {
-    use meshcore::release::{Envelope, Manifest, board, role};
+    use meshcore::release::{board, role};
+    delta_release_for(key, board::T_ECHO, role::COMPANION, 0, counter, base, image)
+}
+
+/// A release of `image` for `board` and `role` with manifest `flags`, as a delta from `base`.
+fn delta_release_for(key: &LocalIdentity, board: u8, role: u8, flags: u8, counter: u32, base: &[u8], image: &[u8]) -> Vec<u8> {
+    use meshcore::release::{Envelope, Manifest};
     use sha2::{Digest, Sha256};
     let mut patch = Vec::new();
     bsdiff::diff(base, image, &mut patch).unwrap();
     let patch = miniz_oxide::deflate::compress_to_vec_zlib(&patch, 9);
     let manifest = Manifest {
-        board: board::T_ECHO,
-        role: role::COMPANION,
-        flags: 0,
+        board,
+        role,
+        flags,
         counter,
         image_len: image.len() as u32,
         image_sha256: Sha256::digest(image).into(),
@@ -1063,7 +1069,7 @@ fn companion_pulls_an_update_from_a_neighbouring_repeater() {
     assert!(!slot.borrow().1, "fw_pull on: nothing installed until the user says so");
     assert_eq!(&cmd(&mut c, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:".iter().chain(
         meshcore::release::fingerprint_hex(&meshcore::release::fingerprint(root.pub_key())).as_bytes()).chain(
-        b",fw_pull:on,fw_source:auto,fw_status:0.5.2 ready to install").copied().collect::<Vec<_>>().as_slice());
+        b",fw_pull:on,fw_source:auto,fw_channel:stable,fw_status:0.5.2 ready to install").copied().collect::<Vec<_>>().as_slice());
 
     assert_eq!(cmd(&mut c, b"\x29fw_install:1")[0][0], RESP_CODE_OK);
     assert!(slot.borrow().1, "activated");
@@ -1100,3 +1106,65 @@ fn a_pulled_update_is_only_what_the_pinned_root_signed() {
     air.run(&mut [&mut r, &mut c], 60_000);
     assert_eq!(c.app.fw_pull_status(), &FwPullStatus::NotTrusted);
 }
+
+#[test]
+fn a_repeater_updates_itself_from_its_store() {
+    use meshcore::release::{board, fingerprint, role};
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&(0..30_000u32).map(|i| (i * 13 % 251) as u8).collect::<Vec<_>>());
+    let mut data: Vec<u8> = (0..30_000u32).map(|i| (i * 13 % 251) as u8).collect();
+    data[100..140].fill(7);
+    let image = esp_image(&data);
+
+    let slot: Slot = std::rc::Rc::new(std::cell::RefCell::new((vec![0u8; 64 * 1024], false)));
+    let mut r = repeater(1);
+    r.app.ota.target = Some(Box::new(RamSlots { running: base.clone(), slot: slot.clone() }));
+    r.app.ota.build.board = board::HELTEC_V4;
+    r.app.ota.build.counter = 4;
+    r.app.fw_store = Some(Box::new(meshcore::fwshare::MemStore::new(
+        delta_release_for(&root, board::HELTEC_V4, role::REPEATER, 0, 5, &base, &image),
+        9,
+    )));
+    let cli = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
+
+    assert_eq!(cli(&mut r, "get fw.auto"), "> off");
+    assert_eq!(cli(&mut r, "fw update"), "Error: needs a pinned root key (set ota.root)", "the server is not trusted");
+    let fp = meshcore::release::fingerprint_hex(&fingerprint(root.pub_key()));
+    cli(&mut r, &format!("set ota.root {fp}"));
+    assert_eq!(cli(&mut r, "set fw.auto on"), "OK - this node updates itself from nw.ommesh.ru, stable releases");
+
+    // `fw update` checks now rather than 10 minutes after boot
+    assert!(cli(&mut r, "fw update").starts_with("OK"));
+    let mut air = Air::new();
+    air.run(&mut [&mut r], 5_000);
+    assert!(r.app.take_effects().reboot, "installed: restarting into it");
+    assert!(slot.borrow().1);
+    assert_eq!(&slot.borrow().0[..image.len()], &image[..]);
+    assert!(cli(&mut r, "get fw.auto").contains("installing 0.5.2"));
+}
+
+#[test]
+fn a_dev_release_reaches_only_the_nodes_that_follow_dev() {
+    use meshcore::release::{board, flags, role};
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&[3u8; 4000]);
+    let image = esp_image(&[4u8; 4100]);
+    let mut r = serving_repeater(delta_release_for(&root, board::T_ECHO, role::COMPANION, flags::DEV, 5, &base, &image));
+    let (mut c, slot) = pulling_companion(&root, &base);
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000);
+
+    c.app.fw_check_now(&c.ctx);
+    air.run(&mut [&mut r, &mut c], 60_000);
+    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Idle { up_to_date: true }, "stable: a dev release is no update");
+
+    // following dev, and with `fw_pull` off: `fw update` fetches it and installs it at once
+    assert_eq!(c.app.handle_command(&mut c.ctx, "set fw.channel dev"), "OK");
+    assert_eq!(c.app.handle_command(&mut c.ctx, "set fw.pull off"), "OK");
+    assert!(c.app.handle_command(&mut c.ctx, "fw update").starts_with("OK - asking the repeater"));
+    air.run(&mut [&mut r, &mut c], 60_000);
+    assert!(slot.borrow().1, "installed");
+    assert!(c.app.take_effects().reboot);
+}
+

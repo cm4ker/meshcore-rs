@@ -18,15 +18,19 @@
 //! upstream's `[tag u32][kind u8][reply path_len u8][reply path]` prologue, and the replies after
 //! the reflected tag:
 //!
-//! - `FW_QUERY [board u8][role u8][counter u32][base_len u32][base_sha256 first 8]` -> `[status]`,
-//!   and for `READY` `[len u32][id u32][counter u32][version_len u8][version]`, for `FETCHING`
-//!   `[retry_secs u16]`
+//! - `FW_QUERY [board u8][role u8][counter u32][base_len u32][base_sha256 first 8][channel u8]` ->
+//!   `[status]`, and for `READY` `[len u32][id u32][counter u32][version_len u8][version]`, for
+//!   `FETCHING` `[retry_secs u16]`. The channel (see [`release::channel`]) may be left out: stable.
 //! - `FW_GET [id u32][offset u32][len u8]` -> `[status][offset u32][data]`
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::release::{self, Envelope, Peek};
+use crate::FIRMWARE_VERSION;
+use crate::ota::{
+    OtaEndpoint, OtaError, REQ_TYPE_OTA_BEGIN, REQ_TYPE_OTA_DATA, REQ_TYPE_OTA_MANIFEST, REQ_TYPE_OTA_STATUS,
+};
+use crate::release::{self, Envelope, Manifest, Peek};
 
 pub const ANON_REQ_TYPE_FW_QUERY: u8 = 0x1C;
 pub const ANON_REQ_TYPE_FW_GET: u8 = 0x1D;
@@ -60,10 +64,12 @@ pub struct FwQuery {
     pub counter: u32,
     pub base_len: u32,
     pub base_sha8: [u8; 8],
+    /// The release channel it follows ([`release::channel`]).
+    pub channel: u8,
 }
 
 impl FwQuery {
-    pub const LEN: usize = 18;
+    pub const LEN: usize = 19;
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(Self::LEN);
@@ -71,17 +77,21 @@ impl FwQuery {
         b.extend_from_slice(&self.counter.to_le_bytes());
         b.extend_from_slice(&self.base_len.to_le_bytes());
         b.extend_from_slice(&self.base_sha8);
+        b.push(self.channel);
         b
     }
 
+    /// A query; without the channel byte (the first version of the request), stable. The
+    /// datagram's zero padding reads as stable too.
     pub fn parse(b: &[u8]) -> Option<Self> {
-        let b = b.get(..Self::LEN)?;
+        let f = b.get(..Self::LEN - 1)?;
         Some(Self {
-            board: b[0],
-            role: b[1],
-            counter: u32::from_le_bytes(b[2..6].try_into().unwrap()),
-            base_len: u32::from_le_bytes(b[6..10].try_into().unwrap()),
-            base_sha8: b[10..18].try_into().unwrap(),
+            board: f[0],
+            role: f[1],
+            counter: u32::from_le_bytes(f[2..6].try_into().unwrap()),
+            base_len: u32::from_le_bytes(f[6..10].try_into().unwrap()),
+            base_sha8: f[10..18].try_into().unwrap(),
+            channel: b.get(18).copied().filter(|&c| c == release::channel::DEV).unwrap_or(release::channel::STABLE),
         })
     }
 }
@@ -143,6 +153,131 @@ pub fn delta_file(envelope: &[u8], base_len: u32, base_sha256: &[u8; 32], patch:
     f.extend_from_slice(patch);
     f
 }
+
+/// Why a device turns a release down, for people.
+pub fn refusal(code: u8) -> &'static str {
+    match code {
+        c if c == OtaError::Untrusted as u8 => "not signed by the pinned root key",
+        c if c == OtaError::WrongBoard as u8 => "made for another board",
+        c if c == OtaError::Downgrade as u8 => "older than this firmware",
+        c if c == OtaError::BaseMismatch as u8 => "made for another firmware than this one",
+        c if c == OtaError::BadEnvelope as u8 => "unreadable",
+        c if c == OtaError::FlashError as u8 => "the update slot can't be written",
+        _ => "refused",
+    }
+}
+
+/// Feeds a delta file into an update session as it comes, in order: the release's envelope
+/// (MANIFEST: with a pinned root it is checked there, before any of the patch), BEGIN with the
+/// image the delta applies to, then the patch in DATA chunks of [`FW_PIECE`]. The pieces must come
+/// at the offsets [`Loader::feed`] asks for; the session is then complete, for COMMIT.
+pub struct Loader {
+    len: u32,
+    /// The start of the file, until its header is whole.
+    head: Vec<u8>,
+    header: Option<DeltaHeader>,
+    /// The channel the device follows: a dev release is refused on a stable one.
+    channel: u8,
+}
+
+impl Loader {
+    pub fn new(len: u32, channel: u8) -> Self {
+        Self { len, head: Vec::new(), header: None, channel }
+    }
+
+    pub fn file_len(&self) -> u32 {
+        self.len
+    }
+
+    /// The release, once the header is in.
+    pub fn manifest(&self) -> Option<&Manifest> {
+        self.header.as_ref().map(|h| &h.envelope.manifest)
+    }
+
+    /// Bytes of the piece wanted at `offset`.
+    pub fn want(&self, offset: u32) -> usize {
+        (self.len.saturating_sub(offset) as usize).min(FW_PIECE)
+    }
+
+    /// The piece at `offset`, [`Loader::want`] bytes of it (`piece` may be longer: datagrams are
+    /// padded). The offset of the next piece wanted, or `None` once the session holds the whole
+    /// update.
+    pub fn feed(&mut self, ota: &mut OtaEndpoint, offset: u32, piece: &[u8]) -> Result<Option<u32>, &'static str> {
+        let piece = piece.get(..self.want(offset)).ok_or("a piece came short")?;
+        let mut next = offset + piece.len() as u32;
+        match &self.header {
+            None => {
+                self.head.extend_from_slice(piece);
+                match DeltaHeader::size(&self.head) {
+                    HeaderSize::NotDelta => return Err("not an update file"),
+                    HeaderSize::NeedMore(_) => {}
+                    HeaderSize::Known(n) if self.head.len() < n => {}
+                    HeaderSize::Known(_) => next = self.begin(ota)?,
+                }
+            }
+            Some(h) => {
+                let index = (offset as usize).checked_sub(h.patch_offset()).ok_or("a piece out of order")? / FW_PIECE;
+                let mut req = alloc::vec![REQ_TYPE_OTA_DATA];
+                req.extend_from_slice(&(index as u16).to_le_bytes());
+                req.extend_from_slice(piece);
+                ota.handle(&req, FIRMWARE_VERSION);
+            }
+        }
+        if next < self.len {
+            return Ok(Some(next));
+        }
+        let (reply, _) = ota.handle(&[REQ_TYPE_OTA_STATUS, 0, 0], FIRMWARE_VERSION);
+        let r = reply.unwrap_or_default();
+        if r.len() >= 5 && r[0] == 0 && r[1..3] == r[3..5] { Ok(None) } else { Err("pieces of the update are missing") }
+    }
+
+    /// The header is whole: hand the release's envelope to the session and begin it. Returns
+    /// where the patch starts.
+    fn begin(&mut self, ota: &mut OtaEndpoint) -> Result<u32, &'static str> {
+        let h = DeltaHeader::parse(&self.head).ok_or("the update file can't be read")?;
+        let (run_len, run_sha) = ota.running().ok_or("can't read this firmware's image")?;
+        if (h.base_len, h.base_sha256) != (run_len, run_sha) {
+            return Err("made for another firmware than this one");
+        }
+        if !h.envelope.manifest.fits_channel(self.channel) {
+            return Err("a dev release, and this device follows stable");
+        }
+        let envelope = self.head[..h.envelope_len].to_vec();
+        for (i, piece) in envelope.chunks(ENVELOPE_PIECE).enumerate() {
+            let mut req = alloc::vec![REQ_TYPE_OTA_MANIFEST];
+            req.extend_from_slice(&((i * ENVELOPE_PIECE) as u16).to_le_bytes());
+            req.extend_from_slice(&(envelope.len() as u16).to_le_bytes());
+            req.push(piece.len() as u8);
+            req.extend_from_slice(piece);
+            let (reply, _) = ota.handle(&req, FIRMWARE_VERSION);
+            let code = reply.and_then(|r| r.first().copied()).unwrap_or(OtaError::BadEnvelope as u8);
+            if code != 0 {
+                return Err(refusal(code));
+            }
+        }
+        let m = &h.envelope.manifest;
+        let patch_len = self.len.checked_sub(h.patch_offset() as u32).ok_or("the update file is cut short")?;
+        let mut req = alloc::vec![REQ_TYPE_OTA_BEGIN];
+        req.extend_from_slice(&patch_len.to_le_bytes());
+        req.extend_from_slice(&m.image_sha256);
+        req.extend_from_slice(&(FW_PIECE as u16).to_le_bytes());
+        req.push(0b011); // zlib, delta
+        req.extend_from_slice(&m.image_len.to_le_bytes());
+        req.extend_from_slice(&h.base_len.to_le_bytes());
+        req.extend_from_slice(&h.base_sha256);
+        let (reply, _) = ota.handle(&req, FIRMWARE_VERSION);
+        let code = reply.and_then(|r| r.first().copied()).unwrap_or(OtaError::BadParams as u8);
+        if code != 0 {
+            return Err(refusal(code));
+        }
+        let at = h.patch_offset() as u32;
+        self.header = Some(h);
+        Ok(at)
+    }
+}
+
+/// Envelope pieces fed to the update session.
+const ENVELOPE_PIECE: usize = 128;
 
 /// What a repeater can offer for a query.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -238,7 +373,12 @@ impl MemStore {
 impl FwStore for MemStore {
     fn offer(&mut self, q: &FwQuery) -> Offer {
         let Some(h) = &self.header else { return Offer::Unavailable };
-        if q.board != self.for_board || q.role != self.for_role || q.base_len != h.base_len || q.base_sha8 != h.base_sha256[..8] {
+        if q.board != self.for_board
+            || q.role != self.for_role
+            || q.base_len != h.base_len
+            || q.base_sha8 != h.base_sha256[..8]
+            || !h.envelope.manifest.fits_channel(q.channel)
+        {
             return Offer::NoUpdate;
         }
         let m = &h.envelope.manifest;
@@ -306,8 +446,18 @@ mod tests {
         crate::crypto::sha256(&mut base_sha, &[b"old image".as_slice()]);
         let file = delta_file(&env, 9, &base_sha, &[0xAB; 300]);
         let mut store = MemStore::new(file.clone(), 77);
-        let q = FwQuery { board: board::T_ECHO, role: role::COMPANION, counter: 4, base_len: 9, base_sha8: base_sha[..8].try_into().unwrap() };
+        let q = FwQuery {
+            board: board::T_ECHO,
+            role: role::COMPANION,
+            counter: 4,
+            base_len: 9,
+            base_sha8: base_sha[..8].try_into().unwrap(),
+            channel: release::channel::STABLE,
+        };
         assert_eq!(FwQuery::parse(&q.to_bytes()), Some(q));
+        let dev = FwQuery { channel: release::channel::DEV, ..q };
+        assert_eq!(FwQuery::parse(&dev.to_bytes()), Some(dev));
+        assert_eq!(FwQuery::parse(&q.to_bytes()[..18]), Some(q), "the first version of the query: stable");
 
         let mut r = Vec::new();
         assert!(answer(&mut store, ANON_REQ_TYPE_FW_QUERY, &q.to_bytes(), &mut r));

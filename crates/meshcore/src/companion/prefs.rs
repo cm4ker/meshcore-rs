@@ -78,6 +78,8 @@ pub struct CompanionPrefs {
     pub fw_pull: u8,
     /// Public key prefix of the repeater to ask; empty = the best one heard directly.
     pub fw_source: Vec<u8>,
+    /// The release channel followed (`release::channel`): stable by default.
+    pub fw_channel: u8,
 }
 
 impl Default for CompanionPrefs {
@@ -121,6 +123,7 @@ impl Default for CompanionPrefs {
             ota_roots: Vec::new(),
             fw_pull: 0,
             fw_source: Vec::new(),
+            fw_channel: 0,
         }
     }
 }
@@ -191,6 +194,7 @@ impl CompanionPrefs {
         let _ = writeln!(s, "ota_root={}", join_fingerprints(&self.ota_roots, ","));
         let _ = writeln!(s, "fw_pull={}", self.fw_pull);
         let _ = writeln!(s, "fw_source={}", crate::util::to_hex(&self.fw_source));
+        let _ = writeln!(s, "fw_channel={}", self.fw_channel);
         s
     }
 
@@ -247,6 +251,7 @@ impl CompanionPrefs {
                 "rt_path" => p.round_trip_path = flag(),
                 "ota_root" => p.ota_roots = parse_fingerprints(v).unwrap_or_default(),
                 "fw_pull" => p.fw_pull = u8v().min(2),
+                "fw_channel" => p.fw_channel = u8v().min(1),
                 "fw_source" => {
                     let mut key = alloc::vec![0u8; (v.len() / 2).min(32)];
                     let hex = &v[..key.len() * 2];

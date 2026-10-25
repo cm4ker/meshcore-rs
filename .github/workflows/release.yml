@@ -19,6 +19,11 @@ on:
       version:
         description: "Version shown to people, e.g. 0.5.0"
         required: true
+      channel:
+        description: "Release channel: dev (nodes that follow dev take it by themselves) or stable (every node)"
+        type: choice
+        options: [dev, stable]
+        default: dev
       counter:
         description: "Release number; devices never install a lower one than they run (default: this workflow's run number)"
         required: false
@@ -26,6 +31,7 @@ on:
 env:
   MCFW_COUNTER: ${{ inputs.counter || github.run_number }}
   MCFW_VERSION: ${{ inputs.version }}
+  MCFW_CHANNEL: ${{ inputs.channel || 'dev' }}
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -128,7 +134,7 @@ jobs:
             board=${name%-*}
             role=${name##*-}
             mcfw=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.mcfw
-            $sign bundle "$image" --board "$board" --role "$role" --counter "$MCFW_COUNTER" --version "$MCFW_VERSION" -o "$mcfw"
+            $sign bundle "$image" --board "$board" --role "$role" --counter "$MCFW_COUNTER" --version "$MCFW_VERSION" --channel "$MCFW_CHANNEL" -o "$mcfw"
             $sign sign "$mcfw" --key-env MCFW_ROOT_KEY
           done
           cp images/*.uf2 out/
@@ -163,6 +169,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
-          gh release create "v$MCFW_VERSION-r$MCFW_COUNTER" out/* \
-            --title "$MCFW_VERSION (release #$MCFW_COUNTER)" \
+          prerelease=$([ "$MCFW_CHANNEL" = dev ] && echo --prerelease || true)
+          gh release create "v$MCFW_VERSION-r$MCFW_COUNTER" out/* $prerelease \
+            --title "$MCFW_VERSION (release #$MCFW_COUNTER, $MCFW_CHANNEL)" \
             --notes "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set ota.root $root\` (repeater) or the \`ota_root\` custom variable (companion), then update with the board's .mcfw file. The .uf2 is the T-Echo image for the USB bootloader. The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them."

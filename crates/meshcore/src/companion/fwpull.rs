@@ -8,11 +8,8 @@ use alloc::string::ToString;
 
 use super::*;
 use crate::FIRMWARE_VERSION;
-use crate::fwshare::{self, DeltaHeader, FW_PIECE, FwQuery, HeaderSize, status};
-use crate::ota::{
-    OtaError, OtaOutcome, REQ_TYPE_OTA_BEGIN, REQ_TYPE_OTA_COMMIT, REQ_TYPE_OTA_DATA, REQ_TYPE_OTA_MANIFEST,
-    REQ_TYPE_OTA_STATUS,
-};
+use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, status};
+use crate::ota::{OtaOutcome, REQ_TYPE_OTA_COMMIT};
 
 pub const FW_PULL_OFF: u8 = 0;
 /// Fetch updates, install one when the user says so.
@@ -32,8 +29,6 @@ const TRIES: u8 = 6;
 const PIECE_GAP_MS: u64 = 1_200;
 /// Repeaters heard directly within this long are asked.
 const HEARD_RECENTLY_SECS: u32 = 2 * 86_400;
-/// Envelope pieces fed to the update session.
-const ENVELOPE_PIECE: usize = 128;
 
 /// Where a pull stands, for the device's screen and `fw_status`.
 #[derive(Clone, Debug, PartialEq)]
@@ -73,11 +68,11 @@ pub struct FwPull {
     tries: u8,
     repeater: [u8; PUB_KEY_SIZE],
     file_id: u32,
-    file_len: u32,
     version: String,
-    /// The start of the file, until its header is whole.
-    head: Vec<u8>,
-    header: Option<DeltaHeader>,
+    /// The update session being fed, while the file comes.
+    loader: Option<Loader>,
+    /// `fw update`: one check that installs what it finds, whatever `fw_pull` says.
+    once: bool,
 }
 
 impl Default for FwPull {
@@ -90,24 +85,10 @@ impl Default for FwPull {
             tries: 0,
             repeater: [0; PUB_KEY_SIZE],
             file_id: 0,
-            file_len: 0,
             version: String::new(),
-            head: Vec::new(),
-            header: None,
+            loader: None,
+            once: false,
         }
-    }
-}
-
-/// Why a device turns a release down, for people.
-fn refusal(code: u8) -> &'static str {
-    match code {
-        c if c == OtaError::Untrusted as u8 => "not signed by the pinned root key",
-        c if c == OtaError::WrongBoard as u8 => "made for another board",
-        c if c == OtaError::Downgrade as u8 => "older than this firmware",
-        c if c == OtaError::BaseMismatch as u8 => "made for another firmware than this one",
-        c if c == OtaError::BadEnvelope as u8 => "unreadable",
-        c if c == OtaError::FlashError as u8 => "the update slot can't be written",
-        _ => "refused",
     }
 }
 
@@ -115,7 +96,7 @@ impl Companion {
     /// The node may pull: it is asked to, and it pins a root key (what a repeater hands on is only
     /// trusted for its signature) and has an update slot.
     fn fw_pull_allowed(&self) -> Option<FwPullStatus> {
-        if self.prefs.fw_pull == FW_PULL_OFF {
+        if self.prefs.fw_pull == FW_PULL_OFF && !self.fwpull.once {
             Some(FwPullStatus::Off)
         } else if self.ota.roots.is_empty() || self.ota.target.is_none() {
             Some(FwPullStatus::NotTrusted)
@@ -174,6 +155,26 @@ impl Companion {
         }
     }
 
+    /// `fw update`: ask the repeater now, and install what comes as soon as it is in (the device
+    /// restarts), whatever `fw_pull` says. An update already fetched is installed at once.
+    pub fn fw_update_now(&mut self) -> Result<String, String> {
+        if self.ota.roots.is_empty() {
+            return Err("pin the release root key first (ota_root)".into());
+        }
+        if self.ota.target.is_none() {
+            return Err("no update slot on this device".into());
+        }
+        if self.fwpull.step == Step::Ready {
+            self.fw_install()?;
+            return Ok("installing, the device restarts".into());
+        }
+        self.fwpull.once = true;
+        if self.fwpull.step == Step::Sleep {
+            self.fwpull.at = 0;
+        }
+        Ok("asking the repeater; the update installs itself when it is in (fw status)".into())
+    }
+
     /// Check for an update now (the device's button, or the app).
     pub fn fw_check_now(&mut self, ctx: &MeshCtx) {
         if self.fwpull.step == Step::Sleep {
@@ -198,7 +199,7 @@ impl Companion {
                 Err(line)
             }
             OtaOutcome::None => {
-                let why = refusal(reply.and_then(|r| r.first().copied()).unwrap_or(0)).to_string();
+                let why = fwshare::refusal(reply.and_then(|r| r.first().copied()).unwrap_or(0)).to_string();
                 self.fw_pull_reset();
                 self.fwpull.status = FwPullStatus::Failed(why.clone());
                 Err(why)
@@ -273,6 +274,7 @@ impl Companion {
             counter: self.ota.build.counter,
             base_len,
             base_sha8: base_sha[..8].try_into().unwrap(),
+            channel: self.prefs.fw_channel,
         };
         self.fwpull.step = Step::Query;
         if !matches!(self.fwpull.status, FwPullStatus::RepeaterFetching) {
@@ -285,7 +287,7 @@ impl Companion {
 
     fn fw_get(&mut self, ctx: &mut MeshCtx, offset: u32) {
         self.fwpull.step = Step::Get { offset };
-        let len = (self.fwpull.file_len - offset).min(FW_PIECE as u32) as u8;
+        let len = self.fwpull.loader.as_ref().map_or(FW_PIECE, |l| l.want(offset)) as u8;
         let mut req = self.fwpull.file_id.to_le_bytes().to_vec();
         req.extend_from_slice(&offset.to_le_bytes());
         req.push(len);
@@ -311,10 +313,8 @@ impl Companion {
                 let len = read_u32(body, 0);
                 let vlen = (body[12] as usize).min(body.len() - 13);
                 self.fwpull.file_id = read_u32(body, 4);
-                self.fwpull.file_len = len;
                 self.fwpull.version = String::from_utf8_lossy(&body[13..13 + vlen]).into_owned();
-                self.fwpull.head.clear();
-                self.fwpull.header = None;
+                self.fwpull.loader = Some(Loader::new(len, self.prefs.fw_channel));
                 self.fwpull.status = FwPullStatus::Loading { version: self.fwpull.version.clone(), done: 0, total: len };
                 self.fw_get(ctx, 0);
             }
@@ -343,97 +343,29 @@ impl Companion {
         true
     }
 
-    /// A piece of the file at `offset`: the header first, then the patch, chunk by chunk.
+    /// A piece of the file at `offset`, fed to the update session; the next one is asked for after
+    /// a pause, or the update is ready.
     fn fw_piece(&mut self, ctx: &mut MeshCtx, offset: u32, piece: &[u8]) -> Result<(), &'static str> {
-        // the datagram is zero-padded to the cipher block: cut to what was asked for
-        let want = (self.fwpull.file_len - offset).min(FW_PIECE as u32) as usize;
-        let Some(piece) = piece.get(..want) else {
+        let Some(loader) = self.fwpull.loader.as_mut() else {
+            return Err("no update file");
+        };
+        if piece.len() < loader.want(offset) {
             self.fwpull.at = ctx.now + PIECE_GAP_MS; // cut short: ask for it again
             return Ok(());
-        };
-        let mut next = offset + piece.len() as u32;
-        match &self.fwpull.header {
-            None => {
-                self.fwpull.head.extend_from_slice(piece);
-                match DeltaHeader::size(&self.fwpull.head) {
-                    HeaderSize::NotDelta => return Err("the repeater sent no update file"),
-                    HeaderSize::NeedMore(_) => {}
-                    HeaderSize::Known(n) if self.fwpull.head.len() < n => {}
-                    HeaderSize::Known(_) => next = self.fw_begin()?,
-                }
-            }
-            Some(h) => {
-                let index = (offset as usize - h.patch_offset()) / FW_PIECE;
-                let mut req = alloc::vec![REQ_TYPE_OTA_DATA];
-                req.extend_from_slice(&(index as u16).to_le_bytes());
-                req.extend_from_slice(piece);
-                self.ota.handle(&req, FIRMWARE_VERSION);
-            }
         }
+        let next = loader.feed(&mut self.ota, offset, piece)?;
         if let FwPullStatus::Loading { done, .. } = &mut self.fwpull.status {
-            *done = next;
+            *done = next.unwrap_or(loader.file_len());
         }
-        if next < self.fwpull.file_len {
+        if let Some(next) = next {
             self.fwpull.step = Step::Get { offset: next };
             self.fwpull.at = ctx.now + PIECE_GAP_MS;
             return Ok(());
         }
-        self.fw_finished()
-    }
-
-    /// The header is whole: hand the release's envelope to the update session and begin it.
-    /// Returns where the patch starts.
-    fn fw_begin(&mut self) -> Result<u32, &'static str> {
-        let h = DeltaHeader::parse(&self.fwpull.head).ok_or("the update file can't be read")?;
-        let (run_len, run_sha) = self.ota.running().ok_or("can't read this firmware's image")?;
-        if (h.base_len, h.base_sha256) != (run_len, run_sha) {
-            return Err("made for another firmware than this one");
-        }
-        let envelope = self.fwpull.head[..h.envelope_len].to_vec();
-        for (i, piece) in envelope.chunks(ENVELOPE_PIECE).enumerate() {
-            let mut req = alloc::vec![REQ_TYPE_OTA_MANIFEST];
-            req.extend_from_slice(&((i * ENVELOPE_PIECE) as u16).to_le_bytes());
-            req.extend_from_slice(&(envelope.len() as u16).to_le_bytes());
-            req.push(piece.len() as u8);
-            req.extend_from_slice(piece);
-            let (reply, _) = self.ota.handle(&req, FIRMWARE_VERSION);
-            let code = reply.and_then(|r| r.first().copied()).unwrap_or(OtaError::BadEnvelope as u8);
-            if code != 0 {
-                return Err(refusal(code));
-            }
-        }
-        let m = &h.envelope.manifest;
-        let patch_len = self.fwpull.file_len.checked_sub(h.patch_offset() as u32).ok_or("the update file is cut short")?;
-        let mut req = alloc::vec![REQ_TYPE_OTA_BEGIN];
-        req.extend_from_slice(&patch_len.to_le_bytes());
-        req.extend_from_slice(&m.image_sha256);
-        req.extend_from_slice(&(FW_PIECE as u16).to_le_bytes());
-        req.push(0b011); // zlib, delta
-        req.extend_from_slice(&m.image_len.to_le_bytes());
-        req.extend_from_slice(&h.base_len.to_le_bytes());
-        req.extend_from_slice(&h.base_sha256);
-        let (reply, _) = self.ota.handle(&req, FIRMWARE_VERSION);
-        let code = reply.and_then(|r| r.first().copied()).unwrap_or(OtaError::BadParams as u8);
-        if code != 0 {
-            return Err(refusal(code));
-        }
-        let at = h.patch_offset() as u32;
-        self.fwpull.header = Some(h);
-        Ok(at)
-    }
-
-    /// The whole patch is in the session: check it holds every chunk, then wait for the word to
-    /// install (or install now, with `fw_pull auto`).
-    fn fw_finished(&mut self) -> Result<(), &'static str> {
-        let (reply, _) = self.ota.handle(&[REQ_TYPE_OTA_STATUS, 0, 0], FIRMWARE_VERSION);
-        let r = reply.unwrap_or_default();
-        let complete = r.len() >= 5 && r[0] == 0 && r[1..3] == r[3..5];
-        if !complete {
-            return Err("pieces of the update are missing");
-        }
+        // the whole patch is in the session: wait for the word to install (or install now)
         self.fwpull.step = Step::Ready;
         self.fwpull.status = FwPullStatus::Ready { version: self.fwpull.version.clone() };
-        if self.prefs.fw_pull == FW_PULL_AUTO {
+        if self.prefs.fw_pull == FW_PULL_AUTO || self.fwpull.once {
             let _ = self.fw_install();
         }
         Ok(())
