@@ -94,7 +94,7 @@ async fn main(spawner: Spawner) -> ! {
     reset::install(esp_hal::rtc_cntl::Rtc::new(p.RTC_TIMER), WATCHDOG_SECS);
 
     println!();
-    println!("MeshCore companion (Rust) {} build {} for XIAO C6 + LR2021", meshcore::FIRMWARE_VERSION, BUILD_DATE);
+    println!("MeshCore companion (Rust) {} {} for XIAO C6 + LR2021", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(BUILD_DATE));
     let store = storage::open(FlashStorage::new(p.FLASH)).map(|s| Rc::new(RefCell::new(s)));
 
     let spi = Spi::new(p.SPI2, SpiConfig::default().with_frequency(Rate::from_mhz(8)))

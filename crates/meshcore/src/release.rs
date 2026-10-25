@@ -74,6 +74,12 @@ pub fn channel_by_name(name: &str) -> Option<u8> {
 /// Release number of this build, from `MCFW_COUNTER` at build time (0 for local builds).
 pub const RELEASE_COUNTER: u32 = parse_u32(option_env!("MCFW_COUNTER"));
 
+/// How a build names itself to people (`ver`, the app's device info, logs): a release by its
+/// number, a local build by its date.
+pub fn build_label(build_date: &str) -> String {
+    if RELEASE_COUNTER > 0 { alloc::format!("build #{RELEASE_COUNTER}") } else { alloc::format!("local build {build_date}") }
+}
+
 const fn parse_u32(s: Option<&str>) -> u32 {
     let Some(s) = s else {
         return 0;

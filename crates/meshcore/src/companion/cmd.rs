@@ -42,7 +42,12 @@ impl Companion {
                 self.app_target_ver = frame[1];
                 let mut f = alloc::vec![RESP_CODE_DEVICE_INFO, FIRMWARE_VER_CODE, (MAX_CONTACTS / 2) as u8, MAX_GROUP_CHANNELS as u8];
                 f.extend_from_slice(&self.prefs.ble_pin.to_le_bytes());
-                push_padded(&mut f, self.board.build_date.as_bytes(), 12);
+                // the app shows it as the build: the release number, or a local build's date
+                let build = match release::RELEASE_COUNTER {
+                    0 => self.board.build_date.clone(),
+                    n => alloc::format!("build #{n}"),
+                };
+                push_padded(&mut f, build.as_bytes(), 12);
                 push_padded(&mut f, self.board.manufacturer.as_bytes(), 40);
                 push_padded(&mut f, FIRMWARE_VERSION.as_bytes(), 20);
                 f.push(self.prefs.is_repeat_enabled() as u8);
@@ -1129,7 +1134,7 @@ impl Companion {
         } else if cmd == "board" {
             self.board.manufacturer.clone()
         } else if cmd == "ver" {
-            format!("{} (Build: {})", FIRMWARE_VERSION, self.board.build_date)
+            format!("{} ({})", FIRMWARE_VERSION, release::build_label(&self.board.build_date))
         } else if cmd == "get tz.offset" {
             format!("> {}", p.tz_offset)
         } else {

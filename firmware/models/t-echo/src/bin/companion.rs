@@ -198,7 +198,7 @@ async fn main(spawner: Spawner) {
     diag::init_logger();
     let mut busy_led = Output::new(p.P0_14, Level::Low, OutputDrive::Standard); // blue: starting
     Timer::after_millis(1500).await; // time for the host to open the port
-    info!("MeshCore companion (Rust) {} build {} for T-Echo", meshcore::FIRMWARE_VERSION, BUILD_DATE);
+    info!("MeshCore companion (Rust) {} {} for T-Echo", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(BUILD_DATE));
     if let Some(crash) = diag::take_crash() {
         warn!("last reset: {crash}");
     }

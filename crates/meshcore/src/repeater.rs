@@ -390,6 +390,11 @@ impl Repeater {
         &self.acl
     }
 
+    /// The app's 12-byte "build date" field: the release number, or a local build's date.
+    fn app_build_field(build_date: &str) -> String {
+        if release::RELEASE_COUNTER > 0 { format!("build #{}", release::RELEASE_COUNTER) } else { build_date.into() }
+    }
+
     fn console(&mut self, line: String) {
         self.effects.console.push(line);
     }
@@ -413,7 +418,8 @@ impl Repeater {
         let code = *frame.first()?;
         if code == CMD_DEVICE_QUERY {
             let mut f = alloc::vec![RESP_CODE_DEVICE_INFO, crate::companion::FIRMWARE_VER_CODE, 0, 0, 0, 0, 0, 0];
-            for (s, width) in [(self.board.build_date.as_str(), 12), (self.board.manufacturer.as_str(), 40), (FIRMWARE_VERSION, 20)] {
+            let build = Self::app_build_field(&self.board.build_date);
+            for (s, width) in [(build.as_str(), 12), (self.board.manufacturer.as_str(), 40), (FIRMWARE_VERSION, 20)] {
                 let s = &s.as_bytes()[..s.len().min(width - 1)];
                 f.extend_from_slice(s);
                 f.resize(f.len() + width - s.len(), 0);
@@ -1508,7 +1514,7 @@ impl Repeater {
             return "File system erase: OK".into();
         }
         if cmd.starts_with("ver") {
-            return format!("{} (Build: {})", FIRMWARE_VERSION, self.board.build_date);
+            return format!("{} ({})", FIRMWARE_VERSION, release::build_label(&self.board.build_date));
         }
         if cmd.starts_with("board") {
             return self.board.manufacturer.clone();

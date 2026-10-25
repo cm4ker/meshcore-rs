@@ -160,7 +160,7 @@ async fn main(spawner: Spawner) -> ! {
     reset::install(esp_hal::rtc_cntl::Rtc::new(p.RTC_TIMER), WATCHDOG_SECS);
 
     println!();
-    println!("MeshCore companion (Rust) {} build {}", meshcore::FIRMWARE_VERSION, BUILD_DATE);
+    println!("MeshCore companion (Rust) {} {}", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(BUILD_DATE));
     let store = storage::open(FlashStorage::new(p.FLASH)).map(|s| Rc::new(RefCell::new(s)));
 
     let led = Output::new(p.GPIO35, Level::Low, OutputConfig::default());

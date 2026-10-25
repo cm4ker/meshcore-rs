@@ -240,7 +240,7 @@ fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64
     // as paths and traces show nodes
     let id_len = p.path_hash_mode as usize + 1;
     let id = to_hex(&key[..id_len]);
-    let version = alloc::format!("{} {}", meshcore::FIRMWARE_VERSION, BUILD_DATE);
+    let version = alloc::format!("{} {}", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(BUILD_DATE));
     let passport = || Passport {
         name: p.node_name.clone(),
         id: id.clone(),
@@ -502,7 +502,7 @@ async fn main(spawner: Spawner) -> ! {
     let wdt = WatchdogFeeder;
 
     println!();
-    println!("MeshCore repeater (Rust) {} build {}", meshcore::FIRMWARE_VERSION, BUILD_DATE);
+    println!("MeshCore repeater (Rust) {} {}", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(BUILD_DATE));
 
     // ---- persistent state
     let store: Option<SharedStore> = storage::open(FlashStorage::new(p.FLASH)).map(|s| Rc::new(RefCell::new(s)));

@@ -209,7 +209,10 @@ fn pull_failure(why: &str) -> String {
 
 /// The update page: where pulling an update from a neighbouring repeater stands.
 fn pull_info(app: &Companion) -> PullInfo {
-    let version = alloc::format!("сборка #{} ({})", app.ota.build.counter, app.board.build_date);
+    let version = match app.ota.build.counter {
+        0 => alloc::format!("локальная сборка {}", app.board.build_date),
+        n => alloc::format!("сборка #{n}"),
+    };
     let (state, detail, progress, hold): (String, String, _, _) = match app.fw_pull_status() {
         FwPullStatus::Off => ("Выключено".into(), "Включите fw_pull в настройках приложения".into(), None, None),
         FwPullStatus::NotTrusted => ("Нет корневого ключа".into(), "Задайте ota_root в настройках приложения".into(), None, None),
