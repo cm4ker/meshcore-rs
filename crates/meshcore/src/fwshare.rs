@@ -21,6 +21,8 @@
 //! - `FW_QUERY [board u8][role u8][counter u32][base_len u32][base_sha256 first 8][channel u8]` ->
 //!   `[status]`, and for `READY` `[len u32][id u32][counter u32][version_len u8][version]`, for
 //!   `FETCHING` `[retry_secs u16]`. The channel (see [`release::channel`]) may be left out: stable.
+//!   Its bit 7 asks for a fresh answer: someone asked for an update by hand, so the repeater forgets
+//!   what it knew about this image (that the server had nothing newer) and asks again.
 //! - `FW_GET [id u32][offset u32][len u8]` -> `[status][offset u32][data]`
 
 use alloc::string::String;
@@ -66,7 +68,12 @@ pub struct FwQuery {
     pub base_sha8: [u8; 8],
     /// The release channel it follows ([`release::channel`]).
     pub channel: u8,
+    /// Asked by hand (`fw update`): what the repeater knew about this image is not good enough.
+    pub fresh: bool,
 }
+
+/// Bit 7 of FW_QUERY's channel byte: [`FwQuery::fresh`].
+const FRESH: u8 = 0x80;
 
 impl FwQuery {
     pub const LEN: usize = 19;
@@ -77,7 +84,7 @@ impl FwQuery {
         b.extend_from_slice(&self.counter.to_le_bytes());
         b.extend_from_slice(&self.base_len.to_le_bytes());
         b.extend_from_slice(&self.base_sha8);
-        b.push(self.channel);
+        b.push(self.channel | if self.fresh { FRESH } else { 0 });
         b
     }
 
@@ -91,7 +98,8 @@ impl FwQuery {
             counter: u32::from_le_bytes(f[2..6].try_into().unwrap()),
             base_len: u32::from_le_bytes(f[6..10].try_into().unwrap()),
             base_sha8: f[10..18].try_into().unwrap(),
-            channel: b.get(18).copied().filter(|&c| c == release::channel::DEV).unwrap_or(release::channel::STABLE),
+            channel: b.get(18).map(|c| c & !FRESH).filter(|&c| c == release::channel::DEV).unwrap_or(release::channel::STABLE),
+            fresh: b.get(18).is_some_and(|c| c & FRESH != 0),
         })
     }
 }
@@ -296,6 +304,9 @@ pub trait FwStore {
     fn offer(&mut self, q: &FwQuery) -> Offer;
     /// Bytes of file `id` from `offset` into `buf`; `None` if the store holds another file now.
     fn read(&mut self, id: u32, offset: u32, buf: &mut [u8]) -> Option<usize>;
+    /// Someone asked for an update by hand: forget that the server had nothing newer for `q`'s
+    /// image (or failed), so the next [`FwStore::offer`] asks it again.
+    fn refresh(&mut self, _q: &FwQuery) {}
 }
 
 /// A repeater's answer to FW request `kind` with `data` (after the reply path), appended to
@@ -307,6 +318,9 @@ pub fn answer(store: &mut dyn FwStore, kind: u8, data: &[u8], reply: &mut Vec<u8
                 reply.push(status::BAD_REQUEST);
                 return true;
             };
+            if q.fresh {
+                store.refresh(&q);
+            }
             match store.offer(&q) {
                 Offer::Ready { counter, .. } if counter <= q.counter => reply.push(status::NONE),
                 Offer::Ready { len, id, counter, version } => {
@@ -453,8 +467,11 @@ mod tests {
             base_len: 9,
             base_sha8: base_sha[..8].try_into().unwrap(),
             channel: release::channel::STABLE,
+            fresh: false,
         };
         assert_eq!(FwQuery::parse(&q.to_bytes()), Some(q));
+        let fresh_dev = FwQuery { channel: release::channel::DEV, fresh: true, ..q };
+        assert_eq!(FwQuery::parse(&fresh_dev.to_bytes()), Some(fresh_dev));
         let dev = FwQuery { channel: release::channel::DEV, ..q };
         assert_eq!(FwQuery::parse(&dev.to_bytes()), Some(dev));
         assert_eq!(FwQuery::parse(&q.to_bytes()[..18]), Some(q), "the first version of the query: stable");

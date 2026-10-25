@@ -73,6 +73,8 @@ pub struct FwPull {
     loader: Option<Loader>,
     /// `fw update`: one check that installs what it finds, whatever `fw_pull` says.
     once: bool,
+    /// The next query was asked for by hand: the repeater should not answer from what it knew.
+    fresh: bool,
 }
 
 impl Default for FwPull {
@@ -88,6 +90,7 @@ impl Default for FwPull {
             version: String::new(),
             loader: None,
             once: false,
+            fresh: false,
         }
     }
 }
@@ -169,6 +172,7 @@ impl Companion {
             return Ok("installing, the device restarts".into());
         }
         self.fwpull.once = true;
+        self.fwpull.fresh = true;
         if self.fwpull.step == Step::Sleep {
             self.fwpull.at = 0;
         }
@@ -179,6 +183,7 @@ impl Companion {
     pub fn fw_check_now(&mut self, ctx: &MeshCtx) {
         if self.fwpull.step == Step::Sleep {
             self.fwpull.at = ctx.now;
+            self.fwpull.fresh = true; // asked by hand
         }
     }
 
@@ -275,6 +280,7 @@ impl Companion {
             base_len,
             base_sha8: base_sha[..8].try_into().unwrap(),
             channel: self.prefs.fw_channel,
+            fresh: core::mem::take(&mut self.fwpull.fresh),
         };
         self.fwpull.step = Step::Query;
         if !matches!(self.fwpull.status, FwPullStatus::RepeaterFetching) {

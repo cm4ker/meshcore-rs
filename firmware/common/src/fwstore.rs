@@ -29,8 +29,11 @@ use crate::ota::{SharedStore, Slots};
 /// Room for one delta: a repeater's from one release to the next is ~50 KB, a companion's less.
 pub const CACHE_SIZE: u32 = 512 * 1024;
 const SECTOR: usize = 4096;
-/// The server said it has no update from an image: believed this long.
-const MISS_SECS: u64 = 3600;
+/// The server said it has no update from an image: believed this long (a check by hand asks
+/// again at once, see `refresh`).
+const MISS_SECS: u64 = 600;
+/// A neighbour may make this node ask the server again at most this often.
+const REFRESH_SECS: u64 = 60;
 /// After a failed fetch.
 const FAIL_SECS: u64 = 600;
 /// What an asking companion is told to wait while a fetch runs.
@@ -67,6 +70,7 @@ struct State {
     /// (image, release asked from, until): the server had nothing newer.
     misses: Vec<(Key, u32, u64)>,
     failed_until: u64,
+    last_refresh: u64,
     status: String,
 }
 
@@ -76,6 +80,7 @@ static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
     fetching: None,
     misses: Vec::new(),
     failed_until: 0,
+    last_refresh: 0,
     status: String::new(),
 }));
 static ONLINE: AtomicBool = AtomicBool::new(false);
@@ -155,6 +160,19 @@ impl FwStore for FlashFwStore {
             }
             Offer::Fetching { retry_secs: FETCH_RETRY_SECS * 2 }
         })
+    }
+
+    fn refresh(&mut self, q: &FwQuery) {
+        let key = Key::from(q);
+        let now = secs();
+        with(|s| {
+            if now < s.last_refresh + REFRESH_SECS && s.last_refresh != 0 {
+                return;
+            }
+            s.last_refresh = now;
+            s.misses.retain(|m| m.0 != key);
+            s.failed_until = 0;
+        });
     }
 
     fn read(&mut self, id: u32, offset: u32, buf: &mut [u8]) -> Option<usize> {

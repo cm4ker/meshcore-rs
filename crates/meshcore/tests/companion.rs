@@ -1121,10 +1121,9 @@ fn a_repeater_updates_itself_from_its_store() {
     r.app.ota.target = Some(Box::new(RamSlots { running: base.clone(), slot: slot.clone() }));
     r.app.ota.build.board = board::HELTEC_V4;
     r.app.ota.build.counter = 4;
-    r.app.fw_store = Some(Box::new(meshcore::fwshare::MemStore::new(
-        delta_release_for(&root, board::HELTEC_V4, role::REPEATER, 0, 5, &base, &image),
-        9,
-    )));
+    // the store's server had nothing newer when it last asked: `fw update` makes it ask again
+    let inner = meshcore::fwshare::MemStore::new(delta_release_for(&root, board::HELTEC_V4, role::REPEATER, 0, 5, &base, &image), 9);
+    r.app.fw_store = Some(Box::new(StaleStore { inner, stale: true }));
     let cli = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
 
     assert_eq!(cli(&mut r, "get fw.auto"), "> off");
@@ -1168,3 +1167,47 @@ fn a_dev_release_reaches_only_the_nodes_that_follow_dev() {
     assert!(c.app.take_effects().reboot);
 }
 
+
+/// A store whose server had nothing newer when it last asked, and which believes that until it is
+/// told to ask again.
+struct StaleStore {
+    inner: meshcore::fwshare::MemStore,
+    stale: bool,
+}
+
+impl meshcore::fwshare::FwStore for StaleStore {
+    fn offer(&mut self, q: &meshcore::fwshare::FwQuery) -> meshcore::fwshare::Offer {
+        if self.stale { meshcore::fwshare::Offer::NoUpdate } else { self.inner.offer(q) }
+    }
+    fn read(&mut self, id: u32, offset: u32, buf: &mut [u8]) -> Option<usize> {
+        self.inner.read(id, offset, buf)
+    }
+    fn refresh(&mut self, _q: &meshcore::fwshare::FwQuery) {
+        self.stale = false;
+    }
+}
+
+#[test]
+fn fw_update_by_hand_does_not_take_the_repeaters_old_answer() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&[5u8; 4000]);
+    let image = esp_image(&[6u8; 4100]);
+    let mut r = repeater(1);
+    r.app.prefs.fw_serve = true;
+    let inner = meshcore::fwshare::MemStore::new(delta_release(&root, 5, &base, &image), 77);
+    r.app.fw_store = Some(Box::new(StaleStore { inner, stale: true }));
+    r.app.start(&mut r.ctx);
+    let (mut c, slot) = pulling_companion(&root, &base);
+    let mut air = Air::new();
+    air.link(0, 1);
+
+    // the scheduled check, 10 minutes after boot, believes what the repeater last heard
+    air.run(&mut [&mut r, &mut c], 11 * 60_000);
+    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Idle { up_to_date: true });
+
+    // asked by hand, the repeater asks its server again: the update comes and installs itself
+    assert!(c.app.handle_command(&mut c.ctx, "fw update").starts_with("OK"));
+    air.run(&mut [&mut r, &mut c], 60_000);
+    assert!(slot.borrow().1, "installed");
+    assert!(c.app.take_effects().reboot);
+}

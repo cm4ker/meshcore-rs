@@ -87,6 +87,12 @@ impl Repeater {
         }
         if self.autoupdate.step == Step::Sleep {
             self.autoupdate.at = ctx.now;
+            // asked by hand: not what the store last heard from the server
+            if let Some(q) = self.own_query()
+                && let Some(store) = self.fw_store.as_deref_mut()
+            {
+                store.refresh(&q);
+            }
         }
         "OK - checking for an update; it installs itself and restarts (get fw.auto)".into()
     }
@@ -115,16 +121,8 @@ impl Repeater {
             self.autoupdate.at = ctx.now + BUSY_RETRY_MS;
             return;
         }
-        let Some((base_len, base_sha)) = self.ota.running() else {
+        let Some(q) = self.own_query() else {
             return self.auto_sleep(ctx, RETRY_LATER_MS, "can't read this firmware's image".into());
-        };
-        let q = FwQuery {
-            board: self.ota.build.board,
-            role: self.ota.build.role,
-            counter: self.ota.build.counter,
-            base_len,
-            base_sha8: base_sha[..8].try_into().unwrap(),
-            channel: self.prefs.fw_channel,
         };
         let Some(store) = self.fw_store.as_deref_mut() else { return };
         match store.offer(&q) {
@@ -145,6 +143,20 @@ impl Repeater {
             }
             Offer::Unavailable => self.auto_sleep(ctx, RETRY_LATER_MS, "the release server can't be reached".into()),
         }
+    }
+
+    /// What this node asks its store for: an update from the image it runs.
+    fn own_query(&mut self) -> Option<FwQuery> {
+        let (base_len, base_sha) = self.ota.running()?;
+        Some(FwQuery {
+            board: self.ota.build.board,
+            role: self.ota.build.role,
+            counter: self.ota.build.counter,
+            base_len,
+            base_sha8: base_sha[..8].try_into().unwrap(),
+            channel: self.prefs.fw_channel,
+            fresh: false,
+        })
     }
 
     fn auto_load(&mut self, ctx: &mut MeshCtx, id: u32, mut offset: u32) {

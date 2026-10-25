@@ -392,7 +392,10 @@ impl Repeater {
 
     /// The app's 12-byte "build date" field: the release number, or a local build's date.
     fn app_build_field(build_date: &str) -> String {
-        if release::RELEASE_COUNTER > 0 { format!("build #{}", release::RELEASE_COUNTER) } else { build_date.into() }
+        match release::RELEASE_COUNTER {
+            0 => build_date.into(),
+            n => format!("build #{n}"),
+        }
     }
 
     fn console(&mut self, line: String) {
