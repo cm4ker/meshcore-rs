@@ -1026,6 +1026,7 @@ fn pulling_companion(root: &LocalIdentity, base: &[u8]) -> (Mesh<Companion>, Slo
     c.app.prefs.ota_roots = vec![fp];
     c.app.ota.roots = vec![fp];
     c.app.ota.build.board = meshcore::release::board::T_ECHO;
+    c.app.ota.build.counter = 4; // whatever MCFW_COUNTER this test was built with
     c.app.ota.target = Some(Box::new(RamSlots { running: base.to_vec(), slot: slot.clone() }));
     (c, slot)
 }
