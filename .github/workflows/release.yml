@@ -36,17 +36,17 @@ jobs:
           ldproxy: false
       - run: cargo install espflash --locked
       - name: Heltec V4
-        working-directory: firmware/heltec-v4
+        working-directory: firmware/models/heltec-v4
         run: |
           cargo build --release
-          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../heltec-v4-repeater.bin
-          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/companion ../../heltec-v4-companion.bin
+          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../heltec-v4-repeater.bin
+          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/companion ../../../heltec-v4-companion.bin
       - name: Heltec V3
-        working-directory: firmware/heltec-v4
+        working-directory: firmware/models/heltec-v4
         run: |
           cargo build --release --features heltec-v3
-          espflash save-image --chip esp32s3 --flash-size 8mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../heltec-v3-repeater.bin
-          espflash save-image --chip esp32s3 --flash-size 8mb target/xtensa-esp32s3-none-elf/release/companion ../../heltec-v3-companion.bin
+          espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../heltec-v3-repeater.bin
+          espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/companion ../../../heltec-v3-companion.bin
       - uses: actions/upload-artifact@v4
         with:
           name: images-esp32s3
@@ -58,12 +58,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
-        working-directory: firmware/xiao-c6
+        working-directory: firmware/models/xiao-c6
       - run: cargo install espflash --locked
-      - working-directory: firmware/xiao-c6
+      - working-directory: firmware/models/xiao-c6
         run: |
           cargo build --release
-          espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/companion ../../xiao-c6-companion.bin
+          espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/companion ../../../xiao-c6-companion.bin
       - uses: actions/upload-artifact@v4
         with:
           name: images-esp32c6
@@ -77,11 +77,11 @@ jobs:
       # nrf-sdc and nrf-mpsl generate their bindings with libclang
       - run: sudo apt-get update && sudo apt-get install -y libclang-dev
       - run: rustup toolchain install
-        working-directory: firmware/t-echo
-      - working-directory: firmware/t-echo
+        working-directory: firmware/models/t-echo
+      - working-directory: firmware/models/t-echo
         run: |
           cargo build --release
-          python3 ../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../t-echo-companion.uf2 --bin ../../t-echo-companion.bin
+          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../t-echo-companion.uf2 --bin ../../../t-echo-companion.bin
       - uses: actions/upload-artifact@v4
         with:
           name: images-nrf52840

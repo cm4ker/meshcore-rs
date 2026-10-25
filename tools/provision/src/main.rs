@@ -8,7 +8,7 @@
 //! `prefs.txt` uses the firmware's `key=value` prefs format (see `meshcore::prefs`).
 //! Flash with: `espflash write-bin 0x400000 <image.bin>`.
 //!
-//! The record layout must match `firmware/heltec-v4/src/storage.rs`.
+//! The record layout must match `firmware/fw-core/src/storage.rs`.
 
 use std::process::exit;
 

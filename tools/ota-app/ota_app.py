@@ -14,7 +14,7 @@ same as the LoRa update of a repeater), so no LoRa airtime is used.
     python ota_app.py --port COM4 --info                     # what the device runs
 
 Delta updates work as over LoRa: the device reports the SHA-256 of the image it runs, and if that
-image is in the image store (--images, by default the board's firmware/<board>/images) only a
+image is in the image store (--images, by default the board's firmware/models/<board>/images) only a
 bsdiff patch is sent (tools/ota-delta). Every image sent is added to the store.
 
 Signed releases: give the release's `.mcfw` file (tools/ota-sign) instead of the `.bin`; its
@@ -220,7 +220,7 @@ async def main():
         version = dev[59:79].split(b"\0")[0].decode(errors="replace")
         log(f"device: {model}, firmware {version}")
         board = "xiao-c6" if "Xiao" in model else "t-echo" if "T-Echo" in model else "heltec-v4"
-        images = args.images or REPO / "firmware" / board / "images"
+        images = args.images or REPO / "firmware" / "models" / board / "images"
         # the ESP boards keep the previous firmware and fall back to it; the T-Echo has room for one
         after = ("it installs the image and restarts" if board == "t-echo"
                  else "on trial until it has run healthy for 2 minutes")

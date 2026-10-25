@@ -93,23 +93,27 @@ crates/meshcore/        no_std-ядро протокола, без железа,
   ota.rs                сессия обновления (куски в любом порядке, zlib, дельта, проверка SHA-256 и образа ESP)
   uplink.rs             JSON/топики MeshCoreTel, JWT, кодек MQTT 3.1.1, кадры WebSocket
   radio.rs prefs.rs     параметры LoRa и время в эфире; настройки узла
-firmware/ui/            интерфейс на устройстве: модель страниц по ролям, кнопка -> намерения, раскладки
-                        по классам экранов (embedded-graphics, шрифты U8g2), когда перерисовывать
+firmware/common/        ESP32 (esp-hal 1.2, ESP32-S3 и ESP32-C6): прерывание радио, разделы flash,
+                        слоты и откат, watchdog, Wi-Fi и SNTP, BLE (trouble-host 0.7), USB-JTAG
 firmware/fw-core/       общее для любых чипов (embassy, embedded-hal, embedded-storage)
   radio.rs              интерфейс LoRa-трансивера
   sx1262.rs lr2021.rs   драйверы SX1262 и LR2021
   storage.rs            хранилище во flash (+ кольцевой журнал контактов)
   companion.rs          основной цикл компаньона: платформа (`Platform`) и плата (`Board`) снаружи
   frames.rs links.rs    кадры приложения между транспортами и циклом; TCP-сервер
-firmware/common/        ESP32 (esp-hal 1.2, ESP32-S3 и ESP32-C6): прерывание радио, разделы flash,
-                        слоты и откат, watchdog, Wi-Fi и SNTP, BLE (trouble-host 0.7), USB-JTAG
-firmware/heltec-v4/     Heltec V4
-  board.rs display.rs   FEM GC1109/KCT8103L (V4.2/V4.3); OLED
-  wifi_ota.rs broker.rs точка доступа + HTTP-загрузка; MQTT по TCP или TLS 1.3 + WebSocket (embedded-tls)
-  bin/main.rs           прошивка репитера; bin/companion.rs — компаньона
-firmware/xiao-c6/       XIAO ESP32-C6 + LR2021 (Waveshare Core2021-HF): компаньон
-firmware/t-echo/        LilyGO T-Echo (nRF52840, embassy-nrf): компаньон; BLE на Nordic SDC
-                        (trouble-host 0.8), хранилище на QSPI-флешке, экран e-paper
+firmware/ui/            интерфейс на устройстве: модель страниц по ролям, кнопка -> намерения, раскладки
+                        по классам экранов (embedded-graphics, шрифты U8g2), когда перерисовывать
+firmware/vendor/        пропатченные копии trouble-host и embassy-nrf (что и зачем — vendor/README.md)
+firmware/models/        платы, у каждой свой крейт: прошивки, разметка flash, тулчейн
+  heltec-v4/            Heltec V4, и V3 с фичей `heltec-v3`
+    board.rs display.rs FEM GC1109/KCT8103L (V4.2/V4.3); OLED
+    wifi_ota.rs         точка доступа + HTTP-загрузка
+    broker.rs           MQTT по TCP или TLS 1.3 + WebSocket (embedded-tls)
+    bin/main.rs         прошивка репитера; bin/companion.rs — компаньона
+  xiao-c6/              XIAO ESP32-C6 + LR2021 (Waveshare Core2021-HF): компаньон
+  t-echo/               LilyGO T-Echo (nRF52840, embassy-nrf): компаньон; BLE на Nordic SDC
+                        (trouble-host 0.8), хранилище на QSPI-флешке, экран e-paper;
+    installer/          установщик обновления (переносит образ с QSPI во внутреннюю flash)
 tools/uf2/              ELF -> UF2 и прошивка платы с UF2-загрузчиком (T-Echo)
 tools/provision/        образ раздела настроек (перенос ключа и конфигурации с другой прошивки)
 tools/ota-lora/         обновление репитера по LoRa через компаньон (Python, библиотека meshcore)
@@ -125,7 +129,7 @@ tools/ui-preview/       все страницы интерфейса во все
 ```powershell
 espup install --targets esp32s3      # один раз (на Windows ARM64 — x64-версия под эмуляцией)
 . $HOME\export-esp.ps1               # в каждой новой консоли
-cd firmware\heltec-v4
+cd firmware\models\heltec-v4
 cargo build --release
 espflash flash --erase-parts otadata target\xtensa-esp32s3-none-elf\release\heltec-v4
 # или компаньон:
@@ -149,7 +153,7 @@ espflash flash --flash-size 8mb --partition-table partitions-v3.csv --erase-part
 XIAO ESP32-C6 + LR2021 (обычный stable-тулчейн, `rustup target add riscv32imac-unknown-none-elf`):
 
 ```powershell
-cd firmware\xiao-c6
+cd firmware\models\xiao-c6
 cargo build --release
 espflash flash --erase-parts otadata,meshcore,companion target\riscv32imac-unknown-none-elf\release\companion
 ```
@@ -161,12 +165,12 @@ LilyGO T-Echo (`rustup target add thumbv7em-none-eabihf`; для привязо�
 архитектуру ПК, `LIBCLANG_PATH` — его каталог `bin`):
 
 ```powershell
-cd firmware\t-echo
+cd firmware\models\t-echo
 $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
 cargo build --release
-python ..\..\tools\uf2\elf2uf2.py target\thumbv7em-none-eabihf\release\companion companion.uf2 --bin companion.bin
-python ..\..\tools\uf2\flash_uf2.py companion.uf2
-python ..\..\tools\ota-lora\meshcore_ota.py --register --images images companion.bin   # база для дельт
+python ..\..\..\tools\uf2\elf2uf2.py target\thumbv7em-none-eabihf\release\companion companion.uf2 --bin companion.bin
+python ..\..\..\tools\uf2\flash_uf2.py companion.uf2
+python ..\..\..\tools\ota-lora\meshcore_ota.py --register --images images companion.bin   # база для дельт
 ```
 
 Прошивка ставится UF2-файлом через загрузчик Adafruit, с которым плата продаётся (MBR, SoftDevice
@@ -197,7 +201,7 @@ python tools/ota-lora/meshcore_ota.py --port COM4 --node PKIO --password-file pw
 ```
 
 Репитер сообщает SHA-256 работающего образа. Если этот образ есть в хранилище
-`firmware/heltec-v4/images/`, по эфиру уходит только дельта: при SF7/BW62.5 типичное обновление —
+`firmware/models/heltec-v4/images/`, по эфиру уходит только дельта: при SF7/BW62.5 типичное обновление —
 ~20 КБ, около 3 минут, плюс ~25 секунд на сборку и проверку образа на самом репитере. Каждый
 отправленный образ сохраняется в хранилище; прошитый по USB нужно добавить вручную:
 `meshcore_ota.py --register firmware.bin`. Если базы нет, уходит весь образ (сжатый, ~700 КБ,
@@ -241,12 +245,12 @@ python tools/ota-app/ota_app.py --port COM4 --info                     # что 
 
 На T-Echo место только под одну прошивку: образ (`companion.bin` из `elf2uf2.py --bin`) принимается
 во внешнюю QSPI-флешку и проверяется там, а при перезагрузке установщик
-(`firmware/t-echo/installer`, хранится в 0xED000) переносит его во внутреннюю, ~10 секунд. Если в это
+(`firmware/models/t-echo/installer`, хранится в 0xED000) переносит его во внутреннюю, ~10 секунд. Если в это
 время пропадёт питание, при следующем включении он продолжит с того же места. Отката на прошлую
 прошивку нет. Образ кончается хвостом с длиной и SHA-256; он прошивается вместе с приложением, и по
 нему прошивка узнаёт свой образ — базу для дельты — как после USB, так и после обновления.
 
-Дельты — как по LoRa, хранилище `firmware/<плата>/images/` выбирается по модели устройства. Дельта
+Дельты — как по LoRa, хранилище `firmware/models/<плата>/images/` выбирается по модели устройства. Дельта
 по BLE — секунды; целый образ — минуты (на время загрузки прошивка просит у телефона/ПК короткий
 интервал соединения). На XIAO C6 (слот 1.75 МБ) образ и его сжатая копия в слот вместе не помещаются,
 поэтому целый образ уходит без сжатия. Образ для C6:
