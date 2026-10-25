@@ -23,6 +23,7 @@ pub mod prefs;
 pub mod queue;
 pub mod radio;
 pub mod region;
+pub mod release;
 pub mod repeater;
 pub mod rng;
 pub mod rtc;

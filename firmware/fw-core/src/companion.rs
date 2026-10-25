@@ -57,6 +57,8 @@ const GPS_TIME_SYNC_MS: u64 = 30 * 60 * 1000;
 pub trait Board {
     /// Shown to apps (device info, `board`).
     fn manufacturer(&self) -> &str;
+    /// The board a signed release must name (`meshcore::release::board`).
+    fn release_board(&self) -> u8;
     fn max_tx_power_dbm(&self) -> i8;
     /// Around each transmission: front-end module, TX LED.
     fn on_tx_start(&mut self) {}
@@ -386,6 +388,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     }
     // firmware updates over the app link
     mesh.app.ota.target = platform.ota_target();
+    mesh.app.ota.build.board = board.release_board();
     mesh.begin(now_ms());
     mesh.app.start(&mut mesh.ctx);
     info!("{} contacts", mesh.app.num_contacts());

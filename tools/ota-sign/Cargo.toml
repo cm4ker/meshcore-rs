@@ -1,0 +1,10 @@
+[package]
+name = "ota-sign"
+version = "0.1.0"
+edition = "2024"
+description = "Make, sign and check signed firmware releases (.mcfw files)"
+publish = false
+
+[dependencies]
+getrandom = "0.3"
+meshcore = { path = "../../crates/meshcore" }

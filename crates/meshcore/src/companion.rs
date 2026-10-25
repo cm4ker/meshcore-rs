@@ -19,6 +19,7 @@ use crate::crypto::{self, Secret};
 use crate::identity::Identity;
 use crate::mesh::{GroupChannel, MeshApp, MeshCtx};
 use crate::ota::OtaEndpoint;
+use crate::release;
 use crate::packet::*;
 use crate::radio::RadioParams;
 use crate::region::TransportKey;
@@ -565,12 +566,13 @@ fn c_str(b: &[u8]) -> &[u8] {
 
 impl Companion {
     pub fn new(prefs: CompanionPrefs, board: Board) -> Self {
+        let ota = OtaEndpoint::new(prefs.ota_roots.clone(), release::role::COMPANION);
         let mut c = Self {
             prefs,
             board,
             effects: Effects::default(),
             blobs: Box::new(MemBlobStore::default()),
-            ota: OtaEndpoint::default(),
+            ota,
             connected: true,
             recent: VecDeque::new(),
             messages_received: 0,

@@ -4,9 +4,11 @@
 //! their defaults, so fields can be added without a migration.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::Write;
 
 use crate::radio::RadioParams;
+use crate::release::{Fingerprint, join_fingerprints, parse_fingerprints};
 use crate::util::{atof, atoi, atoi_signed, truncate_str};
 
 pub const ADVERT_LOC_NONE: u8 = 0;
@@ -87,6 +89,9 @@ pub struct NodePrefs {
     pub bridge_channel: u8,
     /// Shared by the bridged repeaters.
     pub bridge_secret: String,
+    /// Fingerprints of the root keys whose signed releases this node installs (see
+    /// [`crate::release`]); none = unsigned updates are accepted.
+    pub ota_roots: Vec<Fingerprint>,
 }
 
 impl Default for NodePrefs {
@@ -141,6 +146,7 @@ impl Default for NodePrefs {
             bridge_source_rx: false,
             bridge_channel: 1,
             bridge_secret: "LVSITANOS".into(),
+            ota_roots: Vec::new(),
         }
     }
 }
@@ -255,6 +261,7 @@ impl NodePrefs {
         let _ = writeln!(s, "bridge_src={}", b(self.bridge_source_rx));
         let _ = writeln!(s, "bridge_ch={}", self.bridge_channel);
         let _ = writeln!(s, "bridge_secret={}", escape(&self.bridge_secret));
+        let _ = writeln!(s, "ota_root={}", join_fingerprints(&self.ota_roots, ","));
         s
     }
 
@@ -317,6 +324,7 @@ impl NodePrefs {
                 "bridge_src" => p.bridge_source_rx = flag(),
                 "bridge_ch" => p.bridge_channel = u8v(),
                 "bridge_secret" => p.bridge_secret = unescape(v),
+                "ota_root" => p.ota_roots = parse_fingerprints(v).unwrap_or_default(),
                 _ => {}
             }
         }
@@ -335,6 +343,7 @@ mod tests {
             NodePrefs { node_name: "Крыша \\ 1".into(), owner_info: "line1\nline2".into(), ..Default::default() };
         p.radio.freq_mhz = 868.731;
         p.tx_power_dbm = -3;
+        p.ota_roots = alloc::vec![[0xA5; 32], [7; 32]];
         let q = NodePrefs::deserialize(&p.serialize());
         assert_eq!(p, q);
     }

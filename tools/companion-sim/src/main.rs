@@ -5,6 +5,10 @@
 //! (admin password `password`) sits between them: companion 0 and companion 1 only hear each
 //! other through it unless `--direct` is given.
 //!
+//! Each companion has a firmware slot in memory, as a Heltec V4 companion, so firmware updates over
+//! the app link (tools/ota-app) can be tried, signed releases included; a committed update is only
+//! reported.
+//!
 //! Usage: `companion-sim [--port 5000] [--companions 2] [--direct]`
 
 use std::io::{ErrorKind, Read, Write};
@@ -103,6 +107,33 @@ impl Link {
     }
 }
 
+/// A 4 MB firmware slot in memory.
+struct RamSlot {
+    mem: Vec<u8>,
+}
+
+impl meshcore::ota::FirmwareTarget for RamSlot {
+    fn capacity(&self) -> u32 {
+        self.mem.len() as u32
+    }
+    fn erase(&mut self, offset: u32, len: u32) -> bool {
+        self.mem[offset as usize..(offset + len) as usize].fill(0xFF);
+        true
+    }
+    fn write(&mut self, offset: u32, data: &[u8]) -> bool {
+        self.mem[offset as usize..offset as usize + data.len()].copy_from_slice(data);
+        true
+    }
+    fn read(&mut self, offset: u32, buf: &mut [u8]) -> bool {
+        buf.copy_from_slice(&self.mem[offset as usize..offset as usize + buf.len()]);
+        true
+    }
+    fn activate(&mut self, size: u32) -> bool {
+        println!("firmware slot: verified {size}-byte image selected for the next boot");
+        true
+    }
+}
+
 fn epoch_now() -> u32 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as u32).unwrap_or(0)
 }
@@ -145,6 +176,8 @@ fn main() {
             let prefs = CompanionPrefs { node_name: name.clone(), ..Default::default() };
             let board = Board { manufacturer: "companion-sim".into(), batt_mv: 3950, mcu_temp_c: Some(31.5), ..Default::default() };
             let mut m = Mesh::new(ctx, Companion::new(prefs, board));
+            m.app.ota.target = Some(Box::new(RamSlot { mem: vec![0xFF; 4 << 20] }));
+            m.app.ota.build.board = meshcore::release::board::HELTEC_V4;
             m.begin(now_ms());
             m.app.start(&mut m.ctx);
             m.app.connected = false;

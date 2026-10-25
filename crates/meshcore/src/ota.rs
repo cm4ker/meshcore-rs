@@ -11,6 +11,11 @@
 //! Transfers can be zlib-compressed, and over LoRa also a delta: a zlib-compressed bsdiff patch
 //! (format of the `bsdiff` crate) against the running firmware, which turns a typical update
 //! from ~1 MB into tens of KB. The base is checked by SHA-256 before anything is transferred.
+//!
+//! Once the device pins a root key ([`OtaEndpoint::roots`]), a session only begins after the
+//! envelope of a signed release (see [`crate::release`]) for this board and role, and for the
+//! very image announced in BEGIN, has been accepted: whoever delivers it, only a release signed by
+//! a pinned root is installed.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -18,6 +23,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use sha2::{Digest, Sha256};
+
+use crate::release::{Build, Envelope, Fingerprint, Manifest, Refusal};
 
 pub const SECTOR_SIZE: u32 = 4096;
 /// Largest chunk a companion can send as a LoRa admin request: its serial frames carry at most
@@ -62,11 +69,19 @@ pub const REQ_TYPE_OTA_STATUS: u8 = 0xF2;
 /// verify + boot the new image on trial -> `[status]`
 pub const REQ_TYPE_OTA_COMMIT: u8 = 0xF3;
 pub const REQ_TYPE_OTA_ABORT: u8 = 0xF4;
-/// -> `[has_target][capacity u32][version...][0][image_len u32][image_sha256 first 8]`: the running
-/// image, the base a delta must be made against
+/// -> `[has_target][capacity u32][version...][0][image_len u32][image_sha256 first 8][board u8]
+/// [role u8][release counter u32][pinned roots u8]`: the running image, the base a delta must be
+/// made against (zeroes if unknown), and what a signed release for this device must name
 pub const REQ_TYPE_OTA_INFO: u8 = 0xF5;
+/// `[offset u16][total u16][len u8][piece of the envelope]` -> `[status][received u16]`: the
+/// envelope of a signed release (see [`crate::release`]), in order, before BEGIN. Once whole it is
+/// checked, and status 0 on the last piece means accepted. With no pinned root it is not needed
+/// and is ignored.
+pub const REQ_TYPE_OTA_MANIFEST: u8 = 0xF6;
 /// Most missing chunks listed in one STATUS reply.
 const OTA_MAX_MISSING: usize = 60;
+/// Largest envelope: the manifest with the longest version and the most signatures.
+const MAX_ENVELOPE: usize = 1024;
 
 /// The inactive firmware slot, provided by the platform.
 pub trait FirmwareTarget {
@@ -108,6 +123,26 @@ pub enum OtaError {
     BadImage = 8,
     /// The running firmware is not the base the delta was made against.
     BaseMismatch = 9,
+    /// A root is pinned and no signed release for this image was accepted.
+    Unsigned = 10,
+    /// The release is not signed by a pinned root.
+    Untrusted = 11,
+    /// The release is for another board or role.
+    WrongBoard = 12,
+    /// The release is older than the running build.
+    Downgrade = 13,
+    /// The envelope can't be read.
+    BadEnvelope = 14,
+}
+
+impl From<Refusal> for OtaError {
+    fn from(r: Refusal) -> Self {
+        match r {
+            Refusal::Untrusted => Self::Untrusted,
+            Refusal::WrongBoard => Self::WrongBoard,
+            Refusal::Downgrade => Self::Downgrade,
+        }
+    }
 }
 
 pub struct OtaSession {
@@ -500,11 +535,53 @@ pub struct OtaEndpoint {
     pub requests: u32,
     /// Length and hash of the running image, computed on the first INFO.
     running_image: Option<(u32, [u8; 32])>,
+    /// Fingerprints of the root keys whose signed releases this device installs; empty = unsigned
+    /// images are accepted (as before roots existed).
+    pub roots: Vec<Fingerprint>,
+    /// This build: a release must be for its board and role, and not older.
+    pub build: Build,
+    /// The envelope being received (MANIFEST requests).
+    envelope: Vec<u8>,
+    /// The signed release accepted for the next session.
+    release: Option<Manifest>,
 }
 
 impl OtaEndpoint {
+    /// An endpoint of a device in `role` (see [`crate::release::role`]) that installs only
+    /// releases signed by one of `roots`, or anything while `roots` is empty. The firmware still
+    /// sets the target and [`Build::board`].
+    pub fn new(roots: Vec<Fingerprint>, role: u8) -> Self {
+        Self { roots, build: Build { role, ..Build::default() }, ..Self::default() }
+    }
+
     pub fn is_request(kind: u8) -> bool {
-        (REQ_TYPE_OTA_BEGIN..=REQ_TYPE_OTA_INFO).contains(&kind)
+        (REQ_TYPE_OTA_BEGIN..=REQ_TYPE_OTA_MANIFEST).contains(&kind)
+    }
+
+    /// Check the received envelope; on success its release may begin a session.
+    fn accept_envelope(&mut self) -> Result<(), OtaError> {
+        let (envelope, len) = Envelope::parse(&self.envelope).ok_or(OtaError::BadEnvelope)?;
+        if len != self.envelope.len() {
+            return Err(OtaError::BadEnvelope);
+        }
+        if self.roots.is_empty() {
+            return Ok(());
+        }
+        envelope.check(&self.roots, &self.build)?;
+        self.release = Some(envelope.manifest);
+        Ok(())
+    }
+
+    /// With a pinned root, a session may only begin for the image of the accepted release.
+    fn check_release(&self, sha256: Option<[u8; 32]>, image_len: u32) -> Result<(), OtaError> {
+        if self.roots.is_empty() {
+            return Ok(());
+        }
+        match &self.release {
+            None => Err(OtaError::Unsigned),
+            Some(m) if Some(m.image_sha256) == sha256 && m.image_len == image_len => Ok(()),
+            Some(_) => Err(OtaError::HashMismatch),
+        }
     }
 
     /// An update has begun and is neither committed nor aborted.
@@ -533,11 +610,40 @@ impl OtaEndpoint {
                     let image = self.target.as_deref_mut().and_then(|t| running_image(t));
                     self.running_image = image;
                 }
-                if let Some((len, sha)) = self.running_image {
-                    out.push(0);
-                    out.extend_from_slice(&len.to_le_bytes());
-                    out.extend_from_slice(&sha[..8]);
+                out.push(0);
+                let (len, sha) = self.running_image.unwrap_or((0, [0; 32]));
+                out.extend_from_slice(&len.to_le_bytes());
+                out.extend_from_slice(&sha[..8]);
+                out.extend_from_slice(&[self.build.board, self.build.role]);
+                out.extend_from_slice(&self.build.counter.to_le_bytes());
+                out.push(self.roots.len() as u8);
+                (Some(out), OtaOutcome::None)
+            }
+            REQ_TYPE_OTA_MANIFEST => {
+                let offset = u16_at(1).unwrap_or(0) as usize;
+                let total = u16_at(3).unwrap_or(0) as usize;
+                let len = payload.get(5).copied().unwrap_or(0) as usize;
+                if offset == 0 {
+                    self.envelope.clear();
+                    self.release = None;
                 }
+                // pieces come in order, a repeated one is ignored; LoRa pads payloads: cut to `len`
+                if let Some(piece) = payload.get(6..6 + len)
+                    && offset == self.envelope.len()
+                    && offset + len <= total
+                    && total <= MAX_ENVELOPE
+                {
+                    self.envelope.extend_from_slice(piece);
+                }
+                let res = if total == 0 || total > MAX_ENVELOPE {
+                    Err(OtaError::BadParams)
+                } else if self.envelope.len() < total {
+                    Ok(())
+                } else {
+                    self.accept_envelope()
+                };
+                let mut out = vec![status(res)];
+                out.extend_from_slice(&(self.envelope.len() as u16).to_le_bytes());
                 (Some(out), OtaOutcome::None)
             }
             REQ_TYPE_OTA_BEGIN => {
@@ -549,7 +655,8 @@ impl OtaEndpoint {
                 let base_len = read_u32(44);
                 let base_sha: Option<[u8; 32]> = payload.get(48..80).and_then(|b| b.try_into().ok());
                 self.session = None;
-                let res = match (self.target.as_deref_mut(), sha) {
+                let image_len = if flags & 1 != 0 { raw_size } else { size };
+                let res = self.check_release(sha, image_len).and_then(|()| match (self.target.as_deref_mut(), sha) {
                     (None, _) => Err(OtaError::NoTarget),
                     (_, None) => Err(OtaError::BadParams),
                     (Some(t), Some(sha)) if flags & 3 == 3 => match base_sha {
@@ -558,7 +665,7 @@ impl OtaEndpoint {
                     },
                     (Some(t), Some(sha)) if flags & 1 != 0 => OtaSession::begin_compressed(t, size, raw_size, Some(sha), chunk),
                     (Some(t), Some(sha)) => OtaSession::begin(t, size, Some(sha), chunk),
-                }
+                })
                 .map(|mut s| {
                     s.crc_chunks = flags & 4 != 0;
                     self.session = Some(s);
@@ -614,6 +721,7 @@ impl OtaEndpoint {
                 let outcome = match (res, self.session.as_ref(), self.target.as_deref_mut()) {
                     (Ok(()), ..) => {
                         self.session = None;
+                        self.release = None;
                         OtaOutcome::Committed
                     }
                     (Err(e), Some(s), Some(t)) => {
@@ -629,6 +737,8 @@ impl OtaEndpoint {
             }
             REQ_TYPE_OTA_ABORT => {
                 self.session = None;
+                self.envelope.clear();
+                self.release = None;
                 (Some(vec![0]), OtaOutcome::None)
             }
             _ => (None, OtaOutcome::None),
@@ -1211,5 +1321,83 @@ mod tests {
         send_all(&mut s, &mut t, &bad);
         assert!(s.commit(&mut t).is_err());
         assert!(!t.activated);
+    }
+
+    /// With a pinned root only the image of an accepted signed release can begin a session.
+    #[test]
+    fn pinned_root_requires_a_signed_release() {
+        use crate::LocalIdentity;
+        use crate::release::{self, Envelope, Manifest};
+
+        let img = image(3000);
+        let sha: [u8; 32] = Sha256::digest(&img).into();
+        let root = LocalIdentity::from_seed(&[9; 32]);
+        let stranger = LocalIdentity::from_seed(&[8; 32]);
+        let build = release::Build { board: release::board::HELTEC_V4, role: release::role::REPEATER, counter: 5 };
+        let mut ep = OtaEndpoint {
+            target: Some(Box::new(RamTarget::new(8192, 0, Vec::new()))),
+            roots: vec![release::fingerprint(root.pub_key())],
+            build,
+            ..Default::default()
+        };
+        let envelope = |key: &LocalIdentity, m: Manifest| {
+            let mut e = Envelope { manifest: m, signatures: Vec::new() };
+            e.add_signature(*key.pub_key(), key.sign(&Envelope::signed_message(&e.manifest)));
+            e.to_bytes()
+        };
+        // in 100-byte pieces with cipher padding, as over LoRa; the last reply's status
+        let send = |ep: &mut OtaEndpoint, env: &[u8]| {
+            let mut status = 0xFF;
+            for (k, piece) in env.chunks(100).enumerate() {
+                let mut req = vec![REQ_TYPE_OTA_MANIFEST];
+                req.extend_from_slice(&((k * 100) as u16).to_le_bytes());
+                req.extend_from_slice(&(env.len() as u16).to_le_bytes());
+                req.push(piece.len() as u8);
+                req.extend_from_slice(piece);
+                req.extend_from_slice(&[0; 7]);
+                status = ep.handle(&req, "v").0.unwrap()[0];
+            }
+            status
+        };
+        let mut begin = vec![REQ_TYPE_OTA_BEGIN];
+        begin.extend_from_slice(&3000u32.to_le_bytes());
+        begin.extend_from_slice(&sha);
+        begin.extend_from_slice(&500u16.to_le_bytes());
+        let begin_status = |ep: &mut OtaEndpoint| ep.handle(&begin, "v").0.unwrap()[0];
+        let manifest = Manifest {
+            board: build.board,
+            role: build.role,
+            flags: 0,
+            counter: 6,
+            image_len: 3000,
+            image_sha256: sha,
+            issued: 0,
+            version: "test".into(),
+        };
+
+        assert_eq!(begin_status(&mut ep), OtaError::Unsigned as u8);
+        assert_eq!(send(&mut ep, &envelope(&stranger, manifest.clone())), OtaError::Untrusted as u8);
+        assert_eq!(begin_status(&mut ep), OtaError::Unsigned as u8);
+        let old = Manifest { counter: 4, ..manifest.clone() };
+        assert_eq!(send(&mut ep, &envelope(&root, old)), OtaError::Downgrade as u8);
+        let v3 = Manifest { board: release::board::HELTEC_V3, ..manifest.clone() };
+        assert_eq!(send(&mut ep, &envelope(&root, v3)), OtaError::WrongBoard as u8);
+        let other_image = Manifest { image_sha256: [1; 32], ..manifest.clone() };
+        assert_eq!(send(&mut ep, &envelope(&root, other_image)), 0);
+        assert_eq!(begin_status(&mut ep), OtaError::HashMismatch as u8, "signed, but for another image");
+
+        assert_eq!(send(&mut ep, &envelope(&root, manifest)), 0);
+        assert_eq!(begin_status(&mut ep), 0);
+        for (i, c) in img.chunks(500).enumerate() {
+            let mut d = vec![REQ_TYPE_OTA_DATA];
+            d.extend_from_slice(&(i as u16).to_le_bytes());
+            d.extend_from_slice(c);
+            ep.handle(&d, "v");
+        }
+        assert_eq!(ep.handle(&[REQ_TYPE_OTA_COMMIT], "v").0.unwrap()[0], 0);
+        assert_eq!(begin_status(&mut ep), OtaError::Unsigned as u8, "a release is good for one session");
+
+        let info = ep.handle(&[REQ_TYPE_OTA_INFO], "v").0.unwrap();
+        assert_eq!(&info[info.len() - 7..], &[1, 1, 5, 0, 0, 0, 1], "board, role, counter, roots");
     }
 }

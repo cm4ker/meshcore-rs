@@ -620,6 +620,7 @@ async fn main(spawner: Spawner) -> ! {
     if let (Some(s), Some(sl)) = (&store, slots) {
         mesh.app.ota.target = Some(Box::new(FlashTarget::new(s.clone(), sl)));
     }
+    mesh.app.ota.build.board = heltec_v4::RELEASE_BOARD;
     info!("boot: mesh");
     mesh.begin(now_ms());
     mesh.app.start(&mut mesh.ctx);
@@ -1214,6 +1215,8 @@ async fn main(spawner: Spawner) -> ! {
                     code,
                     store: s.clone(),
                     slots: sl,
+                    roots: mesh.app.ota.roots.clone(),
+                    build: mesh.app.ota.build,
                 };
                 match wifi_ota::start_http(&spawner, stack, params) {
                     Ok(()) => println!("Wi-Fi OTA: upload page on the LAN address"),
@@ -1231,6 +1234,8 @@ async fn main(spawner: Spawner) -> ! {
                         code,
                         store: s.clone(),
                         slots: sl,
+                        roots: mesh.app.ota.roots.clone(),
+                        build: mesh.app.ota.build,
                     };
                     let seed = (Rng::new().random() as u64) << 32 | Rng::new().random() as u64;
                     match wifi_ota::start(&spawner, w, seed, params) {

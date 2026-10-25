@@ -19,6 +19,7 @@ use crate::crypto::{self, Secret};
 use crate::identity::{Identity, LocalIdentity};
 use crate::mesh::{MeshApp, MeshCtx};
 use crate::ota::{OtaEndpoint, OtaOutcome};
+use crate::release;
 use crate::packet::*;
 use crate::prefs::*;
 use crate::radio::RadioParams;
@@ -292,6 +293,7 @@ impl Repeater {
     pub fn new(prefs: NodePrefs, board: BoardInfo) -> Self {
         let pending_radio = prefs.radio;
         let bridge = Bridge::new(&prefs.bridge_secret);
+        let ota = OtaEndpoint::new(prefs.ota_roots.clone(), release::role::REPEATER);
         Self {
             prefs,
             board,
@@ -314,7 +316,7 @@ impl Repeater {
             region_load: None,
             logging: false,
             reply_path: None,
-            ota: OtaEndpoint::default(),
+            ota,
             uplink: Vec::new(),
             uplink_enabled: false,
             room: None,
@@ -1715,6 +1717,9 @@ impl Repeater {
         if let Some(r) = self.handle_get_network(cfg) {
             return r;
         }
+        if cfg.starts_with("ota.root") {
+            return self.ota_root_status();
+        }
         if cfg.starts_with("dyncr") {
             format!("> {}", onoff(p.dynamic_cr))
         } else if cfg.starts_with("room") && self.room.is_none() {
@@ -1784,9 +1789,49 @@ impl Repeater {
         }
     }
 
+    /// `get ota.root`: the pinned root keys and what a release must name to be installed here.
+    fn ota_root_status(&self) -> String {
+        let b = &self.ota.build;
+        let build = format!("{}/{} #{}", release::board_name(b.board), release::role_name(b.role), b.counter);
+        if self.prefs.ota_roots.is_empty() {
+            format!("> none, unsigned updates accepted ({build})")
+        } else {
+            format!("> {} ({build})", release::join_fingerprints(&self.prefs.ota_roots, ", "))
+        }
+    }
+
+    /// `set ota.root <fingerprint>[,<fingerprint>...]` pins the root keys whose signed releases
+    /// are installed; `set ota.root off` unpins them. The first pin may come from an admin, as an
+    /// admin can install any firmware until then; once a root is pinned only the serial console
+    /// changes it, so a leaked admin password can't swap the root along with the firmware.
+    fn set_ota_root(&mut self, serial: bool, value: &str) -> String {
+        let value = value.trim();
+        let roots = if value == "off" { Some(Vec::new()) } else { release::parse_fingerprints(value) };
+        let Some(roots) = roots else {
+            return format!("Error: up to {} fingerprints of 64 hex digits, or off", release::MAX_ROOTS);
+        };
+        if roots == self.prefs.ota_roots {
+            return "OK".into();
+        }
+        if !self.prefs.ota_roots.is_empty() && !serial {
+            return "Error: a pinned root can only be changed on the serial console".into();
+        }
+        self.ota.roots = roots.clone();
+        self.prefs.ota_roots = roots;
+        self.save_prefs();
+        if self.prefs.ota_roots.is_empty() {
+            "OK - unsigned updates accepted".into()
+        } else {
+            format!("OK - only releases signed by {} are installed", release::join_fingerprints(&self.prefs.ota_roots, ", "))
+        }
+    }
+
     fn handle_set(&mut self, ctx: &mut MeshCtx, serial: bool, cfg: &str) -> String {
         if let Some(r) = self.handle_set_network(cfg) {
             return r;
+        }
+        if let Some(v) = cfg.strip_prefix("ota.root ") {
+            return self.set_ota_root(serial, v);
         }
         if let Some(v) = cfg.strip_prefix("room ")
             && self.room.is_none()

@@ -5,12 +5,16 @@
 //! slot and reboots into it on trial. Also accepts
 //! `curl --data-binary @firmware.bin "http://192.168.4.1/update?code=123456"`.
 //!
+//! Once a root key is pinned (`set ota.root`), only the `.mcfw` file of a release that root signed
+//! is taken: the envelope at its start is checked before the image is written.
+//!
 //! Uploads must carry the one-time code `start ota` printed: on a LAN anyone could reach the page.
 //! A few wrong codes lock uploads until the next `start ota`. The server shuts down (by
 //! rebooting) if nothing is uploaded within [`IDLE_TIMEOUT`].
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -23,6 +27,7 @@ use esp_hal::peripherals::WIFI;
 use esp_radio::wifi::ap::AccessPointConfig;
 use esp_radio::wifi::{AuthenticationMethodConfig, Config, ControllerConfig, Interface, WifiController};
 use meshcore::ota::{FirmwareTarget, OtaSession};
+use meshcore::release::{self, Build, Envelope, Fingerprint, Peek};
 use static_cell::StaticCell;
 
 use crate::ota::{FlashTarget, SharedStore, Slots};
@@ -71,6 +76,10 @@ pub struct Params {
     pub code: u32,
     pub store: SharedStore<'static>,
     pub slots: Slots,
+    /// Pinned root keys (`set ota.root`): only releases they signed are installed.
+    pub roots: Vec<Fingerprint>,
+    /// What a release must be for.
+    pub build: Build,
 }
 
 /// Serve the upload page on an already running network (the Wi-Fi station's LAN address).
@@ -150,8 +159,9 @@ fn page(params: &Params) -> String {
         "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>\
 <title>{name} OTA</title><body style='font-family:sans-serif;max-width:32em;margin:2em auto'>\
 <h2>MeshCore repeater: {name}</h2><p>Running <b>{ver}</b> (slot {slot}). Upload a new <code>.bin</code> \
-(from <code>espflash save-image</code>) with the code <code>start ota</code> printed:</p>\
-<p><input id=c inputmode=numeric placeholder=code size=8> <input type=file id=f accept=.bin> \
+(from <code>espflash save-image</code>) or the <code>.mcfw</code> of a signed release{signed} with the code \
+<code>start ota</code> printed:</p>\
+<p><input id=c inputmode=numeric placeholder=code size=8> <input type=file id=f accept=.bin,.mcfw> \
 <button onclick=up()>Upload</button></p>\
 <p><progress id=p max=100 value=0 style='width:100%'></progress></p><pre id=s></pre>\
 <script>function up(){{var f=document.getElementById('f').files[0];if(!f)return;\
@@ -161,7 +171,8 @@ x.onload=function(){{s.textContent=x.responseText}};x.onerror=function(){{s.text
 s.textContent='uploading...';x.send(f)}}</script>",
         name = params.node_name,
         ver = params.version,
-        slot = params.slots.booted
+        slot = params.slots.booted,
+        signed = if params.roots.is_empty() { "" } else { " (a root key is pinned: only signed releases)" }
     )
 }
 
@@ -183,11 +194,62 @@ fn content_length(head: &str) -> Option<usize> {
     })
 }
 
-/// Stream `len` body bytes (some already in `pending`) into the inactive slot and commit.
+/// Read body bytes into `buf` until it holds `want`.
+async fn read_more(socket: &mut TcpSocket<'_>, buf: &mut Vec<u8>, want: usize) -> Result<(), String> {
+    let mut tmp = [0u8; 256];
+    while buf.len() < want {
+        let k = (want - buf.len()).min(tmp.len());
+        let n = with_timeout(Duration::from_secs(20), socket.read(&mut tmp[..k]))
+            .await
+            .map_err(|_| String::from("upload stalled"))?
+            .map_err(|_| String::from("connection error"))?;
+        if n == 0 {
+            return Err(String::from("connection closed"));
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    Ok(())
+}
+
+/// A `.mcfw` upload starts with the envelope of its release: read it into `body` (what has
+/// arrived of the `len`-byte body so far) and check it. Returns the envelope's length and the
+/// image hash it names; an unsigned image passes only while no root key is pinned.
+async fn check_envelope(
+    socket: &mut TcpSocket<'_>, body: &mut Vec<u8>, len: usize, params: &Params,
+) -> Result<(usize, Option<[u8; 32]>), String> {
+    loop {
+        let need = match release::peek(body) {
+            Peek::NotEnvelope if params.roots.is_empty() => return Ok((0, None)),
+            Peek::NotEnvelope => return Err(String::from("unsigned image: a root key is pinned, upload the release's .mcfw")),
+            Peek::NeedMore(n) => n,
+            Peek::Envelope { len: n } if body.len() < n => n,
+            Peek::Envelope { len: env_len } => {
+                let (envelope, _) =
+                    Envelope::parse(&body[..env_len]).ok_or_else(|| String::from("unreadable release envelope"))?;
+                if !params.roots.is_empty() {
+                    envelope.check(&params.roots, &params.build).map_err(|r| format!("release refused: {r:?}"))?;
+                }
+                let m = &envelope.manifest;
+                if m.image_len as usize != len - env_len {
+                    return Err(String::from("the image is not the size its release names"));
+                }
+                log::info!("Wi-Fi OTA: release {} #{}", m.version, m.counter);
+                return Ok((env_len, Some(m.image_sha256)));
+            }
+        };
+        if need > len {
+            return Err(String::from("upload too short"));
+        }
+        read_more(socket, body, need).await?;
+    }
+}
+
+/// Stream `len` body bytes (some already in `pending`) into the inactive slot and commit;
+/// `sha256` is the hash its release names, if it came with one.
 async fn receive_image(
-    socket: &mut TcpSocket<'_>, target: &mut FlashTarget<'static>, len: usize, pending: &[u8],
+    socket: &mut TcpSocket<'_>, target: &mut FlashTarget<'static>, len: usize, pending: &[u8], sha256: Option<[u8; 32]>,
 ) -> Result<(), String> {
-    let mut session = OtaSession::begin(target, len as u32, None, CHUNK as u16).map_err(|e| format!("rejected: {e:?}"))?;
+    let mut session = OtaSession::begin(target, len as u32, sha256, CHUNK as u16).map_err(|e| format!("rejected: {e:?}"))?;
     let mut buf = alloc::vec![0u8; CHUNK];
     let mut fill = pending.len().min(len.min(CHUNK));
     buf[..fill].copy_from_slice(&pending[..fill]);
@@ -274,7 +336,13 @@ async fn http_task(stack: Stack<'static>, params: Params) {
                 Some(len) if len as u32 > target.capacity() => {
                     respond(&mut socket, "413 Payload Too Large", "text/plain", "image larger than the slot\n").await
                 }
-                Some(len) => match receive_image(&mut socket, &mut target, len, &head[split..n]).await {
+                Some(len) => match async {
+                    let mut body = head[split..n].to_vec();
+                    let (env_len, sha256) = check_envelope(&mut socket, &mut body, len, &params).await?;
+                    receive_image(&mut socket, &mut target, len - env_len, &body[env_len..], sha256).await
+                }
+                .await
+                {
                     Ok(()) => {
                         respond(&mut socket, "200 OK", "text/plain", "OK: image verified, rebooting into it\n").await;
                         Timer::after_secs(2).await;

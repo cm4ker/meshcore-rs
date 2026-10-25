@@ -14,6 +14,10 @@ add images flashed over USB with --register.
 
 Progress lines go to stdout; the transfer can be re-run and resumes missing chunks only if the
 repeater was not rebooted in between (sessions live in RAM).
+
+Signed releases: give the release's `.mcfw` file (tools/ota-sign) instead of the `.bin`. Its
+envelope goes first, and a repeater that pins a root key (`set ota.root`) only takes an image
+that key signed.
 """
 
 import argparse
@@ -32,13 +36,22 @@ import zlib
 
 from meshcore import EventType, MeshCore
 
-REQ_OTA_BEGIN, REQ_OTA_DATA, REQ_OTA_STATUS, REQ_OTA_COMMIT, REQ_OTA_ABORT, REQ_OTA_INFO = range(0xF0, 0xF6)
+REQ_OTA_BEGIN, REQ_OTA_DATA, REQ_OTA_STATUS, REQ_OTA_COMMIT, REQ_OTA_ABORT, REQ_OTA_INFO, REQ_OTA_MANIFEST = \
+    range(0xF0, 0xF7)
 CMD_SEND_BINARY_REQ = 0x32
 # companion serial frames are at most 176 bytes: cmd + pubkey (33) + req type + index (3) + data
 CHUNK = 140
+# a piece of a release envelope: cmd + pubkey (33) + req type + offset, total, length (5) + data
+ENVELOPE_PIECE = 136
 ERRORS = {1: "no OTA slot", 2: "image too large", 3: "bad parameters", 4: "no session", 5: "flash error",
           6: "incomplete", 7: "SHA-256 mismatch", 8: "not an image for this chip",
-          9: "the repeater does not run the delta's base image"}
+          9: "the repeater does not run the delta's base image",
+          10: "unsigned: the device pins a root key, give it the release's .mcfw",
+          11: "the release is not signed by the root key the device pins",
+          12: "the release is for another board or role", 13: "the release is older than the one the device runs",
+          14: "unreadable release envelope"}
+BOARDS = {1: "heltec-v4", 2: "heltec-v3", 3: "xiao-c6", 4: "t-echo"}
+ROLES = {1: "repeater", 2: "companion"}
 REPO = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_IMAGES = REPO / "firmware" / "heltec-v4" / "images"
 DEFAULT_DELTA_TOOL = REPO / "target" / "release" / ("ota-delta.exe" if os.name == "nt" else "ota-delta")
@@ -56,6 +69,40 @@ def airtime_ms(length, sf, bw_khz, cr):
     bits = max(8 * length + 16 - 4 * sf + 20, 0)
     n = preamble + 4.25 + math.ceil(bits / div) * cr + 8
     return (1 << sf) / bw_khz * n
+
+
+def load_firmware(path):
+    """The image, and the envelope if the file is a signed release (.mcfw, crates/meshcore/src/release.rs)."""
+    data = open(path, "rb").read()
+    if data[:4] != b"MCFW":
+        return data, None
+    vlen = data[52]
+    env_len = 53 + vlen + 1 + 96 * data[53 + vlen]
+    return data[env_len:], data[:env_len]
+
+
+def describe_envelope(env):
+    board, role, _, counter, image_len = struct.unpack_from("<BBBII", env, 5)
+    version = env[53:53 + env[52]].decode(errors="replace")
+    signers = env[53 + env[52]]
+    return (f"release {BOARDS.get(board, board)}/{ROLES.get(role, role)} {version} #{counter}, "
+            f"{image_len} bytes, {signers} signature(s)")
+
+
+def describe_device(running):
+    """What INFO says after the running image: `[board][role][release counter u32][pinned roots]`."""
+    if len(running) < 19:
+        return None, "the device predates signed releases"
+    board, role, counter, roots = struct.unpack_from("<BBIB", running, 12)
+    pins = f"pins {roots} root key(s): signed releases only" if roots else "pins no root key: unsigned images accepted"
+    return roots, f"device build {BOARDS.get(board, '?')}/{ROLES.get(role, '?')} #{counter}, {pins}"
+
+
+def envelope_pieces(env, size):
+    """MANIFEST request payloads: `[offset u16][total u16][len u8][piece]`."""
+    for off in range(0, len(env), size):
+        piece = env[off:off + size]
+        yield struct.pack("<HHB", off, len(env), len(piece)) + piece
 
 
 def store_image(images, image):
@@ -132,7 +179,7 @@ async def main():
     args = ap.parse_args()
 
     if args.register:
-        log(f"stored as {store_image(args.images, open(args.image, 'rb').read())}")
+        log(f"stored as {store_image(args.images, load_firmware(args.image)[0])}")
         return
     if not args.port or not args.node:
         sys.exit("--port and --node are required")
@@ -140,8 +187,10 @@ async def main():
     password = args.password
     if args.password_file:
         password = open(args.password_file, encoding="utf-8").read().strip()
-    image = open(args.image, "rb").read()
+    image, envelope = load_firmware(args.image)
     sha = hashlib.sha256(image).digest()  # always of the inflated image
+    if envelope:
+        log(describe_envelope(envelope))
     payload = image if args.no_compress else zlib.compress(image, 9)
 
     mc = await MeshCore.create_serial(args.port, 115200, only_error=True)
@@ -169,6 +218,16 @@ async def main():
         # `version [0 image_len sha8]`; decrypted payloads are zero-padded
         version, _, running = body[5:].partition(b"\0")
         log(f"repeater runs {version.decode(errors='replace')}, slot capacity {capacity // 1024} KiB")
+        roots, about = describe_device(running)
+        log(about)
+        if roots and not envelope:
+            sys.exit("the repeater only takes signed releases: give the release's .mcfw")
+        if envelope:
+            for piece in envelope_pieces(envelope, ENVELOPE_PIECE):
+                body = await ota.request(REQ_OTA_MANIFEST, piece)
+            if body[0]:
+                sys.exit(f"release refused: {ERRORS.get(body[0], body[0])}")
+            log("release accepted" if roots else "release envelope sent (not needed: no root key pinned)")
 
         begin = struct.pack("<I", len(payload)) + sha + struct.pack("<H", CHUNK)
         how = "raw" if args.no_compress else f"zlib {len(image)} -> {len(payload)} bytes"

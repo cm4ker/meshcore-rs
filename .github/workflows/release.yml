@@ -1,0 +1,132 @@
+# A firmware release: every board's image, packed into signed .mcfw files (tools/ota-sign) and
+# published as a GitHub release. Devices that pin the root key's fingerprint (`set ota.root` on a
+# repeater, the `ota_root` custom variable on a companion) install only images this workflow
+# signed; whoever delivers them, nw.ommesh.ru included, can't make them take anything else.
+#
+# The root key is the secret MCFW_ROOT_KEY (the 32-byte seed in hex, from `ota-sign keygen`).
+# Its fingerprint is published with every release (root.txt).
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version shown to people, e.g. 0.5.0"
+        required: true
+      counter:
+        description: "Release number; devices never install a lower one than they run (default: this workflow's run number)"
+        required: false
+
+env:
+  MCFW_COUNTER: ${{ inputs.counter || github.run_number }}
+  MCFW_VERSION: ${{ inputs.version }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  esp32s3:
+    name: Heltec V4 and V3 (ESP32-S3)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: esp-rs/xtensa-toolchain@v1.6
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: false
+      - run: cargo install espflash --locked
+      - name: Heltec V4
+        working-directory: firmware/heltec-v4
+        run: |
+          cargo build --release
+          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../heltec-v4-repeater.bin
+          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/companion ../../heltec-v4-companion.bin
+      - name: Heltec V3
+        working-directory: firmware/heltec-v4
+        run: |
+          cargo build --release --features heltec-v3
+          espflash save-image --chip esp32s3 --flash-size 8mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../heltec-v3-repeater.bin
+          espflash save-image --chip esp32s3 --flash-size 8mb target/xtensa-esp32s3-none-elf/release/companion ../../heltec-v3-companion.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images-esp32s3
+          path: "*.bin"
+
+  esp32c6:
+    name: XIAO ESP32-C6
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+        working-directory: firmware/xiao-c6
+      - run: cargo install espflash --locked
+      - working-directory: firmware/xiao-c6
+        run: |
+          cargo build --release
+          espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/companion ../../xiao-c6-companion.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images-esp32c6
+          path: "*.bin"
+
+  nrf52840:
+    name: LilyGO T-Echo (nRF52840)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # nrf-sdc and nrf-mpsl generate their bindings with libclang
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - run: rustup toolchain install
+        working-directory: firmware/t-echo
+      - working-directory: firmware/t-echo
+        run: |
+          cargo build --release
+          python3 ../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../t-echo-companion.uf2 --bin ../../t-echo-companion.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images-nrf52840
+          path: |
+            *.bin
+            *.uf2
+
+  release:
+    name: Sign and publish
+    needs: [esp32s3, esp32c6, nrf52840]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: images
+          merge-multiple: true
+      - run: cargo build --release -p ota-sign
+      - name: Pack and sign
+        env:
+          MCFW_ROOT_KEY: ${{ secrets.MCFW_ROOT_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$MCFW_ROOT_KEY" || { echo "the MCFW_ROOT_KEY secret is not set"; exit 1; }
+          sign=target/release/ota-sign
+          mkdir -p out
+          for image in images/*.bin; do
+            name=$(basename "$image" .bin)           # <board>-<role>, e.g. heltec-v4-repeater
+            board=${name%-*}
+            role=${name##*-}
+            mcfw=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.mcfw
+            $sign bundle "$image" --board "$board" --role "$role" --counter "$MCFW_COUNTER" --version "$MCFW_VERSION" -o "$mcfw"
+            $sign sign "$mcfw" --key-env MCFW_ROOT_KEY
+          done
+          cp images/*.uf2 out/
+          $sign fingerprint --key-env MCFW_ROOT_KEY > out/root.txt
+          root=$(awk '/fingerprint/{print $2}' out/root.txt)
+          for mcfw in out/*.mcfw; do $sign verify "$mcfw" --root "$root"; done
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          root=$(awk '/fingerprint/{print $2}' out/root.txt)
+          gh release create "v$MCFW_VERSION-r$MCFW_COUNTER" out/* \
+            --title "$MCFW_VERSION (release #$MCFW_COUNTER)" \
+            --notes "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set ota.root $root\` (repeater) or the \`ota_root\` custom variable (companion), then update with the board's .mcfw file. The .uf2 is the T-Echo image for the USB bootloader."

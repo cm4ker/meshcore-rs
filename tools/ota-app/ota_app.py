@@ -16,6 +16,10 @@ same as the LoRa update of a repeater), so no LoRa airtime is used.
 Delta updates work as over LoRa: the device reports the SHA-256 of the image it runs, and if that
 image is in the image store (--images, by default the board's firmware/<board>/images) only a
 bsdiff patch is sent (tools/ota-delta). Every image sent is added to the store.
+
+Signed releases: give the release's `.mcfw` file (tools/ota-sign) instead of the `.bin`; its
+envelope goes first. A device that pins a root key (`ota_root` custom variable on a companion,
+`set ota.root` on a repeater) only takes an image that key signed.
 """
 
 import argparse
@@ -30,9 +34,14 @@ import time
 import zlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "ota-lora"))
-from meshcore_ota import DEFAULT_DELTA_TOOL, ERRORS, REPO, find_base, log, make_delta, store_image  # noqa: E402
+from meshcore_ota import (  # noqa: E402
+    DEFAULT_DELTA_TOOL, ERRORS, REPO, describe_device, describe_envelope, envelope_pieces, find_base, load_firmware, log,
+    make_delta, store_image,
+)
 
-OTA_BEGIN, OTA_DATA, OTA_STATUS, OTA_COMMIT, OTA_ABORT, OTA_INFO = range(0xF0, 0xF6)
+OTA_BEGIN, OTA_DATA, OTA_STATUS, OTA_COMMIT, OTA_ABORT, OTA_INFO, OTA_MANIFEST = range(0xF0, 0xF7)
+# a piece of a release envelope: command + offset, total, length (5) + data, within 176 bytes
+ENVELOPE_PIECE = 160
 CMD_DEVICE_QUERY, RESP_DEVICE_INFO = 22, 13
 # up to 176-byte frames: command + chunk index + data (a multiple of 4, for flash writes) + the
 # CRC-32 of index and data, so a frame the link mangled is dropped and sent again
@@ -226,11 +235,23 @@ async def main():
             run_len, run_sha8 = struct.unpack_from("<I", running)[0], running[4:12]
             log(f"running image: {run_len} bytes, sha256 {run_sha8.hex()}..."
                 + ("" if find_base(images, run_len, run_sha8) else f" (not in {images})"))
+        roots, about = describe_device(running)
+        log(about)
         if args.info:
             return
 
-        image = open(args.image, "rb").read()
+        image, envelope = load_firmware(args.image)
         sha = hashlib.sha256(image).digest()
+        if envelope:
+            log(describe_envelope(envelope))
+        elif roots:
+            sys.exit("the device only takes signed releases: give the release's .mcfw")
+        if envelope:
+            for piece in envelope_pieces(envelope, ENVELOPE_PIECE):
+                reply = await link.request(bytes([OTA_MANIFEST]) + piece)
+            if reply[0]:
+                sys.exit(f"release refused: {ERRORS.get(reply[0], reply[0])}")
+            log("release accepted" if roots else "release envelope sent (not needed: no root key pinned)")
 
         payload = zlib.compress(image, 9)
         how = f"zlib {len(image)} -> {len(payload)} bytes"

@@ -57,6 +57,10 @@ impl Board for XiaoC6<'_> {
         "Xiao C6"
     }
 
+    fn release_board(&self) -> u8 {
+        meshcore::release::board::XIAO_C6
+    }
+
     fn max_tx_power_dbm(&self) -> i8 {
         22
     }

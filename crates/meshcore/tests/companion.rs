@@ -800,11 +800,50 @@ fn repeater_powersaving_cli() {
     assert_eq!(cli(&mut r, "powersaving"), "off");
 }
 
+/// `ota.root`: an admin may pin the first root (an admin could install any firmware until then);
+/// changing or removing a pinned root takes the serial console.
+#[test]
+fn repeater_ota_root_cli() {
+    let mut r = repeater(4);
+    let serial = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
+    let remote = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 1_800_000_000, c);
+    let (a, b) = ("9a".repeat(32), "0b".repeat(32));
+    assert!(serial(&mut r, "get ota.root").starts_with("> none, unsigned updates accepted (?/repeater #"));
+    assert_eq!(remote(&mut r, "set ota.root 12ab"), "Error: up to 4 fingerprints of 64 hex digits, or off");
+    assert_eq!(remote(&mut r, &format!("set ota.root {a}")), format!("OK - only releases signed by {a} are installed"));
+    assert_eq!(r.app.ota.roots, vec![[0x9a; 32]]);
+    assert!(r.app.prefs.serialize().contains(&format!("ota_root={a}
+")));
+    let refused = "Error: a pinned root can only be changed on the serial console";
+    assert_eq!(remote(&mut r, &format!("set ota.root {b}")), refused);
+    assert_eq!(remote(&mut r, "set ota.root off"), refused);
+    assert_eq!(remote(&mut r, &format!("set ota.root {a}")), "OK", "unchanged");
+    assert_eq!(serial(&mut r, &format!("set ota.root {a},{b}")), format!("OK - only releases signed by {a}, {b} are installed"));
+    assert!(serial(&mut r, "get ota.root").starts_with(&format!("> {a}, {b} (")));
+    assert_eq!(serial(&mut r, "set ota.root off"), "OK - unsigned updates accepted");
+    assert!(r.app.ota.roots.is_empty());
+}
+
+/// The companion's pinned root keys are a custom variable, so an app can set them.
+#[test]
+fn companion_ota_root_custom_var() {
+    let mut a = companion(1, "Alice");
+    let fp = "9a".repeat(32);
+    let set = |m: &mut Mesh<Companion>, v: &str| cmd(m, &[&b")ota_root:"[..], v.as_bytes()].concat())[0][0];
+    assert_eq!(set(&mut a, "12"), RESP_CODE_ERR);
+    assert_eq!(set(&mut a, &fp), RESP_CODE_OK);
+    assert!(a.app.take_effects().save_prefs);
+    assert_eq!(a.app.ota.roots, vec![[0x9a; 32]]);
+    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], format!("ota_root:{fp}").as_bytes());
+    assert_eq!(set(&mut a, "off"), RESP_CODE_OK);
+    assert!(a.app.ota.roots.is_empty());
+}
+
 #[test]
 fn gps_setting_position_and_telemetry() {
-    // no GPS: no settings to offer
+    // no GPS: no GPS settings to offer
     let mut a = companion(1, "Alice");
-    assert_eq!(cmd(&mut a, &[CMD_GET_CUSTOM_VARS]), vec![vec![RESP_CODE_CUSTOM_VARS]]);
+    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:off");
     assert_eq!(cmd(&mut a, b"\x29gps:1")[0][0], RESP_CODE_ERR);
 
     let mut air = Air::new();
@@ -813,11 +852,11 @@ fn gps_setting_position_and_telemetry() {
     b.app.board.has_gps = true;
     b.app.prefs.telemetry_mode_base = TELEM_MODE_ALLOW_ALL;
     b.app.prefs.telemetry_mode_loc = TELEM_MODE_ALLOW_ALL;
-    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:0");
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:0,ota_root:off");
     assert_eq!(cmd(&mut b, b"\x29gps:1")[0][0], RESP_CODE_OK);
     let fx = b.app.take_effects();
     assert!(fx.gps && fx.save_prefs && b.app.prefs.gps_enabled);
-    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:1");
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:1,ota_root:off");
     assert_eq!(cmd(&mut b, b"\x29gps_interval:30")[0][0], RESP_CODE_OK);
     assert_eq!(b.app.prefs.gps_interval, 30);
     assert_eq!(cmd(&mut b, b"\x29alt:1")[0][0], RESP_CODE_ERR);

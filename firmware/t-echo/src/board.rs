@@ -35,6 +35,10 @@ impl Board for TEcho {
         "LilyGo T-Echo"
     }
 
+    fn release_board(&self) -> u8 {
+        meshcore::release::board::T_ECHO
+    }
+
     fn max_tx_power_dbm(&self) -> i8 {
         22
     }

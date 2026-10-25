@@ -2,10 +2,12 @@
 //! persistent text form (`key=value` lines, see [`crate::prefs`]).
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::Write;
 
 use crate::prefs::{ADVERT_LOC_NONE, NAME_MAX, escape, unescape};
 use crate::radio::RadioParams;
+use crate::release::{Fingerprint, join_fingerprints, parse_fingerprints};
 use crate::util::{atof, atoi, atoi_signed, from_hex, to_hex, truncate_str};
 
 pub const TELEM_MODE_DENY: u8 = 0;
@@ -68,6 +70,9 @@ pub struct CompanionPrefs {
     /// Round-trip manual paths (`set rtpath on`): a path the app sets for a contact also goes to
     /// the contact, reversed, so its replies come back direct. Off by default.
     pub round_trip_path: bool,
+    /// Fingerprints of the root keys whose signed releases this device installs (see
+    /// [`crate::release`]); none = unsigned updates are accepted.
+    pub ota_roots: Vec<Fingerprint>,
 }
 
 impl Default for CompanionPrefs {
@@ -108,6 +113,7 @@ impl Default for CompanionPrefs {
             gps_enabled: false,
             gps_interval: 0,
             round_trip_path: false,
+            ota_roots: Vec::new(),
         }
     }
 }
@@ -175,6 +181,7 @@ impl CompanionPrefs {
         let _ = writeln!(s, "gps={}", b(self.gps_enabled));
         let _ = writeln!(s, "gps_int={}", self.gps_interval);
         let _ = writeln!(s, "rt_path={}", b(self.round_trip_path));
+        let _ = writeln!(s, "ota_root={}", join_fingerprints(&self.ota_roots, ","));
         s
     }
 
@@ -229,6 +236,7 @@ impl CompanionPrefs {
                 "gps" => p.gps_enabled = flag(),
                 "gps_int" => p.gps_interval = atoi(v),
                 "rt_path" => p.round_trip_path = flag(),
+                "ota_root" => p.ota_roots = parse_fingerprints(v).unwrap_or_default(),
                 _ => {}
             }
         }

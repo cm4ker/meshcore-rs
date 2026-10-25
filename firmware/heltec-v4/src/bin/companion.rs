@@ -70,6 +70,10 @@ impl Board for HeltecV4<'_> {
         self.fem.name()
     }
 
+    fn release_board(&self) -> u8 {
+        heltec_v4::RELEASE_BOARD
+    }
+
     fn max_tx_power_dbm(&self) -> i8 {
         MAX_TX_POWER_DBM
     }

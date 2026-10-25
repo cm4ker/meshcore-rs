@@ -618,31 +618,52 @@ impl Companion {
                 }
             }
             CMD_GET_CUSTOM_VARS => {
-                // the sensors' settings: only the GPS's
-                let mut f = alloc::vec![RESP_CODE_CUSTOM_VARS];
+                // the GPS's settings, and the root keys whose signed releases are installed
+                // (fingerprints separated by spaces: the list itself is comma-separated)
+                let mut vars = alloc::vec::Vec::new();
                 if self.board.has_gps {
-                    f.extend_from_slice(if self.prefs.gps_enabled { b"gps:1" } else { b"gps:0" });
+                    vars.push(String::from(if self.prefs.gps_enabled { "gps:1" } else { "gps:0" }));
                 }
+                vars.push(match self.prefs.ota_roots.is_empty() {
+                    true => String::from("ota_root:off"),
+                    false => alloc::format!("ota_root:{}", release::join_fingerprints(&self.prefs.ota_roots, " ")),
+                });
+                let mut f = alloc::vec![RESP_CODE_CUSTOM_VARS];
+                f.extend_from_slice(vars.join(",").as_bytes());
                 self.write_frame(&f);
             }
             CMD_SET_CUSTOM_VAR if len >= 4 => {
                 let var = &frame[1..];
-                match var.iter().position(|&c| c == b':') {
-                    Some(sep) if self.board.has_gps => match (&var[..sep], &var[sep + 1..]) {
-                        (b"gps", value) => {
-                            self.prefs.gps_enabled = value.first() == Some(&b'1');
-                            self.effects.gps = true;
-                            self.effects.save_prefs = true;
-                            self.write_ok();
+                let (name, value) = match var.iter().position(|&c| c == b':') {
+                    Some(sep) => (&var[..sep], &var[sep + 1..]),
+                    None => (var, &[][..]),
+                };
+                match name {
+                    b"gps" if self.board.has_gps => {
+                        self.prefs.gps_enabled = value.first() == Some(&b'1');
+                        self.effects.gps = true;
+                        self.effects.save_prefs = true;
+                        self.write_ok();
+                    }
+                    b"gps_interval" if self.board.has_gps => {
+                        let secs = core::str::from_utf8(value).map_or(0, crate::util::atoi);
+                        self.prefs.gps_interval = secs.min(86_400);
+                        self.effects.save_prefs = true;
+                        self.write_ok();
+                    }
+                    b"ota_root" => {
+                        let text = core::str::from_utf8(value).unwrap_or("?").trim();
+                        let roots = if text == "off" { Some(alloc::vec::Vec::new()) } else { release::parse_fingerprints(text) };
+                        match roots {
+                            Some(roots) => {
+                                self.ota.roots = roots.clone();
+                                self.prefs.ota_roots = roots;
+                                self.effects.save_prefs = true;
+                                self.write_ok();
+                            }
+                            None => self.write_err(ERR_CODE_ILLEGAL_ARG),
                         }
-                        (b"gps_interval", value) => {
-                            let secs = core::str::from_utf8(value).map_or(0, crate::util::atoi);
-                            self.prefs.gps_interval = secs.min(86_400);
-                            self.effects.save_prefs = true;
-                            self.write_ok();
-                        }
-                        _ => self.write_err(ERR_CODE_ILLEGAL_ARG),
-                    },
+                    }
                     _ => self.write_err(ERR_CODE_ILLEGAL_ARG),
                 }
             }
