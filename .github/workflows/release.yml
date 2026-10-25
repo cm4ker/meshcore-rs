@@ -7,6 +7,13 @@
 #
 # The root key is the secret MCFW_ROOT_KEY (the 32-byte seed in hex, from `ota-sign keygen`).
 # Its fingerprint is published with every release (root.txt).
+#
+# A release carries only the boards and roles whose code changed, so the others don't update for
+# nothing. Each image is built once more with no release number and a fixed date (MCFW_COUNTER=0,
+# SOURCE_DATE_EPOCH=0); the hash of that build (<board>-<role>.content) changes only with the
+# code. A release lists these hashes for every board and role (content.txt) and leaves out those
+# that match the release it follows: for a stable release the last stable one, for a dev release
+# the last of either channel (devices that follow dev take both).
 
 name: build and release
 
@@ -52,23 +59,35 @@ jobs:
           default: true
           buildtargets: esp32s3
           ldproxy: false
-      - run: cargo install espflash --locked
+      # one espflash for every run: another version may lay the same program out differently
+      - run: cargo install espflash --version 4.6.0 --locked
       - name: Heltec V4
         working-directory: firmware/models/heltec-v4
         run: |
+          mkdir -p ../../../content
           cargo build --release
           espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../heltec-v4-repeater.bin
           espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/companion ../../../heltec-v4-companion.bin
+          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --release
+          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../content/heltec-v4-repeater.bin
+          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/companion ../../../content/heltec-v4-companion.bin
       - name: Heltec V3
         working-directory: firmware/models/heltec-v4
         run: |
           cargo build --release --features heltec-v3
           espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../heltec-v3-repeater.bin
           espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/companion ../../../heltec-v3-companion.bin
+          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --release --features heltec-v3
+          espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../content/heltec-v3-repeater.bin
+          espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/companion ../../../content/heltec-v3-companion.bin
+      - name: Content hashes
+        run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
       - uses: actions/upload-artifact@v4
         with:
           name: images-esp32s3
-          path: "*.bin"
+          path: |
+            *.bin
+            *.content
 
   esp32c6:
     name: XIAO ESP32-C6
@@ -77,15 +96,22 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
         working-directory: firmware/models/xiao-c6
-      - run: cargo install espflash --locked
+      - run: cargo install espflash --version 4.6.0 --locked
       - working-directory: firmware/models/xiao-c6
         run: |
+          mkdir -p ../../../content
           cargo build --release
           espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/companion ../../../xiao-c6-companion.bin
+          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --release
+          espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/companion ../../../content/xiao-c6-companion.bin
+      - name: Content hashes
+        run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
       - uses: actions/upload-artifact@v4
         with:
           name: images-esp32c6
-          path: "*.bin"
+          path: |
+            *.bin
+            *.content
 
   nrf52840:
     name: LilyGO T-Echo (nRF52840)
@@ -98,14 +124,20 @@ jobs:
         working-directory: firmware/models/t-echo
       - working-directory: firmware/models/t-echo
         run: |
+          mkdir -p ../../../content
           cargo build --release
           python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../t-echo-companion.uf2 --bin ../../../t-echo-companion.bin
+          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --release
+          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../content/t-echo-companion.uf2 --bin ../../../content/t-echo-companion.bin
+      - name: Content hashes
+        run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
       - uses: actions/upload-artifact@v4
         with:
           name: images-nrf52840
           path: |
             *.bin
             *.uf2
+            *.content
 
   release:
     name: Sign and publish
@@ -124,26 +156,50 @@ jobs:
       - name: Pack and sign
         env:
           MCFW_ROOT_KEY: ${{ secrets.MCFW_ROOT_KEY }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test -n "$MCFW_ROOT_KEY" || { echo "the MCFW_ROOT_KEY secret is not set"; exit 1; }
           sign=target/release/ota-sign
           mkdir -p out
+          # the release this one follows, and the code its boards and roles run
+          if [ "$MCFW_CHANNEL" = stable ]; then
+            prev=$(gh release list --limit 1 --exclude-drafts --exclude-pre-releases --json tagName -q '.[].tagName')
+          else
+            prev=$(gh release list --limit 1 --exclude-drafts --json tagName -q '.[].tagName')
+          fi
+          echo "$prev" > prev-tag.txt
+          touch prev-content.txt unchanged.txt
+          if [ -n "$prev" ]; then
+            gh release download "$prev" -p content.txt -O prev-content.txt --clobber || echo "$prev has no content.txt: every board and role goes out"
+          fi
           for image in images/*.bin; do
             name=$(basename "$image" .bin)           # <board>-<role>, e.g. heltec-v4-repeater
             board=${name%-*}
             role=${name##*-}
+            hash=$(cat "images/$name.content")
+            echo "$hash  $name" >> out/content.txt
+            if grep -qxF "$hash  $name" prev-content.txt; then
+              echo "$name: the same code as in $prev, left out"
+              echo "$name" >> unchanged.txt
+              continue
+            fi
             mcfw=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.mcfw
             $sign bundle "$image" --board "$board" --role "$role" --counter "$MCFW_COUNTER" --version "$MCFW_VERSION" --channel "$MCFW_CHANNEL" -o "$mcfw"
             $sign sign "$mcfw" --key-env MCFW_ROOT_KEY
+            if [ -f "images/$name.uf2" ]; then cp "images/$name.uf2" out/; fi
           done
-          cp images/*.uf2 out/
+          if ! ls out/*.mcfw > /dev/null 2>&1; then
+            echo "no board's code changed since $prev: nothing to release"
+            exit 1
+          fi
           $sign fingerprint --key-env MCFW_ROOT_KEY > out/root.txt
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
           for mcfw in out/*.mcfw; do $sign verify "$mcfw" --root "$root"; done
-      # A delta from each of the last three releases, for the devices that run one of them and
-      # fetch updates over LoRa from a neighbouring repeater (meshcore::fwshare); each is checked
-      # to rebuild the signed image from its base.
+      # A delta from each of the last three releases of the board and role, for the devices that
+      # run one of them and fetch updates over LoRa from a neighbouring repeater
+      # (meshcore::fwshare); each is checked to rebuild the signed image from its base. Releases
+      # that left the board and role out don't count: its devices still run an older one.
       - name: Deltas from the last releases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -151,17 +207,24 @@ jobs:
           set -euo pipefail
           sign=target/release/ota-sign
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
-          for tag in $(gh release list --limit 3 --exclude-drafts --json tagName -q '.[].tagName'); do
-            mkdir -p "prev/$tag"
-            gh release download "$tag" -p '*.mcfw' -D "prev/$tag" || continue
-            for mcfw in out/*.mcfw; do
-              name=$(basename "$mcfw" "-$MCFW_VERSION-r$MCFW_COUNTER.mcfw")   # <board>-<role>
-              for base in prev/"$tag"/"$name"-*.mcfw; do
-                [ -f "$base" ] || continue
-                delta=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.from-${tag##*-}.mcfd
-                $sign delta "$base" "$mcfw" -o "$delta"
-                $sign verify "$delta" --root "$root" --base "$base"
-              done
+          tags=$(gh release list --limit 30 --exclude-drafts --json tagName -q '.[].tagName')
+          declare -A assets
+          for tag in $tags; do
+            assets[$tag]=$(gh release view "$tag" --json assets -q '.assets[].name')
+          done
+          for mcfw in out/*.mcfw; do
+            name=$(basename "$mcfw" "-$MCFW_VERSION-r$MCFW_COUNTER.mcfw")   # <board>-<role>
+            n=0
+            for tag in $tags; do
+              base=$(printf '%s\n' "${assets[$tag]}" | grep -E "^$name-.*\.mcfw$" | head -1 || true)
+              [ -n "$base" ] || continue
+              mkdir -p "prev/$tag"
+              gh release download "$tag" -p "$base" -D "prev/$tag" --clobber
+              delta=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.from-${tag##*-}.mcfd
+              $sign delta "prev/$tag/$base" "$mcfw" -o "$delta"
+              $sign verify "$delta" --root "$root" --base "prev/$tag/$base"
+              n=$((n + 1))
+              [ "$n" -lt 3 ] || break
             done
           done
       - name: Publish
@@ -170,6 +233,13 @@ jobs:
         run: |
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
           prerelease=$([ "$MCFW_CHANNEL" = dev ] && echo --prerelease || true)
+          {
+            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set ota.root $root\` (repeater) or the \`ota_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo image for the USB bootloader. The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them."
+            if [ -s unchanged.txt ]; then
+              echo
+              echo "Left out, the same code as in $(cat prev-tag.txt): $(paste -sd, unchanged.txt | sed 's/,/, /g'). Those devices keep what they run; content.txt lists the code of every board and role."
+            fi
+          } > notes.md
           gh release create "v$MCFW_VERSION-r$MCFW_COUNTER" out/* $prerelease \
             --title "$MCFW_VERSION (release #$MCFW_COUNTER, $MCFW_CHANNEL)" \
-            --notes "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set ota.root $root\` (repeater) or the \`ota_root\` custom variable (companion), then update with the board's .mcfw file. The .uf2 is the T-Echo image for the USB bootloader. The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them."
+            --notes-file notes.md

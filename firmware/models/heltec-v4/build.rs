@@ -1,5 +1,9 @@
 fn main() {
     emit_build_time();
+    // the build stamp follows every change of the firmware, as without any rerun-if-changed
+    for f in ["src", "certs", "Cargo.toml", "build.rs"] {
+        println!("cargo:rerun-if-changed={f}");
+    }
     linker_be_nice();
     check_xtensa_linker_available();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
@@ -133,11 +137,17 @@ fn linker_be_nice() {
 }
 
 /// Build timestamp: seeds the wall clock (adverts must carry increasing timestamps) and `ver`.
+/// `SOURCE_DATE_EPOCH` fixes it, as for reproducible builds: CI builds each image once more with a
+/// fixed date and no release number, and the hash of that one changes only with the code.
 fn emit_build_time() {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    let secs = match std::env::var("SOURCE_DATE_EPOCH") {
+        Ok(s) => s.parse().expect("SOURCE_DATE_EPOCH: seconds since 1970"),
+        Err(_) => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
     let days = (secs / 86400) as i64;
     // civil-from-days (Howard Hinnant)
     let z = days + 719_468;
