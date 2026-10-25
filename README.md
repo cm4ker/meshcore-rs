@@ -3,10 +3,22 @@
 Прошивка [MeshCore](https://github.com/meshcore-dev/MeshCore), переписанная на Rust: репитер (с room server)
 и компаньон (companion radio).
 Совместима по эфиру с оригинальной C++ прошивкой (v1.18): тот же формат пакетов, та же
-криптография, та же логика маршрутизации. Железо: **Heltec WiFi LoRa 32 V4** (ESP32-S3 + SX1262 + FEM; V3 без FEM — тоже) и
-**Seeed XIAO ESP32-C6 + Waveshare Core2021-HF** (Semtech LR2021, компаньон).
+криптография, та же логика маршрутизации.
 Проверена в живой сети: компаньон MeshCore v1.18 логинится, получает статус, телеметрию, ACL,
 выполняет CLI и TRACE через эту прошивку.
+
+## Поддерживаемые устройства
+
+| Устройство | Крейт | Чип и радио | Экран | Репитер | Компаньон | Связь с приложением | Обновление по воздуху |
+|---|---|---|---|---|---|---|---|
+| Heltec WiFi LoRa 32 V4 (V4.2, V4.3) | `firmware/models/heltec-v4` | ESP32-S3, SX1262 + FEM (GC1109 / KCT8103L), flash 16 МБ | OLED 128×64 | да: room server, Wi-Fi и MQTT, бридж ESP-NOW, энергосбережение | да | BLE и Wi-Fi (TCP 5000) одновременно, USB | LoRa, Wi-Fi, BLE; два слота, автооткат |
+| Heltec WiFi LoRa 32 V3 | тот же, фича `heltec-v3` | ESP32-S3, SX1262 без FEM, flash 8 МБ | OLED 128×64 | да, как V4 | собирается, на плате не проверен | как V4 | как V4, слоты по 3,4 МБ |
+| Seeed XIAO ESP32-C6 + Waveshare Core2021-HF | `firmware/models/xiao-c6` | ESP32-C6, Semtech LR2021, flash 4 МБ | нет | нет | да | BLE или Wi-Fi (не вместе; TCP пока ненадёжен), USB | через подключение приложения; два слота по 1,75 МБ, целый образ без сжатия |
+| LilyGO T-Echo | `firmware/models/t-echo` | nRF52840, SX1262, QSPI-флешка | e-paper 200×200 | нет | да, с GPS L76K | BLE, USB | через подключение приложения; один слот, без отката; первая прошивка — UF2 |
+
+В выпуске на GitHub у каждой сборки свой файл `<плата>-<роль>-<версия>-r<номер>.mcfw`
+(`heltec-v4-repeater`, `heltec-v3-companion`, `xiao-c6-companion`, `t-echo-companion`…), у T-Echo
+ещё `.uf2` для загрузчика по USB.
 
 ## Возможности
 
