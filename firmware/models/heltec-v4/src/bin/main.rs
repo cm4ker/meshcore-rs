@@ -178,6 +178,11 @@ const CLOCK_SAVE_INTERVAL_MS: u64 = 30 * 60 * 1000;
 
 /// CLI lines from the USB console to the main loop.
 static CLI_LINES: Channel<CriticalSectionRawMutex, Vec<u8>, 4> = Channel::new();
+/// When (low 32 bits of the uptime in ms, 0 = never) console input woke the V3 from light sleep.
+/// The UART loses the bytes of the wake, so the console drops the rest of that line.
+static CONSOLE_WOKE_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Input closer than this to the wake, or to the input before it, is the rest of the cut line.
+const CUT_LINE_GAP_MS: u32 = 500;
 
 /// `client_version` in observer status messages.
 const CLIENT_VERSION: &str = concat!("rs-", env!("BUILD_DATE"));
@@ -363,10 +368,25 @@ async fn console_task(mut rx: ConsoleRx) {
     // (esp-println waits for the host with interrupts masked) long enough to lose a packet.
     let mut shown = 0;
     let show = |part: &[u8]| part.iter().for_each(|&c| print!("{}", c as char));
+    // set while the line that woke the V3 is still coming in: when its last byte came
+    let mut cut_line: Option<u32> = None;
     loop {
         let n = console_read(&mut rx, &mut buf).await;
         let typed = n <= 2;
+        let woke = CONSOLE_WOKE_MS.swap(0, core::sync::atomic::Ordering::Relaxed);
+        if woke != 0 {
+            (cut_line, shown) = (Some(woke), 0);
+            line.clear();
+        }
         for &c in &buf[..n] {
+            if let Some(last) = cut_line {
+                let t = now_ms() as u32;
+                if t.wrapping_sub(last) < CUT_LINE_GAP_MS {
+                    cut_line = (!matches!(c, b'\r' | b'\n')).then_some(t);
+                    continue;
+                }
+                cut_line = None;
+            }
             match c {
                 b'\r' | b'\n' => {
                     if !line.is_empty() {
@@ -820,7 +840,12 @@ async fn main(spawner: Spawner) -> ! {
     let console_rx = meshcore_fw::usb::start(p.USB_DEVICE);
     // esp-println keeps writing to UART0's TX on its own
     #[cfg(feature = "heltec-v3")]
-    let console_rx = esp_hal::uart::UartRx::new(p.UART0, esp_hal::uart::Config::default()).unwrap().with_rx(p.GPIO44);
+    let mut console_rx = esp_hal::uart::UartRx::new(p.UART0, esp_hal::uart::Config::default()).unwrap().with_rx(p.GPIO44);
+    // `powersaving on`: typing in the console wakes the chip (no sleep can tell a CP2102 is there)
+    #[cfg(feature = "heltec-v3")]
+    if let Err(e) = console_rx.enable_wakeup(&esp_hal::uart::WakeupConfig::default()) {
+        warn!("console: no wake from sleep: {e}");
+    }
     spawner.spawn(console_task(console_rx).unwrap());
     println!("Ready. Type CLI commands (e.g. 'get name', 'set name X', 'get radio', 'neighbors').");
 
@@ -916,6 +941,24 @@ async fn main(spawner: Spawner) -> ! {
                 button.listen(Event::LowLevel);
                 sleeper.light_sleep(esp_hal::time::Duration::from_millis(span));
                 button.unlisten();
+                // a press woke the chip: take it here as the screen code below takes one, or the
+                // next pass goes straight back to sleep and the press never lights the screen
+                if button.is_low() {
+                    let t = now_ms();
+                    ui.button_down(t);
+                    let _ = ui_button.poll(true, t);
+                    awake_until = t + AWAKE_AFTER_ACTIVITY_MS;
+                    next_view = 0;
+                }
+                // console input woke it: the first bytes are lost, so ask for the line again
+                #[cfg(feature = "heltec-v3")]
+                if esp_hal::rtc_cntl::wakeup_cause().contains(esp_hal::rtc_cntl::WakeupSource::Uart0) {
+                    let t = now_ms();
+                    CONSOLE_WOKE_MS.store((t as u32).max(1), core::sync::atomic::Ordering::Relaxed);
+                    awake_until = t + AWAKE_AFTER_ACTIVITY_MS;
+                    println!();
+                    println!("  -> woke from sleep, that line was lost: send it again");
+                }
                 continue;
             }
         }
