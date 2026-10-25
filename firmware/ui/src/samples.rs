@@ -8,8 +8,17 @@ use alloc::vec::Vec;
 
 use crate::model::*;
 
-pub const COMPANION_PAGES: &[Page] =
-    &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Bluetooth, Page::Gps, Page::Advert, Page::PowerOff];
+pub const COMPANION_PAGES: &[Page] = &[
+    Page::Home,
+    Page::Messages,
+    Page::Nearby,
+    Page::Radio,
+    Page::Bluetooth,
+    Page::Gps,
+    Page::Pull,
+    Page::Advert,
+    Page::PowerOff,
+];
 pub const REPEATER_PAGES: &[Page] = &[
     Page::Home,
     Page::Contact,
@@ -75,6 +84,10 @@ pub fn passport() -> Passport {
     }
 }
 
+fn pull(state: &str, detail: &str, progress: Option<(u32, u32)>, hold: Option<&'static str>) -> PullInfo {
+    PullInfo { state: state.into(), detail: detail.into(), progress, hold, version: "0.5.1 #4 (25 Oct 2026)".into() }
+}
+
 fn neighbour(id: &str, snr: i16, age_min: u32) -> Neighbour {
     Neighbour { id: id.into(), snr, age_min }
 }
@@ -92,6 +105,7 @@ pub fn companion_view(page: Page) -> View {
         Page::Gps => Body::Gps(GpsInfo { on: true, receiving: true, fix: Some((54_987_650, 73_368_800)), satellites: 7, in_view: 12 }),
         Page::Advert => Body::Advert { flood: false },
         Page::PowerOff => Body::PowerOff,
+        Page::Pull => Body::Pull(pull("0.5.2 готова", "Установка займёт около 10 секунд", None, Some("установить"))),
         _ => Body::Home { name: "PKIO🎃".into(), unread: 3 },
     };
     frame(COMPANION_PAGES, page, companion_bar(), body)
@@ -291,6 +305,16 @@ pub fn all() -> Vec<(String, View)> {
     add(
         "update-connected",
         with(r(Page::Update), Body::Update(UpdateInfo { window: Some(window(true)), trial: false, version: "v1.18.0-rs".into() })),
+    );
+    let c = |p: Page| companion_view(p);
+    add("pull-loading", with(c(Page::Pull), Body::Pull(pull("Загружается 0.5.2", "", Some((40_000, 48_017)), None))));
+    add(
+        "pull-failed",
+        with(c(Page::Pull), Body::Pull(pull("Не удалось", "Подписано не тем корневым ключом, что закреплён здесь", None, Some("проверить")))),
+    );
+    add(
+        "pull-off",
+        with(c(Page::Pull), Body::Pull(pull("Выключено", "Включите fw_pull в настройках приложения", None, None))),
     );
     add(
         "update-trial",

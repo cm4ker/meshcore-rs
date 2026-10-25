@@ -92,6 +92,11 @@ pub struct NodePrefs {
     /// Fingerprints of the root keys whose signed releases this node installs (see
     /// [`crate::release`]); none = unsigned updates are accepted.
     pub ota_roots: Vec<Fingerprint>,
+    /// Hand firmware updates on to the companions next to this node (`set fw.serve on`, see
+    /// [`crate::fwshare`]), fetched from `fw_server` over the Wi-Fi link. Off by default.
+    pub fw_serve: bool,
+    /// Host of the release server (plain HTTP: what it serves is signed).
+    pub fw_server: String,
 }
 
 impl Default for NodePrefs {
@@ -147,6 +152,8 @@ impl Default for NodePrefs {
             bridge_channel: 1,
             bridge_secret: "LVSITANOS".into(),
             ota_roots: Vec::new(),
+            fw_serve: false,
+            fw_server: "nw.ommesh.ru".into(),
         }
     }
 }
@@ -262,6 +269,8 @@ impl NodePrefs {
         let _ = writeln!(s, "bridge_ch={}", self.bridge_channel);
         let _ = writeln!(s, "bridge_secret={}", escape(&self.bridge_secret));
         let _ = writeln!(s, "ota_root={}", join_fingerprints(&self.ota_roots, ","));
+        let _ = writeln!(s, "fw_serve={}", b(self.fw_serve));
+        let _ = writeln!(s, "fw_server={}", escape(&self.fw_server));
         s
     }
 
@@ -325,6 +334,8 @@ impl NodePrefs {
                 "bridge_ch" => p.bridge_channel = u8v(),
                 "bridge_secret" => p.bridge_secret = unescape(v),
                 "ota_root" => p.ota_roots = parse_fingerprints(v).unwrap_or_default(),
+                "fw_serve" => p.fw_serve = flag(),
+                "fw_server" => p.fw_server = unescape(v),
                 _ => {}
             }
         }
@@ -344,6 +355,8 @@ mod tests {
         p.radio.freq_mhz = 868.731;
         p.tx_power_dbm = -3;
         p.ota_roots = alloc::vec![[0xA5; 32], [7; 32]];
+        p.fw_serve = true;
+        p.fw_server = "fw.example:8080".into();
         let q = NodePrefs::deserialize(&p.serialize());
         assert_eq!(p, q);
     }

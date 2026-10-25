@@ -26,7 +26,10 @@ use crate::region::TransportKey;
 use crate::{MAX_PACKET_PAYLOAD, MAX_PATH_SIZE, MAX_TRANS_UNIT, PRV_KEY_SIZE, PUB_KEY_SIZE};
 
 mod cmd;
+mod fwpull;
 pub mod prefs;
+
+pub use fwpull::{FW_PULL_AUTO, FW_PULL_OFF, FW_PULL_ON, FwPullStatus};
 
 pub use prefs::*;
 
@@ -528,6 +531,8 @@ pub struct Companion {
     pub messages_received: u32,
     /// The latest nodes heard advertising, most recent first.
     pub heard: VecDeque<HeardNode>,
+    /// Firmware updates pulled from a neighbouring repeater (`fw_pull`).
+    fwpull: fwpull::FwPull,
     /// Transient slots first (`MAX_ANON_CONTACTS`), then the real contacts, like upstream.
     contacts: Vec<ContactInfo>,
     matching_peers: Vec<usize>,
@@ -577,6 +582,7 @@ impl Companion {
             recent: VecDeque::new(),
             messages_received: 0,
             heard: VecDeque::new(),
+            fwpull: fwpull::FwPull::default(),
             contacts: Vec::new(),
             matching_peers: Vec::new(),
             channels: alloc::vec![Channel::default(); MAX_GROUP_CHANNELS],
@@ -614,6 +620,11 @@ impl Companion {
         if latest != 0 && latest + 1 > ctx.current_time() {
             ctx.set_current_time(latest + 1);
         }
+    }
+
+    /// Where pulling an update from a neighbouring repeater stands (`fw_pull`).
+    pub fn fw_pull_status(&self) -> &FwPullStatus {
+        &self.fwpull.status
     }
 
     pub fn take_effects(&mut self) -> Effects {
@@ -1173,7 +1184,10 @@ impl Companion {
     }
 
     /// `onContactResponse`: match a response to the pending login / status / request.
-    fn on_contact_response(&mut self, ctx: &MeshCtx, idx: usize, data: &[u8]) {
+    fn on_contact_response(&mut self, ctx: &mut MeshCtx, idx: usize, data: &[u8]) {
+        if self.fw_pull_answer(ctx, idx, data) {
+            return;
+        }
         let tag = read_u32(data, 0);
         let key = self.contacts[idx].id.pub_key;
         let prefix4 = u32::from_le_bytes(key[..4].try_into().unwrap());
@@ -1222,7 +1236,9 @@ impl Companion {
     }
 
     /// `onContactPathRecv` (base behaviour): store the new out-path and handle the extra.
-    fn on_contact_path_recv(&mut self, ctx: &MeshCtx, idx: usize, path_len: u8, path: &[u8], extra_type: u8, extra: &[u8]) {
+    fn on_contact_path_recv(
+        &mut self, ctx: &mut MeshCtx, idx: usize, path_len: u8, path: &[u8], extra_type: u8, extra: &[u8],
+    ) {
         let c = &mut self.contacts[idx];
         c.rt_pending = false; // the contact found its own way here
         let n = Packet::path_bytes_for(path_len).min(path.len());
@@ -1593,10 +1609,15 @@ impl MeshApp for Companion {
             self.effects.save_contacts = true;
             self.dirty_contacts_expiry = 0;
         }
+        self.fw_pull_loop(ctx);
     }
 
     fn next_timer(&self) -> Option<u64> {
-        (self.dirty_contacts_expiry != 0).then_some(self.dirty_contacts_expiry)
+        let contacts = (self.dirty_contacts_expiry != 0).then_some(self.dirty_contacts_expiry);
+        match (contacts, self.fw_pull_timer()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn take_loopback(&mut self) -> Option<Box<Packet>> {

@@ -73,6 +73,11 @@ pub struct CompanionPrefs {
     /// Fingerprints of the root keys whose signed releases this device installs (see
     /// [`crate::release`]); none = unsigned updates are accepted.
     pub ota_roots: Vec<Fingerprint>,
+    /// Pull updates from a neighbouring repeater (`fw_pull`, see [`crate::fwshare`]): off, on
+    /// (installed when the user says so) or auto. Only with a pinned root. Off by default.
+    pub fw_pull: u8,
+    /// Public key prefix of the repeater to ask; empty = the best one heard directly.
+    pub fw_source: Vec<u8>,
 }
 
 impl Default for CompanionPrefs {
@@ -114,6 +119,8 @@ impl Default for CompanionPrefs {
             gps_interval: 0,
             round_trip_path: false,
             ota_roots: Vec::new(),
+            fw_pull: 0,
+            fw_source: Vec::new(),
         }
     }
 }
@@ -182,6 +189,8 @@ impl CompanionPrefs {
         let _ = writeln!(s, "gps_int={}", self.gps_interval);
         let _ = writeln!(s, "rt_path={}", b(self.round_trip_path));
         let _ = writeln!(s, "ota_root={}", join_fingerprints(&self.ota_roots, ","));
+        let _ = writeln!(s, "fw_pull={}", self.fw_pull);
+        let _ = writeln!(s, "fw_source={}", crate::util::to_hex(&self.fw_source));
         s
     }
 
@@ -237,6 +246,14 @@ impl CompanionPrefs {
                 "gps_int" => p.gps_interval = atoi(v),
                 "rt_path" => p.round_trip_path = flag(),
                 "ota_root" => p.ota_roots = parse_fingerprints(v).unwrap_or_default(),
+                "fw_pull" => p.fw_pull = u8v().min(2),
+                "fw_source" => {
+                    let mut key = alloc::vec![0u8; (v.len() / 2).min(32)];
+                    let hex = &v[..key.len() * 2];
+                    if from_hex(&mut key, hex) {
+                        p.fw_source = key;
+                    }
+                }
                 _ => {}
             }
         }

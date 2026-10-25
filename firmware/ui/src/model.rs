@@ -23,6 +23,8 @@ pub enum Page {
     Update,
     /// The node's contact as a QR code.
     Contact,
+    /// A companion's firmware update, pulled from a neighbouring repeater (`fw_pull`).
+    Pull,
 }
 
 /// What a long press on a page asks the firmware to do.
@@ -35,6 +37,8 @@ pub enum Action {
     /// The repeater's update window over BLE: open it (the PIN goes on the screen), or close it
     /// if no phone is connected.
     ToggleUpdate,
+    /// Install the update pulled from a neighbouring repeater, or ask for one now.
+    Pull,
 }
 
 impl Page {
@@ -46,6 +50,7 @@ impl Page {
             Page::Gps => Some(Action::ToggleGps),
             Page::PowerOff => Some(Action::PowerOff),
             Page::Update => Some(Action::ToggleUpdate),
+            Page::Pull => Some(Action::Pull),
             _ => None,
         }
     }
@@ -213,6 +218,21 @@ pub struct OtaWindow {
     pub mins_left: u32,
 }
 
+/// A companion's update pulled from a neighbouring repeater, in words for the screen.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PullInfo {
+    /// Where it stands, a few words ("Обновлений нет", "0.5.2 готова").
+    pub state: String,
+    /// Why, or what comes next.
+    pub detail: String,
+    /// Bytes fetched of the update, while it loads.
+    pub progress: Option<(u32, u32)>,
+    /// What a long press does now, if anything.
+    pub hold: Option<&'static str>,
+    /// The running firmware.
+    pub version: String,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct UpdateInfo {
     pub window: Option<OtaWindow>,
@@ -251,6 +271,7 @@ pub enum Body {
     Update(UpdateInfo),
     /// A QR code of the node's contact link (`meshcore://contact/add?...`), for the app's camera.
     Contact(String),
+    Pull(PullInfo),
 }
 
 /// Everything a screen shows, for the board to render.

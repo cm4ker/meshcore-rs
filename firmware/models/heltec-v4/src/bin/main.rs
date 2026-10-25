@@ -47,6 +47,7 @@ use heltec_v4::ota::{self, FlashTarget, SharedStore};
 use heltec_v4::power::Sleeper;
 use heltec_v4::reset;
 use heltec_v4::frames::FRAMES_IN;
+use meshcore_fw::fwstore;
 use heltec_v4::storage::{self, Blob, CompBlob};
 use heltec_v4::espnow;
 use heltec_v4::net::{self, BrokerState};
@@ -637,6 +638,13 @@ async fn main(spawner: Spawner) -> ! {
         mesh.app.ota.target = Some(Box::new(FlashTarget::new(s.clone(), sl)));
     }
     mesh.app.ota.build.board = heltec_v4::RELEASE_BOARD;
+    // updates handed on to neighbours (`fw.serve`): kept past the running image in its slot
+    let fw_region = match (&store, slots, mesh.app.ota.running()) {
+        (Some(s), Some(sl), Some((image_len, _))) => fwstore::region(&sl, image_len).inspect(|&region| {
+            mesh.app.fw_store = Some(Box::new(fwstore::FlashFwStore::new(s.clone(), region)));
+        }),
+        _ => None,
+    };
     info!("boot: mesh");
     mesh.begin(now_ms());
     mesh.app.start(&mut mesh.ctx);
@@ -760,6 +768,10 @@ async fn main(spawner: Spawner) -> ! {
         }
         mesh.app.uplink_enabled = true;
     }
+    if let (Some(stack), Some(s), Some(region)) = (station, &store, fw_region) {
+        spawner.spawn(fwstore::fetch_task(stack, s.clone(), region).unwrap());
+    }
+    let mut fw_status_seen = 0u32;
     let uplink_pub = net::UPLINK.publisher().unwrap();
     let mut next_status = 0u64;
 
@@ -1111,9 +1123,14 @@ async fn main(spawner: Spawner) -> ! {
                 if net::WIFI_UP.load(core::sync::atomic::Ordering::Relaxed) { "connected" } else { "disconnected" },
                 ip.as_deref().unwrap_or("-")
             );
+            let online = net::WIFI_UP.load(core::sync::atomic::Ordering::Relaxed) && ip.is_some();
+            fwstore::sync(online, &mesh.app.prefs.fw_server);
             mesh.app.board.wifi_ip = ip;
         } else {
             mesh.app.board.wifi_status = alloc::string::String::from("off (set wifi.ssid / wifi.pwd)");
+        }
+        if let Some(line) = fwstore::status_if_changed(&mut fw_status_seen) {
+            mesh.app.board.fw_status = line;
         }
         mesh.app.board.mqtt_status = mqtt_status_line(&mesh.app.prefs, station.is_some());
         if mesh.app.uplink_enabled {

@@ -372,8 +372,10 @@ dependencies = [
 name = "ota-sign"
 version = "0.1.0"
 dependencies = [
+ "bsdiff",
  "getrandom",
  "meshcore",
+ "miniz_oxide 0.9.1",
 ]
 
 [[package]]

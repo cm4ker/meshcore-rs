@@ -135,6 +135,29 @@ jobs:
           $sign fingerprint --key-env MCFW_ROOT_KEY > out/root.txt
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
           for mcfw in out/*.mcfw; do $sign verify "$mcfw" --root "$root"; done
+      # A delta from each of the last three releases, for the devices that run one of them and
+      # fetch updates over LoRa from a neighbouring repeater (meshcore::fwshare); each is checked
+      # to rebuild the signed image from its base.
+      - name: Deltas from the last releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sign=target/release/ota-sign
+          root=$(awk '/fingerprint/{print $2}' out/root.txt)
+          for tag in $(gh release list --limit 3 --exclude-drafts --json tagName -q '.[].tagName'); do
+            mkdir -p "prev/$tag"
+            gh release download "$tag" -p '*.mcfw' -D "prev/$tag" || continue
+            for mcfw in out/*.mcfw; do
+              name=$(basename "$mcfw" "-$MCFW_VERSION-r$MCFW_COUNTER.mcfw")   # <board>-<role>
+              for base in prev/"$tag"/"$name"-*.mcfw; do
+                [ -f "$base" ] || continue
+                delta=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.from-${tag##*-}.mcfd
+                $sign delta "$base" "$mcfw" -o "$delta"
+                $sign verify "$delta" --root "$root" --base "$base"
+              done
+            done
+          done
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -142,4 +165,4 @@ jobs:
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
           gh release create "v$MCFW_VERSION-r$MCFW_COUNTER" out/* \
             --title "$MCFW_VERSION (release #$MCFW_COUNTER)" \
-            --notes "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set ota.root $root\` (repeater) or the \`ota_root\` custom variable (companion), then update with the board's .mcfw file. The .uf2 is the T-Echo image for the USB bootloader."
+            --notes "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set ota.root $root\` (repeater) or the \`ota_root\` custom variable (companion), then update with the board's .mcfw file. The .uf2 is the T-Echo image for the USB bootloader. The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them."

@@ -628,6 +628,13 @@ impl Companion {
                     true => String::from("ota_root:off"),
                     false => alloc::format!("ota_root:{}", release::join_fingerprints(&self.prefs.ota_roots, " ")),
                 });
+                // updates pulled from a neighbouring repeater
+                vars.push(alloc::format!("fw_pull:{}", ["off", "on", "auto"][self.prefs.fw_pull.min(2) as usize]));
+                vars.push(match self.prefs.fw_source.is_empty() {
+                    true => String::from("fw_source:auto"),
+                    false => alloc::format!("fw_source:{}", crate::util::to_hex(&self.prefs.fw_source)),
+                });
+                vars.push(alloc::format!("fw_status:{}", self.fw_status_text()));
                 let mut f = alloc::vec![RESP_CODE_CUSTOM_VARS];
                 f.extend_from_slice(vars.join(",").as_bytes());
                 self.write_frame(&f);
@@ -664,6 +671,37 @@ impl Companion {
                             None => self.write_err(ERR_CODE_ILLEGAL_ARG),
                         }
                     }
+                    b"fw_pull" => {
+                        let mode = match value {
+                            b"off" | b"0" => Some(FW_PULL_OFF),
+                            b"on" | b"1" => Some(FW_PULL_ON),
+                            b"auto" | b"2" => Some(FW_PULL_AUTO),
+                            b"check" => None,
+                            _ => return self.write_err(ERR_CODE_ILLEGAL_ARG),
+                        };
+                        if let Some(mode) = mode {
+                            self.prefs.fw_pull = mode;
+                            self.effects.save_prefs = true;
+                        }
+                        self.fw_check_now(ctx);
+                        self.write_ok();
+                    }
+                    b"fw_source" => {
+                        let text = core::str::from_utf8(value).unwrap_or("").trim();
+                        let mut key = alloc::vec![0u8; (text.len() / 2).min(PUB_KEY_SIZE)];
+                        if text == "auto" {
+                            key.clear();
+                        } else if key.len() < 4 || !crate::util::from_hex(&mut key, &text[..(text.len() / 2).min(PUB_KEY_SIZE) * 2]) {
+                            return self.write_err(ERR_CODE_ILLEGAL_ARG);
+                        }
+                        self.prefs.fw_source = key;
+                        self.effects.save_prefs = true;
+                        self.write_ok();
+                    }
+                    b"fw_install" => match self.fw_install() {
+                        Ok(()) => self.write_ok(),
+                        Err(_) => self.write_err(ERR_CODE_BAD_STATE),
+                    },
                     _ => self.write_err(ERR_CODE_ILLEGAL_ARG),
                 }
             }

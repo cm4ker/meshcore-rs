@@ -60,6 +60,7 @@ pub(crate) fn title(v: &View) -> &str {
         (Page::Network, _) => "Сеть",
         (Page::Update, _) => "Прошивка",
         (Page::Contact, _) => "Контакт",
+        (Page::Pull, _) => "Обновление",
         (Page::Home, _) => "",
     }
 }

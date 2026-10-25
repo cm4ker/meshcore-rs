@@ -14,8 +14,17 @@ use crate::gps::GPS_ON;
 /// 12-bit samples of a 0..3 V range, behind a 1:2 divider (upstream `REAL_VBAT_MV_PER_LSB`).
 const BATT_MV_PER_LSB: f32 = 3000.0 / 4096.0 * 2.0;
 
-const PAGES: &[Page] =
-    &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Bluetooth, Page::Gps, Page::Advert, Page::PowerOff];
+const PAGES: &[Page] = &[
+    Page::Home,
+    Page::Messages,
+    Page::Nearby,
+    Page::Radio,
+    Page::Bluetooth,
+    Page::Gps,
+    Page::Pull,
+    Page::Advert,
+    Page::PowerOff,
+];
 
 /// The button (P1.10) as a pin number in P1.
 const BUTTON_PIN: usize = 10;

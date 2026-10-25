@@ -16,6 +16,7 @@ use crate::bridge::Bridge;
 use crate::advert::{ADV_TYPE_REPEATER, ADV_TYPE_ROOM, AdvertData, is_valid_name};
 use crate::companion::{CMD_DEVICE_QUERY, RESP_CODE_DEVICE_INFO};
 use crate::crypto::{self, Secret};
+use crate::fwshare::{self, FwStore};
 use crate::identity::{Identity, LocalIdentity};
 use crate::mesh::{MeshApp, MeshCtx};
 use crate::ota::{OtaEndpoint, OtaOutcome};
@@ -226,6 +227,8 @@ pub struct BoardInfo {
     /// Network status lines for `get wifi.status` / `get mqtt.status`, kept by the firmware.
     pub wifi_status: String,
     pub mqtt_status: String,
+    /// What the update store holds, for `get fw.status`, kept by the firmware.
+    pub fw_status: String,
 }
 
 pub struct Repeater {
@@ -243,6 +246,8 @@ pub struct Repeater {
     pending_radio: RadioParams,
     discover_limiter: RateLimiter,
     anon_limiter: RateLimiter,
+    /// FW requests: a companion fetching an update asks for a piece about every second.
+    fw_limiter: RateLimiter,
     pending_discover_tag: u32,
     pending_discover_until: u64,
     /// Region of the packet being processed: `None` = unknown scope, `Some(0)` = wildcard.
@@ -255,6 +260,9 @@ pub struct Repeater {
     reply_path: Option<(u8, [u8; MAX_PATH_SIZE])>,
     /// Firmware updates over LoRa; set its `target` if the platform supports updates.
     pub ota: OtaEndpoint,
+    /// The updates this node hands on to its neighbours (`set fw.serve on`), if the platform
+    /// can fetch them.
+    pub fw_store: Option<Box<dyn FwStore>>,
     /// Packets heard/sent, waiting for the MQTT observer (drained by the firmware).
     pub uplink: Vec<UplinkPacket>,
     /// Collect packets into `uplink` (an observer is connected).
@@ -309,6 +317,7 @@ impl Repeater {
             pending_radio,
             discover_limiter: RateLimiter::new(4, 120),
             anon_limiter: RateLimiter::new(4, 180),
+            fw_limiter: RateLimiter::new(90, 60),
             pending_discover_tag: 0,
             pending_discover_until: 0,
             recv_region: None,
@@ -317,6 +326,7 @@ impl Repeater {
             logging: false,
             reply_path: None,
             ota,
+            fw_store: None,
             uplink: Vec::new(),
             uplink_enabled: false,
             room: None,
@@ -685,6 +695,32 @@ impl Repeater {
         true
     }
 
+    /// A neighbour's FW request (see [`crate::fwshare`]): `{reply-path-len}{reply-path}` and the
+    /// request. Only while this node hands updates on, and at about one a second.
+    fn fw_request(&mut self, ctx: &MeshCtx, sender_timestamp: u32, kind: u8, data: &[u8], reply: &mut Vec<u8>) -> bool {
+        if !self.prefs.fw_serve || !self.fw_limiter.allow(ctx.current_time()) {
+            return false;
+        }
+        let Some(store) = self.fw_store.as_deref_mut() else {
+            return false;
+        };
+        let Some(&path_len) = data.first() else {
+            return false;
+        };
+        if !Packet::is_valid_path_len(path_len) {
+            return false;
+        }
+        let mut path = [0u8; MAX_PATH_SIZE];
+        let n = Packet::path_bytes_for(path_len).min(data.len() - 1);
+        path[..n].copy_from_slice(&data[1..1 + n]);
+        reply.extend_from_slice(&sender_timestamp.to_le_bytes());
+        let answered = fwshare::answer(store, kind, &data[1 + n..], reply);
+        if answered {
+            self.reply_path = Some((path_len, path));
+        }
+        answered
+    }
+
     // ------------------------------------------------------------- requests
 
     fn handle_request(&mut self, ctx: &mut MeshCtx, client_idx: usize, sender_timestamp: u32, payload: &[u8]) -> Vec<u8> {
@@ -949,6 +985,10 @@ impl MeshApp for Repeater {
                 reply.extend_from_slice(format!("{}\n{}", self.prefs.node_name, self.prefs.owner_info).as_bytes());
                 true
             }
+        } else if pkt.is_route_direct()
+            && matches!(kind, fwshare::ANON_REQ_TYPE_FW_QUERY | fwshare::ANON_REQ_TYPE_FW_GET)
+        {
+            self.fw_request(ctx, timestamp, kind, &data[5..], &mut reply)
         } else if pkt.is_route_direct() && kind == ANON_REQ_TYPE_BASIC {
             self.anon_prologue(ctx, timestamp, &data[5..], &mut reply) && {
                 let bridge = if self.bridge_active() { 0x03 } else { 0 }; // bridge, over ESP-NOW
@@ -1720,7 +1760,18 @@ impl Repeater {
         if cfg.starts_with("ota.root") {
             return self.ota_root_status();
         }
-        if cfg.starts_with("dyncr") {
+        if cfg.starts_with("fw.serve") {
+            format!("> {}", onoff(p.fw_serve))
+        } else if cfg.starts_with("fw.server") {
+            format!("> {}", p.fw_server)
+        } else if cfg.starts_with("fw.status") {
+            match (p.fw_serve, self.fw_store.is_some()) {
+                (_, false) => "> no update store on this board".into(),
+                (false, true) => "> off".into(),
+                (true, true) if self.board.fw_status.is_empty() => "> on, nothing fetched yet".into(),
+                (true, true) => format!("> {}", self.board.fw_status),
+            }
+        } else if cfg.starts_with("dyncr") {
             format!("> {}", onoff(p.dynamic_cr))
         } else if cfg.starts_with("room") && self.room.is_none() {
             format!("> {}", onoff(p.room))
@@ -1832,6 +1883,24 @@ impl Repeater {
         }
         if let Some(v) = cfg.strip_prefix("ota.root ") {
             return self.set_ota_root(serial, v);
+        }
+        if let Some(v) = cfg.strip_prefix("fw.serve ") {
+            self.prefs.fw_serve = v.starts_with("on");
+            self.save_prefs();
+            return match (self.prefs.fw_serve, self.fw_store.is_some()) {
+                (true, false) => "OK - but this board has no update store".into(),
+                (true, true) => format!("OK - updates from {} handed on to neighbours", self.prefs.fw_server),
+                (false, _) => "OK - updates not handed on".into(),
+            };
+        }
+        if let Some(v) = cfg.strip_prefix("fw.server ") {
+            let v = v.trim();
+            if v.is_empty() || v.len() > 63 || v.contains(char::is_whitespace) {
+                return "Error: a host name, or host:port".into();
+            }
+            self.prefs.fw_server = v.into();
+            self.save_prefs();
+            return format!("OK - release server {v}");
         }
         if let Some(v) = cfg.strip_prefix("room ")
             && self.room.is_none()

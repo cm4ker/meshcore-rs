@@ -834,7 +834,7 @@ fn companion_ota_root_custom_var() {
     assert_eq!(set(&mut a, &fp), RESP_CODE_OK);
     assert!(a.app.take_effects().save_prefs);
     assert_eq!(a.app.ota.roots, vec![[0x9a; 32]]);
-    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], format!("ota_root:{fp}").as_bytes());
+    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], format!("ota_root:{fp},fw_pull:off,fw_source:auto,fw_status:off").as_bytes());
     assert_eq!(set(&mut a, "off"), RESP_CODE_OK);
     assert!(a.app.ota.roots.is_empty());
 }
@@ -843,7 +843,7 @@ fn companion_ota_root_custom_var() {
 fn gps_setting_position_and_telemetry() {
     // no GPS: no GPS settings to offer
     let mut a = companion(1, "Alice");
-    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:off");
+    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:off,fw_pull:off,fw_source:auto,fw_status:off");
     assert_eq!(cmd(&mut a, b"\x29gps:1")[0][0], RESP_CODE_ERR);
 
     let mut air = Air::new();
@@ -852,11 +852,11 @@ fn gps_setting_position_and_telemetry() {
     b.app.board.has_gps = true;
     b.app.prefs.telemetry_mode_base = TELEM_MODE_ALLOW_ALL;
     b.app.prefs.telemetry_mode_loc = TELEM_MODE_ALLOW_ALL;
-    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:0,ota_root:off");
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:0,ota_root:off,fw_pull:off,fw_source:auto,fw_status:off");
     assert_eq!(cmd(&mut b, b"\x29gps:1")[0][0], RESP_CODE_OK);
     let fx = b.app.take_effects();
     assert!(fx.gps && fx.save_prefs && b.app.prefs.gps_enabled);
-    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:1,ota_root:off");
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:1,ota_root:off,fw_pull:off,fw_source:auto,fw_status:off");
     assert_eq!(cmd(&mut b, b"\x29gps_interval:30")[0][0], RESP_CODE_OK);
     assert_eq!(b.app.prefs.gps_interval, 30);
     assert_eq!(cmd(&mut b, b"\x29alt:1")[0][0], RESP_CODE_ERR);
@@ -935,4 +935,167 @@ fn reverse_path_keeps_the_hash_size() {
     // two 2-byte hashes: path_len = (2 - 1) << 6 | 2
     assert_eq!(reverse_path(0x42, &[1, 2, 3, 4]), (0x42, vec![3, 4, 1, 2]));
     assert_eq!(reverse_path(0, &[]), (0, vec![]));
+}
+
+/// An ESP app image as espflash makes it: one segment of `data`, the checksum block, SHA-256.
+fn esp_image(data: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut img = vec![0u8; 24];
+    img[0] = 0xE9;
+    img[1] = 1; // segments
+    img[12..14].copy_from_slice(&9u16.to_le_bytes()); // ESP32-S3
+    img[23] = 1; // hash appended
+    img.extend_from_slice(&0x4200_0000u32.to_le_bytes());
+    img.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    img.extend_from_slice(data);
+    img.resize((img.len() / 16 + 1) * 16, 0);
+    let h: [u8; 32] = Sha256::digest(&img).into();
+    img.extend_from_slice(&h);
+    img
+}
+
+/// The update slot's bytes, and whether its image was selected for the next boot.
+type Slot = std::rc::Rc<std::cell::RefCell<(Vec<u8>, bool)>>;
+
+/// A slot pair in RAM: the running image (a delta's base) and the update slot.
+struct RamSlots {
+    running: Vec<u8>,
+    slot: Slot,
+}
+
+impl meshcore::ota::FirmwareTarget for RamSlots {
+    fn capacity(&self) -> u32 {
+        self.slot.borrow().0.len() as u32
+    }
+    fn erase(&mut self, o: u32, l: u32) -> bool {
+        self.slot.borrow_mut().0[o as usize..(o + l) as usize].fill(0xFF);
+        true
+    }
+    fn write(&mut self, o: u32, d: &[u8]) -> bool {
+        self.slot.borrow_mut().0[o as usize..o as usize + d.len()].copy_from_slice(d);
+        true
+    }
+    fn read(&mut self, o: u32, b: &mut [u8]) -> bool {
+        b.copy_from_slice(&self.slot.borrow().0[o as usize..o as usize + b.len()]);
+        true
+    }
+    fn activate(&mut self, _size: u32) -> bool {
+        self.slot.borrow_mut().1 = true;
+        true
+    }
+    fn running_capacity(&self) -> u32 {
+        self.running.len() as u32
+    }
+    fn read_running(&mut self, o: u32, b: &mut [u8]) -> bool {
+        let Some(src) = self.running.get(o as usize..o as usize + b.len()) else { return false };
+        b.copy_from_slice(src);
+        true
+    }
+}
+
+/// A release of `image` for a T-Echo companion, signed by `key`, as a delta from `base`.
+fn delta_release(key: &LocalIdentity, counter: u32, base: &[u8], image: &[u8]) -> Vec<u8> {
+    use meshcore::release::{Envelope, Manifest, board, role};
+    use sha2::{Digest, Sha256};
+    let mut patch = Vec::new();
+    bsdiff::diff(base, image, &mut patch).unwrap();
+    let patch = miniz_oxide::deflate::compress_to_vec_zlib(&patch, 9);
+    let manifest = Manifest {
+        board: board::T_ECHO,
+        role: role::COMPANION,
+        flags: 0,
+        counter,
+        image_len: image.len() as u32,
+        image_sha256: Sha256::digest(image).into(),
+        issued: T0,
+        version: "0.5.2".into(),
+    };
+    let mut env = Envelope { manifest, signatures: Vec::new() };
+    let sig = key.sign(&Envelope::signed_message(&env.manifest));
+    env.add_signature(*key.pub_key(), sig);
+    let base_sha: [u8; 32] = Sha256::digest(base).into();
+    meshcore::fwshare::delta_file(&env.to_bytes(), base.len() as u32, &base_sha, &patch)
+}
+
+/// A T-Echo-like companion pinning `root`, running `base`, with `fw_pull` on.
+fn pulling_companion(root: &LocalIdentity, base: &[u8]) -> (Mesh<Companion>, Slot) {
+    let slot = std::rc::Rc::new(std::cell::RefCell::new((vec![0u8; 64 * 1024], false)));
+    let mut c = companion(2, "Echo");
+    c.app.prefs.fw_pull = FW_PULL_ON;
+    let fp = meshcore::release::fingerprint(root.pub_key());
+    c.app.prefs.ota_roots = vec![fp];
+    c.app.ota.roots = vec![fp];
+    c.app.ota.build.board = meshcore::release::board::T_ECHO;
+    c.app.ota.target = Some(Box::new(RamSlots { running: base.to_vec(), slot: slot.clone() }));
+    (c, slot)
+}
+
+fn serving_repeater(file: Vec<u8>) -> Mesh<Repeater> {
+    let mut r = repeater(1);
+    r.app.prefs.fw_serve = true;
+    r.app.fw_store = Some(Box::new(meshcore::fwshare::MemStore::new(file, 77)));
+    r.app.start(&mut r.ctx); // boot advert after 16 s
+    r
+}
+
+#[test]
+fn companion_pulls_an_update_from_a_neighbouring_repeater() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base_data: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let mut new_data = base_data.clone();
+    new_data[5000..5100].fill(0x5A); // a change, and a bit more code
+    new_data.extend_from_slice(b"new feature");
+    let (base, image) = (esp_image(&base_data), esp_image(&new_data));
+    let file = delta_release(&root, 5, &base, &image);
+    assert!(file.len() < 1500, "a small delta: {} bytes", file.len());
+
+    let mut r = serving_repeater(file.clone());
+    let (mut c, slot) = pulling_companion(&root, &base);
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000); // the repeater's boot advert: a contact, heard directly
+    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Idle { up_to_date: false });
+
+    c.app.fw_check_now(&c.ctx);
+    air.run(&mut [&mut r, &mut c], 120_000);
+    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Ready { version: "0.5.2".into() });
+    assert!(!slot.borrow().1, "fw_pull on: nothing installed until the user says so");
+    assert_eq!(&cmd(&mut c, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:".iter().chain(
+        meshcore::release::fingerprint_hex(&meshcore::release::fingerprint(root.pub_key())).as_bytes()).chain(
+        b",fw_pull:on,fw_source:auto,fw_status:0.5.2 ready to install").copied().collect::<Vec<_>>().as_slice());
+
+    assert_eq!(cmd(&mut c, b"\x29fw_install:1")[0][0], RESP_CODE_OK);
+    assert!(slot.borrow().1, "activated");
+    assert_eq!(&slot.borrow().0[..image.len()], &image[..], "the slot holds the release's image");
+    assert!(c.app.take_effects().reboot);
+}
+
+#[test]
+fn a_pulled_update_is_only_what_the_pinned_root_signed() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let stranger = LocalIdentity::from_seed(&[43; 32]);
+    let base = esp_image(&[1u8; 3000]);
+    let image = esp_image(&[2u8; 3100]);
+
+    // a repeater (or its server) hands on someone else's build: refused before any patch is fetched
+    let mut r = serving_repeater(delta_release(&stranger, 5, &base, &image));
+    let (mut c, slot) = pulling_companion(&root, &base);
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000);
+    c.app.fw_check_now(&c.ctx);
+    air.run(&mut [&mut r, &mut c], 60_000);
+    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Failed("not signed by the pinned root key".into()));
+    assert!(!slot.borrow().1);
+
+    // with no root pinned the node asks nobody: it would install anything
+    let mut r = serving_repeater(delta_release(&root, 5, &base, &image));
+    let (mut c, _) = pulling_companion(&root, &base);
+    c.app.ota.roots.clear();
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000);
+    c.app.fw_check_now(&c.ctx);
+    air.run(&mut [&mut r, &mut c], 60_000);
+    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::NotTrusted);
 }

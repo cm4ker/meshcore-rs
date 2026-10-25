@@ -19,7 +19,7 @@ use embassy_futures::select::{Either3, select3};
 use embassy_time::{Instant, Timer};
 use embedded_storage::nor_flash::NorFlash;
 use log::{error, info, warn};
-use meshcore::companion::{BlobStore, Board as BoardInfo, Companion, CompanionPrefs, RecentMessage};
+use meshcore::companion::{BlobStore, Board as BoardInfo, Companion, CompanionPrefs, FwPullStatus, RecentMessage};
 use meshcore::crypto;
 use meshcore::identity::LocalIdentity;
 use meshcore::mesh::{Mesh, MeshCtx};
@@ -35,7 +35,7 @@ use crate::links::{BLE_CONNECTED, BLE_ENABLED, BLE_OUT, BLE_PASSKEY, BONDS_CHANG
 use crate::noise::NoiseFloor;
 use crate::radio::{LoraRadio, RxEvent};
 use crate::storage::{Blob, CompBlob, SharedStore};
-use meshcore_ui::{self as ui, Action, Alert, Bar, BleState, Body, Button, GpsInfo, Node, Page, RadioInfo, Ui, View};
+use meshcore_ui::{self as ui, Action, Alert, Bar, BleState, Body, Button, GpsInfo, Node, Page, PullInfo, RadioInfo, Ui, View};
 
 const SCREEN_ON_MS: u64 = 60_000;
 const TRIAL_HEALTHY_MS: u64 = 120_000;
@@ -190,6 +190,41 @@ fn now_ms() -> u64 {
     Instant::now().as_millis()
 }
 
+/// Why a pulled update failed, in the screen's words (the core says it in English).
+fn pull_failure(why: &str) -> String {
+    String::from(match why {
+        "no answer from the repeater" => "Репитер не ответил",
+        "not signed by the pinned root key" => "Подписано не тем корневым ключом, что закреплён здесь",
+        "made for another board" => "Сделано для другой платы",
+        "older than this firmware" => "Старше этой прошивки",
+        "made for another firmware than this one" => "Сделано не для этой прошивки",
+        "the repeater has no updates now" => "У репитера сейчас нет обновлений",
+        "the repeater could not send the update" => "Репитер не смог отдать обновление",
+        "the repeater is not a contact" => "Репитера нет в контактах",
+        "pieces of the update are missing" => "Обновление пришло не целиком",
+        "the update slot can't be written" => "Не пишется память для обновления",
+        other => other,
+    })
+}
+
+/// The update page: where pulling an update from a neighbouring repeater stands.
+fn pull_info(app: &Companion) -> PullInfo {
+    let version = alloc::format!("сборка #{} ({})", app.ota.build.counter, app.board.build_date);
+    let (state, detail, progress, hold): (String, String, _, _) = match app.fw_pull_status() {
+        FwPullStatus::Off => ("Выключено".into(), "Включите fw_pull в настройках приложения".into(), None, None),
+        FwPullStatus::NotTrusted => ("Нет корневого ключа".into(), "Задайте ota_root в настройках приложения".into(), None, None),
+        FwPullStatus::Idle { up_to_date: true } => ("Обновлений нет".into(), "Проверю снова через 12 часов".into(), None, Some("проверить")),
+        FwPullStatus::Idle { up_to_date: false } => ("Ждёт проверки".into(), "Спрошу репитер рядом".into(), None, Some("проверить")),
+        FwPullStatus::NoRepeater => ("Нет репитера рядом".into(), "Нужен сосед с fw.serve on".into(), None, Some("проверить")),
+        FwPullStatus::Checking => ("Проверяю".into(), "Спрашиваю репитер рядом".into(), None, None),
+        FwPullStatus::RepeaterFetching => ("Репитер загружает".into(), "Спрошу снова через минуту".into(), None, None),
+        FwPullStatus::Loading { version, done, total } => (alloc::format!("Загружается {version}"), String::new(), Some((*done, *total)), None),
+        FwPullStatus::Ready { version } => (alloc::format!("{version} готова"), "Установка займёт около 10 секунд".into(), None, Some("установить")),
+        FwPullStatus::Failed(why) => ("Не удалось".into(), pull_failure(why), None, Some("проверить")),
+    };
+    PullInfo { state, detail, progress, hold, version }
+}
+
 /// The interface's current page with what it shows; `unread`: messages since the messages page
 /// was last open.
 fn build_view(
@@ -252,6 +287,7 @@ fn build_view(
         }
         Page::Advert => Body::Advert { flood: false },
         Page::PowerOff => Body::PowerOff,
+        Page::Pull => Body::Pull(pull_info(app)),
         // repeater pages
         _ => Body::Home { name: app.prefs.node_name.clone(), unread },
     };
@@ -563,6 +599,15 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
                         ui.alert(if on { Alert::GpsOn } else { Alert::GpsOff }, now);
                     }
                     Some(Action::PowerOff) => mesh.app.effects.power_off = true,
+                    Some(Action::Pull) => {
+                        if matches!(mesh.app.fw_pull_status(), FwPullStatus::Ready { .. }) {
+                            if let Err(e) = mesh.app.fw_install() {
+                                warn!("update: {e}");
+                            }
+                        } else {
+                            mesh.app.fw_check_now(&mesh.ctx);
+                        }
+                    }
                     Some(Action::ToggleUpdate) | None => {}
                 }
             }

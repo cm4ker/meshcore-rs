@@ -7,21 +7,29 @@
 //! ota-sign sign <file.mcfw> (--key <file> | --key-env VAR)
 //! ota-sign verify <file.mcfw> [--root <fingerprint>]...
 //! ota-sign extract <file.mcfw> -o <image>
+//! ota-sign delta <base.mcfw|image> <new.mcfw> -o <out.mcfd>
+//! ota-sign verify <file.mcfd> [--root <fingerprint>]... [--base <base.mcfw|image>]
 //! ```
 //!
 //! A `.mcfw` file is the envelope (manifest and signatures) followed by the image. `verify` with
 //! `--root` exits with an error unless a pinned root signed the release and the image matches.
 //! The release CI keeps the root key's seed in a secret and signs with `--key-env`.
+//!
+//! A `.mcfd` file carries a release as a delta for the devices that run `base` (see
+//! `meshcore::fwshare`): the new release's envelope, the base image's length and SHA-256, and a
+//! zlib-compressed bsdiff patch. Verified with `--base`, the patch is applied and the result
+//! checked against the signed manifest.
 
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use meshcore::LocalIdentity;
+use meshcore::fwshare::{self, DeltaHeader};
 use meshcore::release::{self, Envelope, Fingerprint, Manifest};
 use meshcore::util::{from_hex, to_hex};
 
 fn usage() -> ! {
-    eprintln!("{}", include_str!("main.rs").lines().skip(3).take(7).map(|l| &l[4.min(l.len())..]).collect::<Vec<_>>().join("\n"));
+    eprintln!("{}", include_str!("main.rs").lines().skip(3).take(9).map(|l| &l[4.min(l.len())..]).collect::<Vec<_>>().join("\n"));
     std::process::exit(2)
 }
 
@@ -132,6 +140,11 @@ fn show(envelope: &Envelope, image: &[u8], roots: &[Fingerprint]) -> bool {
     );
     let image_ok = image.len() == m.image_len as usize && sha256(image) == m.image_sha256;
     println!("  image: {}", if image_ok { "matches the manifest" } else { "DOES NOT MATCH the manifest" });
+    show_signers(envelope, roots) && image_ok
+}
+
+/// Print who signed `envelope`; true if one of `roots` did (or no roots are given).
+fn show_signers(envelope: &Envelope, roots: &[Fingerprint]) -> bool {
     let valid = envelope.valid_signers();
     for s in &envelope.signatures {
         let fp = release::fingerprint(&s.public_key);
@@ -145,7 +158,46 @@ fn show(envelope: &Envelope, image: &[u8], roots: &[Fingerprint]) -> bool {
     if envelope.signatures.is_empty() {
         println!("  not signed");
     }
-    image_ok && (roots.is_empty() || valid.iter().any(|fp| roots.contains(fp)))
+    roots.is_empty() || valid.iter().any(|fp| roots.contains(fp))
+}
+
+/// A delta's base: a release file's image, or an image as it is.
+fn base_image(path: &str) -> Vec<u8> {
+    if path.ends_with(".mcfw") { open(path).1 } else { read(path) }
+}
+
+/// Print a delta file; true if a pinned root signed it (when roots are given) and, with `base`,
+/// the patch turns `base` into the signed image.
+fn show_delta(file: &[u8], base: Option<&[u8]>, roots: &[Fingerprint]) -> bool {
+    let Some(h) = DeltaHeader::parse(file) else {
+        fail("not a delta file (.mcfd)");
+    };
+    let m = &h.envelope.manifest;
+    let patch = &file[h.patch_offset()..];
+    println!(
+        "{}/{} {} #{} as a delta from {} bytes, sha256 {}: {} bytes of patch",
+        release::board_name(m.board),
+        release::role_name(m.role),
+        m.version,
+        m.counter,
+        h.base_len,
+        to_hex(&h.base_sha256).to_ascii_lowercase(),
+        patch.len()
+    );
+    let mut ok = show_signers(&h.envelope, roots);
+    if let Some(base) = base {
+        let applied = (base.len() as u32 == h.base_len && sha256(base) == h.base_sha256)
+            .then(|| miniz_oxide::inflate::decompress_to_vec_zlib(patch).ok())
+            .flatten()
+            .and_then(|p| {
+                let mut out = Vec::new();
+                bsdiff::patch(base, &mut p.as_slice(), &mut out).ok().map(|_| out)
+            });
+        let image_ok = applied.is_some_and(|img| img.len() == m.image_len as usize && sha256(&img) == m.image_sha256);
+        println!("  applied to the base: {}", if image_ok { "the signed image" } else { "NOT the signed image" });
+        ok &= image_ok;
+    }
+    ok
 }
 
 fn main() -> ExitCode {
@@ -210,10 +262,33 @@ fn main() -> ExitCode {
                 .iter()
                 .map(|r| release::parse_fingerprints(r).and_then(|v| v.first().copied()).unwrap_or_else(|| fail("--root: 64 hex digits")))
                 .collect();
-            let (envelope, image) = open(args.file(0));
+            let path = args.file(0);
+            if path.ends_with(".mcfd") {
+                let base = args.get("base").map(base_image);
+                return if show_delta(&read(path), base.as_deref(), &roots) { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+            }
+            let (envelope, image) = open(path);
             if !show(&envelope, &image, &roots) {
                 return ExitCode::FAILURE;
             }
+        }
+        "delta" => {
+            let base = base_image(args.file(0));
+            let (envelope, image) = open(args.file(1));
+            if sha256(&image) != envelope.manifest.image_sha256 {
+                fail(format!("{}: the image does not match its manifest", args.file(1)));
+            }
+            let mut patch = Vec::new();
+            bsdiff::diff(&base, &image, &mut patch).unwrap_or_else(|e| fail(format!("diff: {e}")));
+            let mut check = Vec::with_capacity(image.len());
+            bsdiff::patch(&base, &mut patch.as_slice(), &mut check).unwrap_or_else(|e| fail(format!("patch: {e}")));
+            if check != image {
+                fail("the patch does not reproduce the new image");
+            }
+            let zpatch = miniz_oxide::deflate::compress_to_vec_zlib(&patch, 10);
+            let file = fwshare::delta_file(&envelope.to_bytes(), base.len() as u32, &sha256(&base), &zpatch);
+            write(args.need("out"), &file);
+            show_delta(&file, None, &[]);
         }
         "extract" => {
             let (_, image) = open(args.file(0));

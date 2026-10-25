@@ -584,6 +584,16 @@ impl OtaEndpoint {
         }
     }
 
+    /// Length and SHA-256 of the running image (the base of a delta), if the target can tell.
+    pub fn running(&mut self) -> Option<(u32, [u8; 32])> {
+        if self.running_image.is_none() {
+            #[allow(clippy::redundant_closure)]
+            let image = self.target.as_deref_mut().and_then(|t| running_image(t));
+            self.running_image = image;
+        }
+        self.running_image
+    }
+
     /// An update has begun and is neither committed nor aborted.
     pub fn busy(&self) -> bool {
         self.session.is_some()

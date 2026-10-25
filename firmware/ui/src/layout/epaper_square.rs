@@ -267,6 +267,20 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
             }
             None => c.text(&TEXT, "Ссылка не помещается", MARGIN, BODY_TOP + 2),
         },
+        Body::Pull(p) => {
+            c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, &clean(&p.state), full), MARGIN, BODY_TOP + 2);
+            let mut y = BODY_TOP + 24;
+            if let Some((done, total)) = p.progress {
+                c.text(&TEXT, &format!("{} из {} КБ", done / 1024, total.div_ceil(1024)), MARGIN, y);
+                y += 22;
+            }
+            let text = wrap(&TEXT, &clean(&p.detail), full, 3);
+            let y = c.lines(&TEXT, &text, MARGIN, y);
+            c.text(&SMALL, &fit(&SMALL, &format!("Сейчас {}", clean(&p.version)), full), MARGIN, y + 4);
+            if let Some(hold) = p.hold {
+                hint(c, hold);
+            }
+        }
         Body::Update(u) => match &u.window {
             None => {
                 c.text(&TEXT_BOLD, "Окно закрыто", MARGIN, BODY_TOP + 2);
