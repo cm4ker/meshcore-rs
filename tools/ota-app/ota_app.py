@@ -61,10 +61,10 @@ class Link:
     def __init__(self):
         self.frames = asyncio.Queue()
 
-    async def request(self, frame, timeout=15):
+    async def request(self, frame, timeout=15, confirm=True):
         while not self.frames.empty():
             self.frames.get_nowait()
-        await self.send(frame)
+        await self.send(frame, confirm)
         end = time.time() + timeout
         while (left := end - time.time()) > 0:
             try:
@@ -108,7 +108,7 @@ class StreamLink(Link):
                 await self.frames.put(buf[3:3 + n])
                 buf = buf[3 + n:]
 
-    async def send(self, frame):
+    async def send(self, frame, confirm=True):
         self.writer.write(b"<" + struct.pack("<H", len(frame)) + frame)
         await self.writer.drain()
 
@@ -161,8 +161,8 @@ class BleLink(Link):
         await self.client.start_notify(NUS_TX, lambda _, data: self.frames.put_nowait(bytes(data)))
         return self
 
-    async def send(self, frame):
-        await self.client.write_gatt_char(NUS_RX, frame, response=True)
+    async def send(self, frame, confirm=True):
+        await self.client.write_gatt_char(NUS_RX, frame, response=confirm)
 
     async def close(self):
         await self.client.disconnect()
@@ -237,6 +237,7 @@ async def main():
                 + ("" if find_base(images, run_len, run_sha8) else f" (not in {images})"))
         roots, about = describe_device(running)
         log(about)
+        repeater = len(running) >= 19 and running[13] == 1
         if args.info:
             return
 
@@ -309,14 +310,22 @@ async def main():
         log(f"transfer done in {took:.0f} s ({len(payload) / took / 1024:.1f} KiB/s); "
             "committing (the device rebuilds and verifies the image)")
         try:
-            reply = await link.request(bytes([OTA_COMMIT]), timeout=120)
+            # Sent without the BLE write's own confirmation: the device builds and checks the image
+            # before it can confirm anything, and on an S3 that takes about 30 s, as long as a BLE
+            # write may wait (the write then failed although the commit went through). Its answer
+            # comes as a notification once it is done.
+            reply = await link.request(bytes([OTA_COMMIT]), timeout=120, confirm=False)
         except Exception as e:  # rebuilding the image stalls the device; a BLE link may drop meanwhile
-            log(f"no answer to the commit ({e or type(e).__name__}); asking again after the reboot")
+            log(f"no answer to the commit ({e or type(e).__name__})")
             reply = None
         if reply is None:
             with contextlib.suppress(Exception):
                 await link.close()
             link = None
+            if args.ble and repeater:
+                sys.exit("a repeater's BLE window closes when it reboots, so this link cannot tell whether the "
+                         "image took: check `ver` and `ota info` on its console or over LoRa")
+            log("asking again after the reboot")
             got = await running_sha8(args)
             if got is None:
                 sys.exit("the device did not come back on this link (a repeater's BLE window closes when it "
