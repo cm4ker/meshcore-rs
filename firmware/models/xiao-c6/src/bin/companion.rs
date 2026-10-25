@@ -26,7 +26,6 @@ use esp_hal::rng::{Trng, TrngSource};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::usb::usb_serial_jtag::UsbSerialJtag;
 use esp_println::println;
 use esp_storage::FlashStorage;
 use meshcore::radio::RadioParams;
@@ -124,7 +123,7 @@ async fn main(spawner: Spawner) -> ! {
         led: Output::new(p.GPIO15, Level::High, OutputConfig::default()),
         button: Input::new(p.GPIO9, InputConfig::default().with_pull(Pull::Up)),
     };
-    let (usb_rx, _usb_tx) = UsbSerialJtag::new(p.USB_DEVICE).split();
+    let usb_rx = meshcore_fw::usb::start(p.USB_DEVICE);
     let hw = Hardware { radio, store, usb_rx, wifi: p.WIFI, bt: p.BT, entropy };
     let cfg = Config {
         // the Omsk mesh this board was built for (upstream variant `LORA_FREQ` etc.)

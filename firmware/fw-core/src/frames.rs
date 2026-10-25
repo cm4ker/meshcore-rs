@@ -32,6 +32,18 @@ pub struct FrameParser {
 }
 
 impl FrameParser {
+    /// In the middle of a frame.
+    pub fn partial(&self) -> bool {
+        self.state != 0
+    }
+
+    /// Drop a frame that stopped coming: a link that lost a byte would otherwise take the next
+    /// frames for the rest of it.
+    pub fn reset(&mut self) {
+        self.state = 0;
+        self.buf.clear();
+    }
+
     pub fn push(&mut self, c: u8) -> Option<Vec<u8>> {
         match self.state {
             0 => {

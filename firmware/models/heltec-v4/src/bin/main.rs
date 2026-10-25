@@ -20,6 +20,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Instant, Timer};
 use esp_backtrace as _;
+#[cfg(feature = "heltec-v3")]
 use esp_hal::Blocking;
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
 use esp_hal::clock::CpuClock;
@@ -30,8 +31,6 @@ use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
-#[cfg(not(feature = "heltec-v3"))]
-use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx};
 use esp_println::{print, println};
 use esp_storage::FlashStorage;
 use log::{info, warn};
@@ -331,17 +330,26 @@ fn now_ms() -> u64 {
     Instant::now().as_millis()
 }
 
+/// The V4's console is the chip's USB Serial/JTAG port, read in its interrupt (`meshcore_fw::usb`).
 #[cfg(not(feature = "heltec-v3"))]
-type ConsoleRx = UsbSerialJtagRx<'static, Blocking>;
+type ConsoleRx = meshcore_fw::usb::Input;
 /// The V3's USB port is a CP2102 bridge to UART0 (TX 43, RX 44).
 #[cfg(feature = "heltec-v3")]
 type ConsoleRx = esp_hal::uart::UartRx<'static, Blocking>;
 
-fn console_read(rx: &mut ConsoleRx, buf: &mut [u8]) -> usize {
+/// Wait for console input.
+async fn console_read(rx: &mut ConsoleRx, buf: &mut [u8]) -> usize {
     #[cfg(not(feature = "heltec-v3"))]
-    return rx.drain_rx_fifo(buf);
+    return rx.read(buf).await;
+    // the UART's 128-byte FIFO holds a pasted line between polls
     #[cfg(feature = "heltec-v3")]
-    return rx.read_buffered(buf).unwrap_or(0);
+    loop {
+        let n = rx.read_buffered(buf).unwrap_or(0);
+        if n > 0 {
+            return n;
+        }
+        Timer::after_millis(20).await;
+    }
 }
 
 /// Read the USB console, echo, and hand complete lines to the main loop.
@@ -349,28 +357,36 @@ fn console_read(rx: &mut ConsoleRx, buf: &mut [u8]) -> usize {
 async fn console_task(mut rx: ConsoleRx) {
     let mut line: Vec<u8> = Vec::with_capacity(160);
     let mut buf = [0u8; 64];
+    // How much of `line` is on the screen. Typed keys show at once; a pasted piece shows once its
+    // line has come: printed while the rest of it was arriving, it kept the S3's port input off
+    // (esp-println waits for the host with interrupts masked) long enough to lose a packet.
+    let mut shown = 0;
+    let show = |part: &[u8]| part.iter().for_each(|&c| print!("{}", c as char));
     loop {
-        let n = console_read(&mut rx, &mut buf);
-        if n == 0 {
-            Timer::after_millis(20).await;
-            continue;
-        }
+        let n = console_read(&mut rx, &mut buf).await;
+        let typed = n <= 2;
         for &c in &buf[..n] {
             match c {
                 b'\r' | b'\n' => {
                     if !line.is_empty() {
+                        show(&line[shown..]);
                         println!();
+                        shown = 0;
                         CLI_LINES.send(core::mem::take(&mut line)).await;
                     }
                 }
                 0x08 | 0x7F => {
-                    if line.pop().is_some() {
+                    if line.pop().is_some() && shown > line.len() {
+                        shown = line.len();
                         print!("\x08 \x08");
                     }
                 }
                 _ if line.len() < 159 => {
                     line.push(c);
-                    print!("{}", c as char);
+                    if typed {
+                        show(&line[shown..]);
+                        shown = line.len();
+                    }
                 }
                 _ => {}
             }
@@ -789,7 +805,7 @@ async fn main(spawner: Spawner) -> ! {
     wdt.feed();
     // ---- console
     #[cfg(not(feature = "heltec-v3"))]
-    let (console_rx, _usb_tx) = UsbSerialJtag::new(p.USB_DEVICE).split();
+    let console_rx = meshcore_fw::usb::start(p.USB_DEVICE);
     // esp-println keeps writing to UART0's TX on its own
     #[cfg(feature = "heltec-v3")]
     let console_rx = esp_hal::uart::UartRx::new(p.UART0, esp_hal::uart::Config::default()).unwrap().with_rx(p.GPIO44);

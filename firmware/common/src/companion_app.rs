@@ -11,10 +11,8 @@ use alloc::string::String;
 
 use embassy_executor::Spawner;
 use embassy_net::Stack;
-use esp_hal::Blocking;
 use esp_hal::peripherals::{BT, WIFI};
 use esp_hal::rng::Rng;
-use esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx;
 use esp_storage::FlashStorage;
 use log::warn;
 use meshcore::companion::CompanionPrefs;
@@ -24,14 +22,14 @@ pub use meshcore_fw_core::companion::{Board, Config};
 
 use crate::ota::{self, SharedStore, Slots};
 use crate::radio::LoraRadio;
-use crate::{ble, clock_cell, frames, net, reset};
+use crate::{ble, clock_cell, frames, net, reset, usb};
 
 /// The peripherals the companion loop owns.
 pub struct Hardware<R> {
     /// Not initialised yet: [`run`] configures it from the stored settings.
     pub radio: R,
     pub store: Option<SharedStore<'static>>,
-    pub usb_rx: UsbSerialJtagRx<'static, Blocking>,
+    pub usb_rx: usb::Input,
     pub wifi: WIFI<'static>,
     pub bt: BT<'static>,
     /// From the hardware TRNG, mixed with the radio's own random numbers.
@@ -42,7 +40,7 @@ struct Esp {
     store: Option<SharedStore<'static>>,
     slots: Option<Slots>,
     in_trial: bool,
-    usb_rx: Option<UsbSerialJtagRx<'static, Blocking>>,
+    usb_rx: Option<usb::Input>,
     wifi: Option<WIFI<'static>>,
     bt: Option<BT<'static>>,
     station: Option<Stack<'static>>,

@@ -17,5 +17,6 @@ pub mod power;
 pub mod radio;
 pub mod reset;
 pub mod storage;
+pub mod usb;
 
 pub use meshcore_fw_core::{lr2021, noise, sx1262};

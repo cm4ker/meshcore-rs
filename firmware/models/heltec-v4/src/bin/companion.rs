@@ -25,7 +25,6 @@ use esp_hal::rng::{Trng, TrngSource};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::usb::usb_serial_jtag::UsbSerialJtag;
 use esp_println::println;
 use esp_storage::FlashStorage;
 use log::{info, warn};
@@ -215,7 +214,7 @@ async fn main(spawner: Spawner) -> ! {
         next_oled_try: 0,
         screen: Policy::default(),
     };
-    let (usb_rx, _usb_tx) = UsbSerialJtag::new(p.USB_DEVICE).split();
+    let usb_rx = meshcore_fw::usb::start(p.USB_DEVICE);
     let hw = Hardware { radio, store, usb_rx, wifi: p.WIFI, bt: p.BT, entropy };
     let cfg = Config {
         radio: RadioParams::default(),
