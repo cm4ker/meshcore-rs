@@ -78,6 +78,8 @@ pub struct Params {
     pub slots: Slots,
     /// Pinned root keys (`set ota.root`): only releases they signed are installed.
     pub roots: Vec<Fingerprint>,
+    /// Pinned owner keys (`set ota.owner`): one of them must have signed the release too.
+    pub owners: Vec<Fingerprint>,
     /// What a release must be for.
     pub build: Build,
 }
@@ -227,7 +229,7 @@ async fn check_envelope(
                 let (envelope, _) =
                     Envelope::parse(&body[..env_len]).ok_or_else(|| String::from("unreadable release envelope"))?;
                 if !params.roots.is_empty() {
-                    envelope.check(&params.roots, &params.build).map_err(|r| format!("release refused: {r:?}"))?;
+                    envelope.check(&params.roots, &params.owners, &params.build).map_err(|r| format!("release refused: {r:?}"))?;
                 }
                 let m = &envelope.manifest;
                 if m.image_len as usize != len - env_len {

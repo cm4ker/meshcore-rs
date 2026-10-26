@@ -1,19 +1,21 @@
 //! Make, sign and check signed firmware releases (see `meshcore::release`).
 //!
 //! ```text
-//! ota-sign keygen <key-file>                 new root key (32-byte seed, hex); prints its fingerprint
+//! ota-sign keygen <key-file>                 new key (32-byte seed, hex), a root's or an owner's; prints its fingerprint
 //! ota-sign fingerprint (--key <file> | --key-env VAR)
 //! ota-sign bundle <image> --board heltec-v4 --role repeater --counter 42 --version 0.5.0 [--channel dev] -o <out.mcfw>
 //! ota-sign sign <file.mcfw> (--key <file> | --key-env VAR)
-//! ota-sign verify <file.mcfw> [--root <fingerprint>]...
+//! ota-sign verify <file.mcfw> [--root <fingerprint>]... [--owner <fingerprint>]...
 //! ota-sign extract <file.mcfw> -o <image>
 //! ota-sign delta <base.mcfw|image> <new.mcfw> -o <out.mcfd>
-//! ota-sign verify <file.mcfd> [--root <fingerprint>]... [--base <base.mcfw|image>]
+//! ota-sign verify <file.mcfd> [--root <fingerprint>]... [--owner <fingerprint>]... [--base <base.mcfw|image>]
 //! ```
 //!
 //! A `.mcfw` file is the envelope (manifest and signatures) followed by the image. `verify` with
-//! `--root` exits with an error unless a pinned root signed the release and the image matches.
-//! The release CI keeps the root key's seed in a secret and signs with `--key-env`.
+//! `--root` exits with an error unless a pinned root signed the release and the image matches, and
+//! with `--owner` also unless one of those owner keys signed it, as a device that pins them checks.
+//! The release CI keeps the root key's seed in a secret and signs with `--key-env`; an owner adds
+//! their signature to a published release with `sign` (or on the release server).
 //!
 //! A `.mcfd` file carries a release as a delta for the devices that run `base` (see
 //! `meshcore::fwshare`): the new release's envelope, the base image's length and SHA-256, and a
@@ -126,7 +128,14 @@ fn print_key(id: &LocalIdentity) {
     println!("fingerprint {}", release::fingerprint_hex(&release::fingerprint(id.pub_key())));
 }
 
-fn show(envelope: &Envelope, image: &[u8], roots: &[Fingerprint]) -> bool {
+/// The pinned keys `verify` checks against.
+#[derive(Default)]
+struct Pins {
+    roots: Vec<Fingerprint>,
+    owners: Vec<Fingerprint>,
+}
+
+fn show(envelope: &Envelope, image: &[u8], pins: &Pins) -> bool {
     let m = &envelope.manifest;
     println!(
         "{}/{} {} #{} ({}) issued {}  {} bytes  sha256 {}",
@@ -141,25 +150,31 @@ fn show(envelope: &Envelope, image: &[u8], roots: &[Fingerprint]) -> bool {
     );
     let image_ok = image.len() == m.image_len as usize && sha256(image) == m.image_sha256;
     println!("  image: {}", if image_ok { "matches the manifest" } else { "DOES NOT MATCH the manifest" });
-    show_signers(envelope, roots) && image_ok
+    show_signers(envelope, pins) && image_ok
 }
 
-/// Print who signed `envelope`; true if one of `roots` did (or no roots are given).
-fn show_signers(envelope: &Envelope, roots: &[Fingerprint]) -> bool {
+/// Print who signed `envelope`; true if one of the roots did (or no roots are given) and one of
+/// the owners (or no owners are given).
+fn show_signers(envelope: &Envelope, pins: &Pins) -> bool {
     let valid = envelope.valid_signers();
     for s in &envelope.signatures {
         let fp = release::fingerprint(&s.public_key);
-        let state = match (valid.contains(&fp), roots.contains(&fp)) {
-            (false, _) => "INVALID",
-            (true, true) => "valid, pinned root",
-            (true, false) => "valid",
+        let state = match (valid.contains(&fp), pins.roots.contains(&fp), pins.owners.contains(&fp)) {
+            (false, _, _) => "INVALID",
+            (true, true, _) => "valid, pinned root",
+            (true, false, true) => "valid, owner",
+            (true, false, false) => "valid",
         };
         println!("  signed by {}  {state}", release::fingerprint_hex(&fp));
     }
     if envelope.signatures.is_empty() {
         println!("  not signed");
     }
-    roots.is_empty() || valid.iter().any(|fp| roots.contains(fp))
+    let owner_ok = pins.owners.is_empty() || valid.iter().any(|fp| pins.owners.contains(fp));
+    if !owner_ok {
+        println!("  no signature by an owner key");
+    }
+    (pins.roots.is_empty() || valid.iter().any(|fp| pins.roots.contains(fp))) && owner_ok
 }
 
 /// A delta's base: a release file's image, or an image as it is.
@@ -169,7 +184,7 @@ fn base_image(path: &str) -> Vec<u8> {
 
 /// Print a delta file; true if a pinned root signed it (when roots are given) and, with `base`,
 /// the patch turns `base` into the signed image.
-fn show_delta(file: &[u8], base: Option<&[u8]>, roots: &[Fingerprint]) -> bool {
+fn show_delta(file: &[u8], base: Option<&[u8]>, pins: &Pins) -> bool {
     let Some(h) = DeltaHeader::parse(file) else {
         fail("not a delta file (.mcfd)");
     };
@@ -185,7 +200,7 @@ fn show_delta(file: &[u8], base: Option<&[u8]>, roots: &[Fingerprint]) -> bool {
         to_hex(&h.base_sha256).to_ascii_lowercase(),
         patch.len()
     );
-    let mut ok = show_signers(&h.envelope, roots);
+    let mut ok = show_signers(&h.envelope, pins);
     if let Some(base) = base {
         let applied = (base.len() as u32 == h.base_len && sha256(base) == h.base_sha256)
             .then(|| miniz_oxide::inflate::decompress_to_vec_zlib(patch).ok())
@@ -214,7 +229,7 @@ fn main() -> ExitCode {
             let mut seed = [0u8; 32];
             getrandom::fill(&mut seed).unwrap_or_else(|e| fail(format!("no randomness: {e}")));
             write(path, format!("{}\n", to_hex(&seed).to_ascii_lowercase()).as_bytes());
-            println!("root key written to {path}: keep it secret, devices pin the fingerprint");
+            println!("key written to {path}: keep it secret, devices pin the fingerprint");
             print_key(&LocalIdentity::from_seed(&seed));
         }
         "fingerprint" => print_key(&key(&args)),
@@ -248,7 +263,7 @@ fn main() -> ExitCode {
             };
             let envelope = Envelope { manifest, signatures: Vec::new() };
             save(args.need("out"), &envelope, &image);
-            show(&envelope, &image, &[]);
+            show(&envelope, &image, &Pins::default());
         }
         "sign" => {
             let path = args.file(0);
@@ -260,21 +275,27 @@ fn main() -> ExitCode {
             let signature = id.sign(&Envelope::signed_message(&envelope.manifest));
             envelope.add_signature(*id.pub_key(), signature);
             save(path, &envelope, &image);
-            show(&envelope, &image, &[]);
+            show(&envelope, &image, &Pins::default());
         }
         "verify" | "show" => {
-            let roots: Vec<Fingerprint> = args
-                .all("root")
-                .iter()
-                .map(|r| release::parse_fingerprints(r).and_then(|v| v.first().copied()).unwrap_or_else(|| fail("--root: 64 hex digits")))
-                .collect();
+            let fingerprints = |name: &str| -> Vec<Fingerprint> {
+                args.all(name)
+                    .iter()
+                    .map(|r| {
+                        release::parse_fingerprints(r)
+                            .and_then(|v| v.first().copied())
+                            .unwrap_or_else(|| fail(format!("--{name}: 64 hex digits")))
+                    })
+                    .collect()
+            };
+            let pins = Pins { roots: fingerprints("root"), owners: fingerprints("owner") };
             let path = args.file(0);
             if path.ends_with(".mcfd") {
                 let base = args.get("base").map(base_image);
-                return if show_delta(&read(path), base.as_deref(), &roots) { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+                return if show_delta(&read(path), base.as_deref(), &pins) { ExitCode::SUCCESS } else { ExitCode::FAILURE };
             }
             let (envelope, image) = open(path);
-            if !show(&envelope, &image, &roots) {
+            if !show(&envelope, &image, &pins) {
                 return ExitCode::FAILURE;
             }
         }
@@ -294,7 +315,7 @@ fn main() -> ExitCode {
             let zpatch = miniz_oxide::deflate::compress_to_vec_zlib(&patch, 10);
             let file = fwshare::delta_file(&envelope.to_bytes(), base.len() as u32, &sha256(&base), &zpatch);
             write(args.need("out"), &file);
-            show_delta(&file, None, &[]);
+            show_delta(&file, None, &Pins::default());
         }
         "extract" => {
             let (_, image) = open(args.file(0));

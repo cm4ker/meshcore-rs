@@ -281,6 +281,7 @@ impl Companion {
             base_sha8: base_sha[..8].try_into().unwrap(),
             channel: self.prefs.fw_channel,
             fresh: core::mem::take(&mut self.fwpull.fresh),
+            owner8: FwQuery::owner_of(&self.ota.owners),
         };
         self.fwpull.step = Step::Query;
         if !matches!(self.fwpull.status, FwPullStatus::RepeaterFetching) {

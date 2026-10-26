@@ -834,16 +834,58 @@ fn companion_ota_root_custom_var() {
     assert_eq!(set(&mut a, &fp), RESP_CODE_OK);
     assert!(a.app.take_effects().save_prefs);
     assert_eq!(a.app.ota.roots, vec![[0x9a; 32]]);
-    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], format!("ota_root:{fp},fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off").as_bytes());
+    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], format!("ota_root:{fp},ota_owner:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off").as_bytes());
     assert_eq!(set(&mut a, "off"), RESP_CODE_OK);
     assert!(a.app.ota.roots.is_empty());
+
+    // an owner key: only with a root pinned, as it means nothing without one
+    let owner = "3c".repeat(32);
+    let set_owner = |m: &mut Mesh<Companion>, v: &str| cmd(m, &[&b")ota_owner:"[..], v.as_bytes()].concat())[0][0];
+    assert_eq!(set_owner(&mut a, &owner), RESP_CODE_ERR);
+    assert_eq!(set(&mut a, &fp), RESP_CODE_OK);
+    assert_eq!(set_owner(&mut a, "3c3c"), RESP_CODE_ERR);
+    assert_eq!(set_owner(&mut a, &owner), RESP_CODE_OK);
+    assert_eq!(a.app.ota.owners, vec![[0x3c; 32]]);
+    assert!(a.app.prefs.serialize().contains(&format!("ota_owner={owner}
+")));
+    // both whole would not fit in a frame: their first 16 hex digits
+    let short = |fp: &str| format!("{}..", &fp[..16]);
+    let vars = format!("ota_root:{},ota_owner:{},fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off", short(&fp), short(&owner));
+    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], vars.as_bytes());
+    assert_eq!(set_owner(&mut a, "off"), RESP_CODE_OK);
+    assert!(a.app.ota.owners.is_empty());
+}
+
+/// `ota.owner`: a release must carry an owner's signature as well as the root's. The same rule as
+/// for the root: an admin may pin the first one, a change takes the serial console.
+#[test]
+fn repeater_ota_owner_cli() {
+    let mut r = repeater(4);
+    let serial = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
+    let remote = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 1_800_000_000, c);
+    let (root, a, b) = ("9a".repeat(32), "3c".repeat(32), "0b".repeat(32));
+    assert_eq!(serial(&mut r, "get ota.owner"), "> none, the root's signature is enough");
+    assert_eq!(remote(&mut r, &format!("set ota.owner {a}")), "Error: pin the root key first (set ota.root)");
+    serial(&mut r, &format!("set ota.root {root}"));
+    assert_eq!(remote(&mut r, "set ota.owner 3c"), "Error: up to 4 fingerprints of 64 hex digits, or off");
+    assert_eq!(remote(&mut r, &format!("set ota.owner {a}")), format!("OK - a release must be signed by {a} too"));
+    assert_eq!(r.app.ota.owners, vec![[0x3c; 32]]);
+    assert!(r.app.prefs.serialize().contains(&format!("ota_owner={a}
+")));
+    assert_eq!(serial(&mut r, "get ota.owner"), format!("> {a}"));
+    let refused = "Error: a pinned owner key can only be changed on the serial console";
+    assert_eq!(remote(&mut r, &format!("set ota.owner {b}")), refused);
+    assert_eq!(remote(&mut r, "set ota.owner off"), refused);
+    assert_eq!(serial(&mut r, &format!("set ota.owner {a},{b}")), format!("OK - a release must be signed by {a}, {b} too"));
+    assert_eq!(serial(&mut r, "set ota.owner off"), "OK - the root's signature is enough");
+    assert!(r.app.ota.owners.is_empty());
 }
 
 #[test]
 fn gps_setting_position_and_telemetry() {
     // no GPS: no GPS settings to offer
     let mut a = companion(1, "Alice");
-    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
+    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:off,ota_owner:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
     assert_eq!(cmd(&mut a, b"\x29gps:1")[0][0], RESP_CODE_ERR);
 
     let mut air = Air::new();
@@ -852,11 +894,11 @@ fn gps_setting_position_and_telemetry() {
     b.app.board.has_gps = true;
     b.app.prefs.telemetry_mode_base = TELEM_MODE_ALLOW_ALL;
     b.app.prefs.telemetry_mode_loc = TELEM_MODE_ALLOW_ALL;
-    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:0,ota_root:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:0,ota_root:off,ota_owner:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
     assert_eq!(cmd(&mut b, b"\x29gps:1")[0][0], RESP_CODE_OK);
     let fx = b.app.take_effects();
     assert!(fx.gps && fx.save_prefs && b.app.prefs.gps_enabled);
-    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:1,ota_root:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:1,ota_root:off,ota_owner:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
     assert_eq!(cmd(&mut b, b"\x29gps_interval:30")[0][0], RESP_CODE_OK);
     assert_eq!(b.app.prefs.gps_interval, 30);
     assert_eq!(cmd(&mut b, b"\x29alt:1")[0][0], RESP_CODE_ERR);
@@ -1023,6 +1065,16 @@ fn delta_release_for(key: &LocalIdentity, board: u8, role: u8, flags: u8, counte
     meshcore::fwshare::delta_file(&env.to_bytes(), base.len() as u32, &base_sha, &patch)
 }
 
+/// `file` (a delta) with `key`'s signature added, as an owner adds theirs on the release server.
+fn cosigned(file: &[u8], key: &LocalIdentity) -> Vec<u8> {
+    use meshcore::fwshare::DeltaHeader;
+    use meshcore::release::Envelope;
+    let h = DeltaHeader::parse(file).unwrap();
+    let mut env = h.envelope.clone();
+    env.add_signature(*key.pub_key(), key.sign(&Envelope::signed_message(&env.manifest)));
+    meshcore::fwshare::delta_file(&env.to_bytes(), h.base_len, &h.base_sha256, &file[h.patch_offset()..])
+}
+
 /// A T-Echo-like companion pinning `root`, running `base`, with `fw_pull` on.
 fn pulling_companion(root: &LocalIdentity, base: &[u8]) -> (Mesh<Companion>, Slot) {
     let slot = std::rc::Rc::new(std::cell::RefCell::new((vec![0u8; 64 * 1024], false)));
@@ -1080,7 +1132,7 @@ fn companion_pulls_an_update_from_a_neighbouring_repeater() {
     assert!(!slot.borrow().1, "fw_pull on: nothing installed until the user says so");
     assert_eq!(&cmd(&mut c, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:".iter().chain(
         meshcore::release::fingerprint_hex(&meshcore::release::fingerprint(root.pub_key())).as_bytes()).chain(
-        b",fw_pull:on,fw_source:auto,fw_channel:stable,fw_status:0.5.2 ready to install").copied().collect::<Vec<_>>().as_slice());
+        b",ota_owner:off,fw_pull:on,fw_source:auto,fw_channel:stable,fw_status:0.5.2 ready to install").copied().collect::<Vec<_>>().as_slice());
 
     assert_eq!(cmd(&mut c, b"\x29fw_install:1")[0][0], RESP_CODE_OK);
     assert!(slot.borrow().1, "activated");
@@ -1116,6 +1168,68 @@ fn a_pulled_update_is_only_what_the_pinned_root_signed() {
     c.app.fw_check_now(&c.ctx);
     air.run(&mut [&mut r, &mut c], 60_000);
     assert_eq!(c.app.fw_pull_status(), &FwPullStatus::NotTrusted);
+}
+
+#[test]
+fn an_owner_key_holds_updates_until_the_owner_signs() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let owner = LocalIdentity::from_seed(&[44; 32]);
+    let base = esp_image(&[5u8; 3000]);
+    let image = esp_image(&[6u8; 3100]);
+    let release = delta_release(&root, 5, &base, &image);
+    let pin_owner = |c: &mut Mesh<Companion>| {
+        let fp = meshcore::release::fingerprint(owner.pub_key());
+        c.app.prefs.ota_owners = vec![fp];
+        c.app.ota.owners = vec![fp];
+    };
+
+    // the root's release alone: no update for a node whose owner has not signed it
+    let mut r = serving_repeater(release.clone());
+    let (mut c, slot) = pulling_companion(&root, &base);
+    pin_owner(&mut c);
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000);
+    c.app.fw_check_now(&c.ctx);
+    air.run(&mut [&mut r, &mut c], 60_000);
+    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Idle { up_to_date: true });
+
+    // a repeater from before owner keys hands it on anyway: the node refuses it
+    let mut r = serving_repeater(release.clone());
+    r.app.fw_store = Some(Box::new(IgnoresOwner(meshcore::fwshare::MemStore::new(release.clone(), 77))));
+    let (mut c, _) = pulling_companion(&root, &base);
+    pin_owner(&mut c);
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000);
+    c.app.fw_check_now(&c.ctx);
+    air.run(&mut [&mut r, &mut c], 60_000);
+    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Failed("not signed by the owner key".into()));
+
+    // signed by the owner too: it comes and installs
+    let mut r = serving_repeater(cosigned(&release, &owner));
+    let (mut c2, slot2) = pulling_companion(&root, &base);
+    pin_owner(&mut c2);
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c2], 20_000);
+    c2.app.fw_check_now(&c2.ctx);
+    air.run(&mut [&mut r, &mut c2], 120_000);
+    assert_eq!(c2.app.fw_pull_status(), &FwPullStatus::Ready { version: "0.5.2".into() });
+    assert_eq!(cmd(&mut c2, b")fw_install:1")[0][0], RESP_CODE_OK);
+    assert!(slot2.borrow().1 && !slot.borrow().1);
+}
+
+/// A store that hands on whatever it holds, whoever signed it (a repeater from before owner keys).
+struct IgnoresOwner(meshcore::fwshare::MemStore);
+
+impl meshcore::fwshare::FwStore for IgnoresOwner {
+    fn offer(&mut self, q: &meshcore::fwshare::FwQuery) -> meshcore::fwshare::Offer {
+        self.0.offer(&meshcore::fwshare::FwQuery { owner8: meshcore::fwshare::FwQuery::NO_OWNER, ..*q })
+    }
+    fn read(&mut self, id: u32, offset: u32, buf: &mut [u8]) -> Option<usize> {
+        self.0.read(id, offset, buf)
+    }
 }
 
 #[test]

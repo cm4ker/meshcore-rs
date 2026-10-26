@@ -70,8 +70,9 @@ pub const REQ_TYPE_OTA_STATUS: u8 = 0xF2;
 pub const REQ_TYPE_OTA_COMMIT: u8 = 0xF3;
 pub const REQ_TYPE_OTA_ABORT: u8 = 0xF4;
 /// -> `[has_target][capacity u32][version...][0][image_len u32][image_sha256 first 8][board u8]
-/// [role u8][release counter u32][pinned roots u8]`: the running image, the base a delta must be
-/// made against (zeroes if unknown), and what a signed release for this device must name
+/// [role u8][release counter u32][pinned roots u8][pinned owners u8]`: the running image, the base
+/// a delta must be made against (zeroes if unknown), and what a signed release for this device
+/// must name and who must sign it
 pub const REQ_TYPE_OTA_INFO: u8 = 0xF5;
 /// `[offset u16][total u16][len u8][piece of the envelope]` -> `[status][received u16]`: the
 /// envelope of a signed release (see [`crate::release`]), in order, before BEGIN. Once whole it is
@@ -133,12 +134,15 @@ pub enum OtaError {
     Downgrade = 13,
     /// The envelope can't be read.
     BadEnvelope = 14,
+    /// Owner keys are pinned and none of them signed the release.
+    NotOwner = 15,
 }
 
 impl From<Refusal> for OtaError {
     fn from(r: Refusal) -> Self {
         match r {
             Refusal::Untrusted => Self::Untrusted,
+            Refusal::NotOwner => Self::NotOwner,
             Refusal::WrongBoard => Self::WrongBoard,
             Refusal::Downgrade => Self::Downgrade,
         }
@@ -538,6 +542,9 @@ pub struct OtaEndpoint {
     /// Fingerprints of the root keys whose signed releases this device installs; empty = unsigned
     /// images are accepted (as before roots existed).
     pub roots: Vec<Fingerprint>,
+    /// Fingerprints of the owner keys one of which must sign a release as well (with a root
+    /// pinned); empty = the root's signature is enough.
+    pub owners: Vec<Fingerprint>,
     /// This build: a release must be for its board and role, and not older.
     pub build: Build,
     /// The envelope being received (MANIFEST requests).
@@ -548,10 +555,10 @@ pub struct OtaEndpoint {
 
 impl OtaEndpoint {
     /// An endpoint of a device in `role` (see [`crate::release::role`]) that installs only
-    /// releases signed by one of `roots`, or anything while `roots` is empty. The firmware still
-    /// sets the target and [`Build::board`].
-    pub fn new(roots: Vec<Fingerprint>, role: u8) -> Self {
-        Self { roots, build: Build { role, ..Build::default() }, ..Self::default() }
+    /// releases signed by one of `roots` (and by one of `owners`, if any), or anything while
+    /// `roots` is empty. The firmware still sets the target and [`Build::board`].
+    pub fn new(roots: Vec<Fingerprint>, owners: Vec<Fingerprint>, role: u8) -> Self {
+        Self { roots, owners, build: Build { role, ..Build::default() }, ..Self::default() }
     }
 
     pub fn is_request(kind: u8) -> bool {
@@ -567,7 +574,7 @@ impl OtaEndpoint {
         if self.roots.is_empty() {
             return Ok(());
         }
-        envelope.check(&self.roots, &self.build)?;
+        envelope.check(&self.roots, &self.owners, &self.build)?;
         self.release = Some(envelope.manifest);
         Ok(())
     }
@@ -627,6 +634,7 @@ impl OtaEndpoint {
                 out.extend_from_slice(&[self.build.board, self.build.role]);
                 out.extend_from_slice(&self.build.counter.to_le_bytes());
                 out.push(self.roots.len() as u8);
+                out.push(self.owners.len() as u8);
                 (Some(out), OtaOutcome::None)
             }
             REQ_TYPE_OTA_MANIFEST => {
@@ -1396,7 +1404,7 @@ mod tests {
         assert_eq!(send(&mut ep, &envelope(&root, other_image)), 0);
         assert_eq!(begin_status(&mut ep), OtaError::HashMismatch as u8, "signed, but for another image");
 
-        assert_eq!(send(&mut ep, &envelope(&root, manifest)), 0);
+        assert_eq!(send(&mut ep, &envelope(&root, manifest.clone())), 0);
         assert_eq!(begin_status(&mut ep), 0);
         for (i, c) in img.chunks(500).enumerate() {
             let mut d = vec![REQ_TYPE_OTA_DATA];
@@ -1408,6 +1416,18 @@ mod tests {
         assert_eq!(begin_status(&mut ep), OtaError::Unsigned as u8, "a release is good for one session");
 
         let info = ep.handle(&[REQ_TYPE_OTA_INFO], "v").0.unwrap();
-        assert_eq!(&info[info.len() - 7..], &[1, 1, 5, 0, 0, 0, 1], "board, role, counter, roots");
+        assert_eq!(&info[info.len() - 8..], &[1, 1, 5, 0, 0, 0, 1, 0], "board, role, counter, roots, owners");
+
+        // an owner key pinned: the root's signature alone is not enough
+        let owner = LocalIdentity::from_seed(&[7; 32]);
+        ep.owners = vec![release::fingerprint(owner.pub_key())];
+        assert_eq!(send(&mut ep, &envelope(&root, manifest.clone())), OtaError::NotOwner as u8);
+        assert_eq!(begin_status(&mut ep), OtaError::Unsigned as u8);
+        let mut cosigned = Envelope { manifest: manifest.clone(), signatures: Vec::new() };
+        for key in [&root, &owner] {
+            cosigned.add_signature(*key.pub_key(), key.sign(&Envelope::signed_message(&manifest)));
+        }
+        assert_eq!(send(&mut ep, &cosigned.to_bytes()), 0);
+        assert_eq!(begin_status(&mut ep), 0);
     }
 }

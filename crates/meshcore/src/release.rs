@@ -5,6 +5,12 @@
 //! trusts; once it has one, it installs only images whose manifest such a key signed, whoever
 //! delivers them. With no pinned root it takes unsigned images as before.
 //!
+//! An owner who wants to decide which releases go onto their devices, rather than take every one
+//! the root signs, pins their own key's fingerprint as well (an owner key): the device then also
+//! wants that key's signature on the same manifest. The owner adds it to a release after it is
+//! published (on the release server, or with `ota-sign sign`); until they do, their devices stay
+//! on the build they run.
+//!
 //! The envelope: `[manifest][n u8][(public key 32, signature 64) x n]`. A `.mcfw` file is the
 //! envelope followed by the image. The manifest, little-endian:
 //! `"MCFW" [format u8 = 1][board u8][role u8][flags u8][counter u32][image_len u32]
@@ -27,7 +33,7 @@ const FIXED_LEN: usize = 53;
 pub const VERSION_MAX: usize = 31;
 pub const MAX_SIGNATURES: usize = 8;
 const SIGNATURE_ENTRY: usize = PUB_KEY_SIZE + SIGNATURE_SIZE;
-/// Root keys a device pins at most.
+/// Root keys (and owner keys) a device pins at most.
 pub const MAX_ROOTS: usize = 4;
 pub const FINGERPRINT_SIZE: usize = 32;
 pub type Fingerprint = [u8; FINGERPRINT_SIZE];
@@ -262,6 +268,8 @@ pub struct Envelope {
 pub enum Refusal {
     /// No valid signature by a pinned root key.
     Untrusted,
+    /// Owner keys are pinned and none of them signed it (yet).
+    NotOwner,
     /// Built for another board or role.
     WrongBoard,
     /// Older than the running build.
@@ -334,10 +342,15 @@ impl Envelope {
             .collect()
     }
 
-    /// Whether a device that pins `roots` and runs `build` may install this release.
-    pub fn check(&self, roots: &[Fingerprint], build: &Build) -> Result<(), Refusal> {
-        if !self.valid_signers().iter().any(|fp| roots.contains(fp)) {
+    /// Whether a device that pins `roots` and `owners` and runs `build` may install this
+    /// release: a root signed it and, when owner keys are pinned, one of them did too.
+    pub fn check(&self, roots: &[Fingerprint], owners: &[Fingerprint], build: &Build) -> Result<(), Refusal> {
+        let signers = self.valid_signers();
+        if !signers.iter().any(|fp| roots.contains(fp)) {
             return Err(Refusal::Untrusted);
+        }
+        if !owners.is_empty() && !signers.iter().any(|fp| owners.contains(fp)) {
+            return Err(Refusal::NotOwner);
         }
         if self.manifest.board != build.board || self.manifest.role != build.role {
             return Err(Refusal::WrongBoard);
@@ -399,23 +412,48 @@ mod tests {
         let stranger = LocalIdentity::from_seed(&[3; 32]);
         let pin = [fingerprint(root.pub_key())];
         let build = Build { board: board::HELTEC_V4, role: role::REPEATER, counter: 41 };
-        assert_eq!(signed(&root, manifest()).check(&pin, &build), Ok(()));
-        assert_eq!(signed(&stranger, manifest()).check(&pin, &build), Err(Refusal::Untrusted));
-        assert_eq!(signed(&root, manifest()).check(&[], &build), Err(Refusal::Untrusted));
+        assert_eq!(signed(&root, manifest()).check(&pin, &[], &build), Ok(()));
+        assert_eq!(signed(&stranger, manifest()).check(&pin, &[], &build), Err(Refusal::Untrusted));
+        assert_eq!(signed(&root, manifest()).check(&[], &[], &build), Err(Refusal::Untrusted));
 
         // a signature over another manifest (the image hash changed afterwards)
         let mut forged = signed(&root, manifest());
         forged.manifest.image_sha256 = [8; 32];
-        assert_eq!(forged.check(&pin, &build), Err(Refusal::Untrusted));
+        assert_eq!(forged.check(&pin, &[], &build), Err(Refusal::Untrusted));
 
         let v3 = Manifest { board: board::HELTEC_V3, ..manifest() };
-        assert_eq!(signed(&root, v3).check(&pin, &build), Err(Refusal::WrongBoard));
+        assert_eq!(signed(&root, v3).check(&pin, &[], &build), Err(Refusal::WrongBoard));
         let companion = Manifest { role: role::COMPANION, ..manifest() };
-        assert_eq!(signed(&root, companion).check(&pin, &build), Err(Refusal::WrongBoard));
+        assert_eq!(signed(&root, companion).check(&pin, &[], &build), Err(Refusal::WrongBoard));
         let old = Manifest { counter: 40, ..manifest() };
-        assert_eq!(signed(&root, old).check(&pin, &build), Err(Refusal::Downgrade));
+        assert_eq!(signed(&root, old).check(&pin, &[], &build), Err(Refusal::Downgrade));
         let same = Manifest { counter: 41, ..manifest() };
-        assert_eq!(signed(&root, same).check(&pin, &build), Ok(()), "reinstalling the running release");
+        assert_eq!(signed(&root, same).check(&pin, &[], &build), Ok(()), "reinstalling the running release");
+    }
+
+    #[test]
+    fn a_pinned_owner_must_sign_too() {
+        let root = LocalIdentity::from_seed(&[1; 32]);
+        let owner = LocalIdentity::from_seed(&[4; 32]);
+        let neighbour = LocalIdentity::from_seed(&[5; 32]);
+        let (pin, owners) = ([fingerprint(root.pub_key())], [fingerprint(owner.pub_key())]);
+        let build = Build { board: board::HELTEC_V4, role: role::REPEATER, counter: 41 };
+        let cosigned = |by: &LocalIdentity| {
+            let mut e = signed(&root, manifest());
+            e.add_signature(*by.pub_key(), by.sign(&Envelope::signed_message(&e.manifest)));
+            e
+        };
+        assert_eq!(signed(&root, manifest()).check(&pin, &owners, &build), Err(Refusal::NotOwner), "the root alone");
+        assert_eq!(cosigned(&owner).check(&pin, &owners, &build), Ok(()));
+        assert_eq!(cosigned(&neighbour).check(&pin, &owners, &build), Err(Refusal::NotOwner), "another owner's");
+        assert_eq!(cosigned(&owner).check(&pin, &[], &build), Ok(()), "a device with no owner key takes it as well");
+        assert_eq!(signed(&owner, manifest()).check(&pin, &owners, &build), Err(Refusal::Untrusted), "the owner alone");
+
+        // the owner's signature over another manifest does not count
+        let mut e = signed(&root, manifest());
+        let other = Manifest { counter: 43, ..manifest() };
+        e.add_signature(*owner.pub_key(), owner.sign(&Envelope::signed_message(&other)));
+        assert_eq!(e.check(&pin, &owners, &build), Err(Refusal::NotOwner));
     }
 
     #[test]

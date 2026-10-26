@@ -303,7 +303,7 @@ impl Repeater {
     pub fn new(prefs: NodePrefs, board: BoardInfo) -> Self {
         let pending_radio = prefs.radio;
         let bridge = Bridge::new(&prefs.bridge_secret);
-        let ota = OtaEndpoint::new(prefs.ota_roots.clone(), release::role::REPEATER);
+        let ota = OtaEndpoint::new(prefs.ota_roots.clone(), prefs.ota_owners.clone(), release::role::REPEATER);
         Self {
             prefs,
             board,
@@ -1776,6 +1776,13 @@ impl Repeater {
         if cfg.starts_with("ota.root") {
             return self.ota_root_status();
         }
+        if cfg.starts_with("ota.owner") {
+            return match (self.prefs.ota_owners.is_empty(), self.prefs.ota_roots.is_empty()) {
+                (true, _) => "> none, the root's signature is enough".into(),
+                (false, true) => format!("> {} (no root pinned: not checked)", release::join_fingerprints(&self.prefs.ota_owners, ", ")),
+                (false, false) => format!("> {}", release::join_fingerprints(&self.prefs.ota_owners, ", ")),
+            };
+        }
         if cfg.starts_with("fw.auto") {
             self.auto_update_status()
         } else if cfg.starts_with("fw.channel") {
@@ -1900,12 +1907,44 @@ impl Repeater {
         }
     }
 
+    /// `set ota.owner <fingerprint>[,<fingerprint>...]` pins owner keys: a release is installed
+    /// only once one of them signed it too, so the owner decides which of the root's releases go
+    /// onto this node; `set ota.owner off` unpins them. The same rule as for the root: the first
+    /// pin may come from an admin, a change only from the serial console.
+    fn set_ota_owner(&mut self, serial: bool, value: &str) -> String {
+        let value = value.trim();
+        let owners = if value == "off" { Some(Vec::new()) } else { release::parse_fingerprints(value) };
+        let Some(owners) = owners else {
+            return format!("Error: up to {} fingerprints of 64 hex digits, or off", release::MAX_ROOTS);
+        };
+        if owners == self.prefs.ota_owners {
+            return "OK".into();
+        }
+        if !owners.is_empty() && self.prefs.ota_roots.is_empty() {
+            return "Error: pin the root key first (set ota.root)".into();
+        }
+        if !self.prefs.ota_owners.is_empty() && !serial {
+            return "Error: a pinned owner key can only be changed on the serial console".into();
+        }
+        self.ota.owners = owners.clone();
+        self.prefs.ota_owners = owners;
+        self.save_prefs();
+        if self.prefs.ota_owners.is_empty() {
+            "OK - the root's signature is enough".into()
+        } else {
+            format!("OK - a release must be signed by {} too", release::join_fingerprints(&self.prefs.ota_owners, ", "))
+        }
+    }
+
     fn handle_set(&mut self, ctx: &mut MeshCtx, serial: bool, cfg: &str) -> String {
         if let Some(r) = self.handle_set_network(cfg) {
             return r;
         }
         if let Some(v) = cfg.strip_prefix("ota.root ") {
             return self.set_ota_root(serial, v);
+        }
+        if let Some(v) = cfg.strip_prefix("ota.owner ") {
+            return self.set_ota_owner(serial, v);
         }
         if let Some(v) = cfg.strip_prefix("fw.serve ") {
             self.prefs.fw_serve = v.starts_with("on");

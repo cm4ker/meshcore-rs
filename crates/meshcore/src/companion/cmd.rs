@@ -623,26 +623,13 @@ impl Companion {
                 }
             }
             CMD_GET_CUSTOM_VARS => {
-                // the GPS's settings, and the root keys whose signed releases are installed
-                // (fingerprints separated by spaces: the list itself is comma-separated)
-                let mut vars = alloc::vec::Vec::new();
-                if self.board.has_gps {
-                    vars.push(String::from(if self.prefs.gps_enabled { "gps:1" } else { "gps:0" }));
+                let mut text = self.custom_vars(false);
+                if text.len() + 1 > MAX_FRAME_SIZE {
+                    text = self.custom_vars(true);
                 }
-                vars.push(match self.prefs.ota_roots.is_empty() {
-                    true => String::from("ota_root:off"),
-                    false => alloc::format!("ota_root:{}", release::join_fingerprints(&self.prefs.ota_roots, " ")),
-                });
-                // updates pulled from a neighbouring repeater
-                vars.push(alloc::format!("fw_pull:{}", ["off", "on", "auto"][self.prefs.fw_pull.min(2) as usize]));
-                vars.push(match self.prefs.fw_source.is_empty() {
-                    true => String::from("fw_source:auto"),
-                    false => alloc::format!("fw_source:{}", crate::util::to_hex(&self.prefs.fw_source)),
-                });
-                vars.push(alloc::format!("fw_channel:{}", release::channel_name(self.prefs.fw_channel)));
-                vars.push(alloc::format!("fw_status:{}", self.fw_status_text()));
                 let mut f = alloc::vec![RESP_CODE_CUSTOM_VARS];
-                f.extend_from_slice(vars.join(",").as_bytes());
+                f.extend_from_slice(text.as_bytes());
+                f.truncate(MAX_FRAME_SIZE);
                 self.write_frame(&f);
             }
             CMD_SET_CUSTOM_VAR if len >= 4 => {
@@ -674,6 +661,21 @@ impl Companion {
                                 self.effects.save_prefs = true;
                                 self.write_ok();
                             }
+                            None => self.write_err(ERR_CODE_ILLEGAL_ARG),
+                        }
+                    }
+                    b"ota_owner" => {
+                        let text = core::str::from_utf8(value).unwrap_or("?").trim();
+                        let owners = if text == "off" { Some(alloc::vec::Vec::new()) } else { release::parse_fingerprints(text) };
+                        match owners {
+                            // an owner key means nothing without a root
+                            Some(owners) if owners.is_empty() || !self.prefs.ota_roots.is_empty() => {
+                                self.ota.owners = owners.clone();
+                                self.prefs.ota_owners = owners;
+                                self.effects.save_prefs = true;
+                                self.write_ok();
+                            }
+                            Some(_) => self.write_err(ERR_CODE_BAD_STATE),
                             None => self.write_err(ERR_CODE_ILLEGAL_ARG),
                         }
                     }
@@ -1017,6 +1019,35 @@ impl Companion {
             None => reply.push_str("Unknown command"),
         }
         reply
+    }
+
+    /// The custom variables, comma-separated: the GPS's settings, the root keys whose signed
+    /// releases are installed and the owner keys that must sign them too (fingerprints separated
+    /// by spaces; `short`: their first 16 hex digits, when the whole ones do not fit in a frame),
+    /// and the updates pulled from a neighbouring repeater.
+    fn custom_vars(&self, short: bool) -> String {
+        let fps = |name: &str, list: &[release::Fingerprint]| match (list.is_empty(), short) {
+            (true, _) => alloc::format!("{name}:off"),
+            (false, false) => alloc::format!("{name}:{}", release::join_fingerprints(list, " ")),
+            (false, true) => {
+                let cut: Vec<String> = list.iter().map(|fp| alloc::format!("{}..", &release::fingerprint_hex(fp)[..16])).collect();
+                alloc::format!("{name}:{}", cut.join(" "))
+            }
+        };
+        let mut vars = Vec::new();
+        if self.board.has_gps {
+            vars.push(String::from(if self.prefs.gps_enabled { "gps:1" } else { "gps:0" }));
+        }
+        vars.push(fps("ota_root", &self.prefs.ota_roots));
+        vars.push(fps("ota_owner", &self.prefs.ota_owners));
+        vars.push(alloc::format!("fw_pull:{}", ["off", "on", "auto"][self.prefs.fw_pull.min(2) as usize]));
+        vars.push(match self.prefs.fw_source.is_empty() {
+            true => String::from("fw_source:auto"),
+            false => alloc::format!("fw_source:{}", crate::util::to_hex(&self.prefs.fw_source)),
+        });
+        vars.push(alloc::format!("fw_channel:{}", release::channel_name(self.prefs.fw_channel)));
+        vars.push(alloc::format!("fw_status:{}", self.fw_status_text()));
+        vars.join(",")
     }
 
     /// Updates pulled from a neighbouring repeater: `fw update`, `fw status`, `set|get fw.pull`,

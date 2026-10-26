@@ -49,7 +49,8 @@ ERRORS = {1: "no OTA slot", 2: "image too large", 3: "bad parameters", 4: "no se
           10: "unsigned: the device pins a root key, give it the release's .mcfw",
           11: "the release is not signed by the root key the device pins",
           12: "the release is for another board or role", 13: "the release is older than the one the device runs",
-          14: "unreadable release envelope"}
+          14: "unreadable release envelope",
+          15: "the release is not signed by the owner key the device pins (sign it on the release server)"}
 BOARDS = {1: "heltec-v4", 2: "heltec-v3", 3: "xiao-c6", 4: "t-echo"}
 ROLES = {1: "repeater", 2: "companion"}
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -90,11 +91,15 @@ def describe_envelope(env):
 
 
 def describe_device(running):
-    """What INFO says after the running image: `[board][role][release counter u32][pinned roots]`."""
+    """What INFO says after the running image: `[board][role][release counter u32][pinned roots]
+    [pinned owners]` (the owners from the firmware that knows owner keys on)."""
     if len(running) < 19:
         return None, "the device predates signed releases"
     board, role, counter, roots = struct.unpack_from("<BBIB", running, 12)
+    owners = running[19] if len(running) >= 20 else 0
     pins = f"pins {roots} root key(s): signed releases only" if roots else "pins no root key: unsigned images accepted"
+    if roots and owners:
+        pins += f", and {owners} owner key(s): one of them must have signed it too"
     return roots, f"device build {BOARDS.get(board, '?')}/{ROLES.get(role, '?')} #{counter}, {pins}"
 
 

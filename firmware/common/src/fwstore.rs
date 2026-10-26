@@ -39,7 +39,7 @@ const FAIL_SECS: u64 = 600;
 /// What an asking companion is told to wait while a fetch runs.
 const FETCH_RETRY_SECS: u16 = 30;
 
-/// The board, role and image a delta is for.
+/// The board, role and image a delta is for, and the owner key that must have signed it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Key {
     board: u8,
@@ -47,11 +47,12 @@ struct Key {
     base_len: u32,
     base_sha8: [u8; 8],
     channel: u8,
+    owner8: [u8; 8],
 }
 
 impl From<&FwQuery> for Key {
     fn from(q: &FwQuery) -> Self {
-        Self { board: q.board, role: q.role, base_len: q.base_len, base_sha8: q.base_sha8, channel: q.channel }
+        Self { board: q.board, role: q.role, base_len: q.base_len, base_sha8: q.base_sha8, channel: q.channel, owner8: q.owner8 }
     }
 }
 
@@ -238,13 +239,17 @@ async fn fetch(
     if !matches!(with_timeout(Duration::from_secs(10), socket.connect((addr, port))).await, Ok(Ok(()))) {
         return Err("no connection");
     }
-    let path = format!(
+    let mut path = format!(
         "/fw/next/{}/{}/{}?counter={counter}&channel={}",
         release::board_name(key.board),
         release::role_name(key.role),
         to_hex(&key.base_sha8).to_ascii_lowercase(),
         release::channel_name(key.channel)
     );
+    if key.owner8 != FwQuery::NO_OWNER {
+        // only a release that owner signed, with the signature in it
+        path.push_str(&format!("&owner={}", to_hex(&key.owner8).to_ascii_lowercase()));
+    }
     let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: meshcore-rs\r\nConnection: close\r\n\r\n");
     socket.write_all(request.as_bytes()).await.map_err(|_| "request not sent")?;
 
@@ -320,6 +325,9 @@ async fn fetch(
     }
     if !m.fits_channel(key.channel) {
         return Err("the server sent a dev release for a stable node");
+    }
+    if !meshcore::fwshare::signed_by(&h.envelope, &key.owner8) {
+        return Err("the server sent a release the owner did not sign");
     }
     let id = u32::from_le_bytes(m.image_sha256[..4].try_into().unwrap()) ^ len;
     Ok(Some(File { key, len, id, counter: m.counter, version: m.version.clone() }))

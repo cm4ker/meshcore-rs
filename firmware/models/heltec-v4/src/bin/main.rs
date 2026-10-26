@@ -1293,6 +1293,7 @@ async fn main(spawner: Spawner) -> ! {
                     store: s.clone(),
                     slots: sl,
                     roots: mesh.app.ota.roots.clone(),
+                    owners: mesh.app.ota.owners.clone(),
                     build: mesh.app.ota.build,
                 };
                 match wifi_ota::start_http(&spawner, stack, params) {
@@ -1312,6 +1313,7 @@ async fn main(spawner: Spawner) -> ! {
                         store: s.clone(),
                         slots: sl,
                         roots: mesh.app.ota.roots.clone(),
+                        owners: mesh.app.ota.owners.clone(),
                         build: mesh.app.ota.build,
                     };
                     let seed = (Rng::new().random() as u64) << 32 | Rng::new().random() as u64;

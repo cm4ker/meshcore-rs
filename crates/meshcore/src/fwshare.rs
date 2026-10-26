@@ -3,7 +3,7 @@
 //! next to it, and a companion that pins a root key (`fw_pull`) asks it for an update by itself,
 //! connected to nothing. Neither end trusts the other or the server the repeater fetched from: a
 //! companion pulls only while it pins a root key, and installs only what that root signed (see
-//! [`crate::release`], [`crate::ota`]).
+//! [`crate::release`], [`crate::ota`]), and what its owner signed too when it pins an owner key.
 //!
 //! What travels is a delta file (`.mcfd`, made by the release CI with `ota-sign delta`): the signed
 //! envelope of the new release, the image the delta starts from, and the delta, a zlib-compressed
@@ -18,11 +18,14 @@
 //! upstream's `[tag u32][kind u8][reply path_len u8][reply path]` prologue, and the replies after
 //! the reflected tag:
 //!
-//! - `FW_QUERY [board u8][role u8][counter u32][base_len u32][base_sha256 first 8][channel u8]` ->
-//!   `[status]`, and for `READY` `[len u32][id u32][counter u32][version_len u8][version]`, for
-//!   `FETCHING` `[retry_secs u16]`. The channel (see [`release::channel`]) may be left out: stable.
-//!   Its bit 7 asks for a fresh answer: someone asked for an update by hand, so the repeater forgets
-//!   what it knew about this image (that the server had nothing newer) and asks again.
+//! - `FW_QUERY [board u8][role u8][counter u32][base_len u32][base_sha256 first 8][channel u8]
+//!   [owner first 8]` -> `[status]`, and for `READY` `[len u32][id u32][counter u32][version_len u8]
+//!   [version]`, for `FETCHING` `[retry_secs u16]`. The channel (see [`release::channel`]) may be
+//!   left out: stable. Its bit 7 asks for a fresh answer: someone asked for an update by hand, so
+//!   the repeater forgets what it knew about this image (that the server had nothing newer) and
+//!   asks again. The owner is the start of the fingerprint of the owner key the companion pins
+//!   (see [`crate::release`]), zeroes or left out for none: only a release that key signed is an
+//!   update then, and the file carries that signature.
 //! - `FW_GET [id u32][offset u32][len u8]` -> `[status][offset u32][data]`
 
 use alloc::string::String;
@@ -70,13 +73,23 @@ pub struct FwQuery {
     pub channel: u8,
     /// Asked by hand (`fw update`): what the repeater knew about this image is not good enough.
     pub fresh: bool,
+    /// The first bytes of the fingerprint of the owner key whose signature an update must carry;
+    /// zeroes for none.
+    pub owner8: [u8; 8],
 }
 
 /// Bit 7 of FW_QUERY's channel byte: [`FwQuery::fresh`].
 const FRESH: u8 = 0x80;
 
 impl FwQuery {
-    pub const LEN: usize = 19;
+    pub const LEN: usize = 27;
+    /// Without an owner key.
+    pub const NO_OWNER: [u8; 8] = [0; 8];
+
+    /// [`FwQuery::owner8`] for a device that pins `owners`: the first one.
+    pub fn owner_of(owners: &[release::Fingerprint]) -> [u8; 8] {
+        owners.first().map_or(Self::NO_OWNER, |fp| fp[..8].try_into().unwrap())
+    }
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(Self::LEN);
@@ -85,13 +98,14 @@ impl FwQuery {
         b.extend_from_slice(&self.base_len.to_le_bytes());
         b.extend_from_slice(&self.base_sha8);
         b.push(self.channel | if self.fresh { FRESH } else { 0 });
+        b.extend_from_slice(&self.owner8);
         b
     }
 
-    /// A query; without the channel byte (the first version of the request), stable. The
-    /// datagram's zero padding reads as stable too.
+    /// A query; without the channel byte (the first version of the request), stable, and without
+    /// the owner (older companions), none. The datagram's zero padding reads the same.
     pub fn parse(b: &[u8]) -> Option<Self> {
-        let f = b.get(..Self::LEN - 1)?;
+        let f = b.get(..18)?;
         Some(Self {
             board: f[0],
             role: f[1],
@@ -100,6 +114,7 @@ impl FwQuery {
             base_sha8: f[10..18].try_into().unwrap(),
             channel: b.get(18).map(|c| c & !FRESH).filter(|&c| c == release::channel::DEV).unwrap_or(release::channel::STABLE),
             fresh: b.get(18).is_some_and(|c| c & FRESH != 0),
+            owner8: b.get(19..27).map_or(Self::NO_OWNER, |o| o.try_into().unwrap()),
         })
     }
 }
@@ -166,6 +181,7 @@ pub fn delta_file(envelope: &[u8], base_len: u32, base_sha256: &[u8; 32], patch:
 pub fn refusal(code: u8) -> &'static str {
     match code {
         c if c == OtaError::Untrusted as u8 => "not signed by the pinned root key",
+        c if c == OtaError::NotOwner as u8 => "not signed by the owner key",
         c if c == OtaError::WrongBoard as u8 => "made for another board",
         c if c == OtaError::Downgrade as u8 => "older than this firmware",
         c if c == OtaError::BaseMismatch as u8 => "made for another firmware than this one",
@@ -366,6 +382,12 @@ pub fn answer(store: &mut dyn FwStore, kind: u8, data: &[u8], reply: &mut Vec<u8
     }
 }
 
+/// Whether `envelope` carries a signature by the key whose fingerprint starts with `owner8` (any
+/// envelope does for [`FwQuery::NO_OWNER`]). Whether it is valid the device checks.
+pub fn signed_by(envelope: &Envelope, owner8: &[u8; 8]) -> bool {
+    *owner8 == FwQuery::NO_OWNER || envelope.signatures.iter().any(|s| release::fingerprint(&s.public_key)[..8] == *owner8)
+}
+
 /// A store holding one delta file in memory (tests, the companion simulator).
 pub struct MemStore {
     pub file: Vec<u8>,
@@ -392,6 +414,7 @@ impl FwStore for MemStore {
             || q.base_len != h.base_len
             || q.base_sha8 != h.base_sha256[..8]
             || !h.envelope.manifest.fits_channel(q.channel)
+            || !signed_by(&h.envelope, &q.owner8)
         {
             return Offer::NoUpdate;
         }
@@ -468,8 +491,12 @@ mod tests {
             base_sha8: base_sha[..8].try_into().unwrap(),
             channel: release::channel::STABLE,
             fresh: false,
+            owner8: FwQuery::NO_OWNER,
         };
         assert_eq!(FwQuery::parse(&q.to_bytes()), Some(q));
+        let owned = FwQuery { owner8: [1, 2, 3, 4, 5, 6, 7, 8], ..q };
+        assert_eq!(FwQuery::parse(&owned.to_bytes()), Some(owned));
+        assert_eq!(FwQuery::parse(&q.to_bytes()[..19]), Some(q), "a query from before owner keys");
         let fresh_dev = FwQuery { channel: release::channel::DEV, fresh: true, ..q };
         assert_eq!(FwQuery::parse(&fresh_dev.to_bytes()), Some(fresh_dev));
         let dev = FwQuery { channel: release::channel::DEV, ..q };
@@ -484,7 +511,8 @@ mod tests {
         assert_eq!(&r[14..], b"0.5.2");
 
         // the same release is no update; another image or board gets nothing
-        for q in [FwQuery { counter: 5, ..q }, FwQuery { base_len: 10, ..q }, FwQuery { board: board::XIAO_C6, ..q }] {
+        // nor does a device whose owner did not sign it
+        for q in [FwQuery { counter: 5, ..q }, FwQuery { base_len: 10, ..q }, FwQuery { board: board::XIAO_C6, ..q }, owned] {
             let mut r = Vec::new();
             answer(&mut store, ANON_REQ_TYPE_FW_QUERY, &q.to_bytes(), &mut r);
             assert_eq!(r, [status::NONE]);

@@ -73,6 +73,9 @@ pub struct CompanionPrefs {
     /// Fingerprints of the root keys whose signed releases this device installs (see
     /// [`crate::release`]); none = unsigned updates are accepted.
     pub ota_roots: Vec<Fingerprint>,
+    /// Fingerprints of the owner keys one of which must sign a release too (custom variable
+    /// `ota_owner`); none = the root's signature is enough.
+    pub ota_owners: Vec<Fingerprint>,
     /// Pull updates from a neighbouring repeater (`fw_pull`, see [`crate::fwshare`]): off, on
     /// (installed when the user says so) or auto. Only with a pinned root. Off by default.
     pub fw_pull: u8,
@@ -121,6 +124,7 @@ impl Default for CompanionPrefs {
             gps_interval: 0,
             round_trip_path: false,
             ota_roots: Vec::new(),
+            ota_owners: Vec::new(),
             fw_pull: 0,
             fw_source: Vec::new(),
             fw_channel: 0,
@@ -192,6 +196,7 @@ impl CompanionPrefs {
         let _ = writeln!(s, "gps_int={}", self.gps_interval);
         let _ = writeln!(s, "rt_path={}", b(self.round_trip_path));
         let _ = writeln!(s, "ota_root={}", join_fingerprints(&self.ota_roots, ","));
+        let _ = writeln!(s, "ota_owner={}", join_fingerprints(&self.ota_owners, ","));
         let _ = writeln!(s, "fw_pull={}", self.fw_pull);
         let _ = writeln!(s, "fw_source={}", crate::util::to_hex(&self.fw_source));
         let _ = writeln!(s, "fw_channel={}", self.fw_channel);
@@ -250,6 +255,7 @@ impl CompanionPrefs {
                 "gps_int" => p.gps_interval = atoi(v),
                 "rt_path" => p.round_trip_path = flag(),
                 "ota_root" => p.ota_roots = parse_fingerprints(v).unwrap_or_default(),
+                "ota_owner" => p.ota_owners = parse_fingerprints(v).unwrap_or_default(),
                 "fw_pull" => p.fw_pull = u8v().min(2),
                 "fw_channel" => p.fw_channel = u8v().min(1),
                 "fw_source" => {

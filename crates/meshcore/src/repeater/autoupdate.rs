@@ -156,6 +156,7 @@ impl Repeater {
             base_sha8: base_sha[..8].try_into().unwrap(),
             channel: self.prefs.fw_channel,
             fresh: false,
+            owner8: FwQuery::owner_of(&self.ota.owners),
         })
     }
 

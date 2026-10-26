@@ -571,7 +571,7 @@ fn c_str(b: &[u8]) -> &[u8] {
 
 impl Companion {
     pub fn new(prefs: CompanionPrefs, board: Board) -> Self {
-        let ota = OtaEndpoint::new(prefs.ota_roots.clone(), release::role::COMPANION);
+        let ota = OtaEndpoint::new(prefs.ota_roots.clone(), prefs.ota_owners.clone(), release::role::COMPANION);
         let mut c = Self {
             prefs,
             board,
