@@ -947,11 +947,18 @@ impl MeshApp for Repeater {
                 self.matching_peers.push(i);
             }
         }
+        // the neighbour this node pulls an update from (`fw.auto`), while its answer is awaited
+        if self.autoupdate.peer().is_some_and(|(id, _)| id.is_hash_match_v1(hash)) {
+            self.matching_peers.push(autoupdate::FW_PEER);
+        }
         self.matching_peers.len()
     }
 
     fn peer_shared_secret(&mut self, _ctx: &mut MeshCtx, peer_idx: usize) -> Option<Secret> {
         let i = *self.matching_peers.get(peer_idx)?;
+        if i == autoupdate::FW_PEER {
+            return self.autoupdate.peer().map(|&(_, secret)| secret);
+        }
         self.acl.get(i).map(|c| c.shared_secret)
     }
 
@@ -1041,6 +1048,12 @@ impl MeshApp for Repeater {
         let Some(&i) = self.matching_peers.get(sender_idx) else {
             return;
         };
+        if i == autoupdate::FW_PEER {
+            if payload_type == PAYLOAD_TYPE_RESPONSE {
+                self.auto_update_answer(ctx, data);
+            }
+            return;
+        }
         if i >= self.acl.len() || data.len() < 5 {
             return;
         }
@@ -1787,6 +1800,8 @@ impl Repeater {
             self.auto_update_status()
         } else if cfg.starts_with("fw.channel") {
             format!("> {}", release::channel_name(p.fw_channel))
+        } else if cfg.starts_with("fw.source") {
+            if p.fw_source.is_empty() { "> auto".into() } else { format!("> {}", to_hex(&p.fw_source)) }
         } else if cfg.starts_with("fw.server") {
             format!("> {}", p.fw_server)
         } else if cfg.starts_with("fw.serve") {
@@ -1961,7 +1976,7 @@ impl Repeater {
             return match (self.prefs.fw_auto, self.prefs.ota_roots.is_empty()) {
                 (true, true) => "OK - but nothing is installed until a root is pinned (set ota.root)".into(),
                 (true, false) => format!(
-                    "OK - this node updates itself from {}, {} releases",
+                    "OK - this node updates itself from {} (without it, from a neighbour over LoRa), {} releases",
                     self.prefs.fw_server,
                     release::channel_name(self.prefs.fw_channel)
                 ),
@@ -1975,6 +1990,22 @@ impl Repeater {
             self.prefs.fw_channel = ch;
             self.save_prefs();
             return format!("OK - following {} releases", release::channel_name(ch));
+        }
+        if let Some(v) = cfg.strip_prefix("fw.source ") {
+            let v = v.trim();
+            let mut key = alloc::vec![0u8; v.len() / 2];
+            if v == "auto" {
+                key.clear();
+            } else if !(2..=64).contains(&v.len()) || v.len() % 2 != 0 || !from_hex(&mut key, v) {
+                return "Error: the start of a neighbour's key in hex, or auto".into();
+            }
+            self.prefs.fw_source = key;
+            self.save_prefs();
+            return if self.prefs.fw_source.is_empty() {
+                "OK - updates from the release server, or from the best neighbour over LoRa without it".into()
+            } else {
+                format!("OK - updates from {} over LoRa", to_hex(&self.prefs.fw_source))
+            };
         }
         if let Some(v) = cfg.strip_prefix("fw.server ") {
             let v = v.trim();

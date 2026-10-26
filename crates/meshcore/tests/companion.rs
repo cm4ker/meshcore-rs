@@ -1255,7 +1255,7 @@ fn a_repeater_updates_itself_from_its_store() {
     assert_eq!(cli(&mut r, "fw update"), "Error: needs a pinned root key (set ota.root)", "the server is not trusted");
     let fp = meshcore::release::fingerprint_hex(&fingerprint(root.pub_key()));
     cli(&mut r, &format!("set ota.root {fp}"));
-    assert_eq!(cli(&mut r, "set fw.auto on"), "OK - this node updates itself from nw.ommesh.ru, stable releases");
+    assert_eq!(cli(&mut r, "set fw.auto on"), "OK - this node updates itself from nw.ommesh.ru (without it, from a neighbour over LoRa), stable releases");
 
     // `fw update` checks now rather than 10 minutes after boot
     assert!(cli(&mut r, "fw update").starts_with("OK"));
@@ -1335,4 +1335,97 @@ fn fw_update_by_hand_does_not_take_the_repeaters_old_answer() {
     air.run(&mut [&mut r, &mut c], 60_000);
     assert!(slot.borrow().1, "installed");
     assert!(c.app.take_effects().reboot);
+}
+
+/// A store with no link to its server, as on a repeater whose Wi-Fi is down.
+struct Offline;
+
+impl meshcore::fwshare::FwStore for Offline {
+    fn offer(&mut self, _q: &meshcore::fwshare::FwQuery) -> meshcore::fwshare::Offer {
+        meshcore::fwshare::Offer::Unavailable
+    }
+    fn read(&mut self, _id: u32, _offset: u32, _buf: &mut [u8]) -> Option<usize> {
+        None
+    }
+}
+
+/// A Heltec V4 repeater running `base`, pinning `root`, with `fw.auto` on: what the tests below pull into.
+fn self_updating_repeater(seed: u8, root: &LocalIdentity, base: &[u8]) -> (Mesh<Repeater>, Slot) {
+    use meshcore::release::{board, fingerprint, fingerprint_hex};
+    let slot: Slot = std::rc::Rc::new(std::cell::RefCell::new((vec![0u8; 64 * 1024], false)));
+    let mut r = repeater(seed);
+    r.app.ota.target = Some(Box::new(RamSlots { running: base.to_vec(), slot: slot.clone() }));
+    r.app.ota.build.board = board::HELTEC_V4;
+    r.app.ota.build.counter = 4; // whatever MCFW_COUNTER this test was built with
+    let fp = fingerprint_hex(&fingerprint(root.pub_key()));
+    assert!(r.app.handle_command(&mut r.ctx, 0, &format!("set ota.root {fp}")).starts_with("OK"));
+    assert!(r.app.handle_command(&mut r.ctx, 0, "set fw.auto on").starts_with("OK"));
+    (r, slot)
+}
+
+#[test]
+fn a_repeater_without_internet_pulls_its_update_from_a_neighbour() {
+    use meshcore::release::{board, role};
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base_data: Vec<u8> = (0..30_000u32).map(|i| (i * 13 % 251) as u8).collect();
+    let mut new_data = base_data.clone();
+    new_data[100..140].fill(7);
+    new_data.extend_from_slice(b"new feature");
+    let (base, image) = (esp_image(&base_data), esp_image(&new_data));
+    let file = delta_release_for(&root, board::HELTEC_V4, role::REPEATER, 0, 5, &base, &image);
+
+    // a neighbour that hands updates on, one that does not, and the node, whose Wi-Fi is down
+    let mut serving = serving_repeater(file);
+    let mut quiet = repeater(5);
+    quiet.app.start(&mut quiet.ctx);
+    let (mut r, slot) = self_updating_repeater(3, &root, &base);
+    r.app.fw_store = Some(Box::new(Offline));
+    let mut air = Air::new();
+    air.link(0, 2);
+    air.link(1, 2);
+    air.run(&mut [&mut serving, &mut quiet, &mut r], 20_000); // the boot adverts: both neighbours heard
+
+    assert!(r.app.handle_command(&mut r.ctx, 0, "fw update").starts_with("OK"));
+    air.run(&mut [&mut serving, &mut quiet, &mut r], 120_000);
+    assert!(r.app.take_effects().reboot, "installed: restarting into it");
+    assert!(slot.borrow().1);
+    assert_eq!(&slot.borrow().0[..image.len()], &image[..], "the slot holds the release's image");
+    let serving_key = meshcore::util::to_hex(&serving.ctx.self_id.pub_key()[..4]);
+    assert!(
+        r.app.handle_command(&mut r.ctx, 0, "get fw.auto").contains(&format!("installing 0.5.2 from neighbour {serving_key}")),
+        "{}",
+        r.app.handle_command(&mut r.ctx, 0, "get fw.auto")
+    );
+}
+
+#[test]
+fn fw_source_names_the_neighbour_a_repeater_pulls_from() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&[5u8; 4000]);
+    let mut quiet = repeater(5);
+    quiet.app.start(&mut quiet.ctx);
+    let (mut r, slot) = self_updating_repeater(3, &root, &base);
+    let cli = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
+    assert_eq!(cli(&mut r, "get fw.source"), "> auto");
+    assert!(cli(&mut r, "set fw.source xyz").starts_with("Error"));
+    let quiet_key = meshcore::util::to_hex(&quiet.ctx.self_id.pub_key()[..3]);
+    assert_eq!(cli(&mut r, &format!("set fw.source {quiet_key}")), format!("OK - updates from {quiet_key} over LoRa"));
+    assert_eq!(cli(&mut r, "get fw.source"), format!("> {quiet_key}"));
+
+    // not heard yet
+    let mut air = Air::new();
+    air.link(0, 1);
+    assert!(cli(&mut r, "fw update").starts_with("OK"));
+    air.run(&mut [&mut quiet, &mut r], 5_000);
+    assert!(cli(&mut r, "get fw.auto").ends_with(&format!("{quiet_key} not heard lately")), "{}", cli(&mut r, "get fw.auto"));
+
+    // heard, but it does not hand updates on: asked twice, no answer
+    air.run(&mut [&mut quiet, &mut r], 20_000);
+    assert!(cli(&mut r, "fw update").starts_with("OK"));
+    air.run(&mut [&mut quiet, &mut r], 30_000);
+    assert!(cli(&mut r, "get fw.auto").ends_with("no neighbour hands updates on (fw.serve)"), "{}", cli(&mut r, "get fw.auto"));
+    assert!(!slot.borrow().1);
+
+    assert_eq!(cli(&mut r, "set fw.source auto"), "OK - updates from the release server, or from the best neighbour over LoRa without it");
+    assert_eq!(cli(&mut r, "get fw.source"), "> auto");
 }

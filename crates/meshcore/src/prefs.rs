@@ -105,6 +105,10 @@ pub struct NodePrefs {
     pub fw_auto: bool,
     /// The release channel followed (`release::channel`): stable by default.
     pub fw_channel: u8,
+    /// Where `fw.auto` takes updates from without a working link to `fw_server`: the start of a
+    /// neighbouring repeater's key (`set fw.source`), asked over LoRa; empty = the best neighbour
+    /// heard directly that answers.
+    pub fw_source: Vec<u8>,
 }
 
 impl Default for NodePrefs {
@@ -165,6 +169,7 @@ impl Default for NodePrefs {
             fw_server: "nw.ommesh.ru".into(),
             fw_auto: false,
             fw_channel: 0,
+            fw_source: Vec::new(),
         }
     }
 }
@@ -285,6 +290,7 @@ impl NodePrefs {
         let _ = writeln!(s, "fw_server={}", escape(&self.fw_server));
         let _ = writeln!(s, "fw_auto={}", b(self.fw_auto));
         let _ = writeln!(s, "fw_channel={}", self.fw_channel);
+        let _ = writeln!(s, "fw_source={}", crate::util::to_hex(&self.fw_source));
         s
     }
 
@@ -353,6 +359,13 @@ impl NodePrefs {
                 "fw_server" => p.fw_server = unescape(v),
                 "fw_auto" => p.fw_auto = flag(),
                 "fw_channel" => p.fw_channel = u8v().min(1),
+                "fw_source" => {
+                    let n = (v.len() / 2).min(32);
+                    let mut key = alloc::vec![0u8; n];
+                    if crate::util::from_hex(&mut key, &v[..n * 2]) {
+                        p.fw_source = key;
+                    }
+                }
                 _ => {}
             }
         }
@@ -377,6 +390,7 @@ mod tests {
         p.fw_server = "fw.example:8080".into();
         p.fw_auto = true;
         p.fw_channel = 1;
+        p.fw_source = alloc::vec![0xCE, 0x5B, 0x93];
         let q = NodePrefs::deserialize(&p.serialize());
         assert_eq!(p, q);
     }
