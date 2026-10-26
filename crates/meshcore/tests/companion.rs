@@ -1037,6 +1037,17 @@ fn pulling_companion(root: &LocalIdentity, base: &[u8]) -> (Mesh<Companion>, Slo
     (c, slot)
 }
 
+#[test]
+fn fw_status_tells_what_the_store_did_whether_or_not_it_serves_neighbours() {
+    let mut r = repeater(1);
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get fw.status"), "> no update store on this board");
+    r.app.fw_store = Some(Box::new(meshcore::fwshare::MemStore::new(Vec::new(), 77)));
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get fw.status"), "> nothing fetched yet");
+    // `fw.auto` fetched and failed while `fw.serve` is off: the reason still shows
+    r.app.board.fw_status = "fetching from nw.ommesh.ru failed: cut off".into();
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get fw.status"), "> fetching from nw.ommesh.ru failed: cut off");
+}
+
 fn serving_repeater(file: Vec<u8>) -> Mesh<Repeater> {
     let mut r = repeater(1);
     r.app.prefs.fw_serve = true;

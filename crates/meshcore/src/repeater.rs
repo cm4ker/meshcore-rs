@@ -1785,11 +1785,14 @@ impl Repeater {
         } else if cfg.starts_with("fw.serve") {
             format!("> {}", onoff(p.fw_serve))
         } else if cfg.starts_with("fw.status") {
-            match (p.fw_serve, self.fw_store.is_some()) {
-                (_, false) => "> no update store on this board".into(),
-                (false, true) => "> off".into(),
-                (true, true) if self.board.fw_status.is_empty() => "> on, nothing fetched yet".into(),
-                (true, true) => format!("> {}", self.board.fw_status),
+            // the store fetches for `fw.auto` and `fw update` too, not only for `fw.serve`: what it
+            // last did (or why it failed) is worth seeing whichever asked
+            if self.fw_store.is_none() {
+                "> no update store on this board".into()
+            } else if self.board.fw_status.is_empty() {
+                "> nothing fetched yet".into()
+            } else {
+                format!("> {}", self.board.fw_status)
             }
         } else if cfg.starts_with("dyncr") {
             format!("> {}", onoff(p.dynamic_cr))
