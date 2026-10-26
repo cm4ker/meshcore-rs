@@ -851,6 +851,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // ---- main loop
     let mut noise = NoiseFloor::new();
+    let mut next_noise = 0u64;
     let mut next_batt = now_ms() + 60_000;
     let mut next_agc_reset = 0u64;
     let mut next_clock_save = now_ms() + CLOCK_SAVE_INTERVAL_MS;
@@ -1049,13 +1050,14 @@ async fn main(spawner: Spawner) -> ! {
         }
 
         prof.mark("noise");
-        if !radio.is_receiving().unwrap_or(true)
-            && let Ok(rssi) = radio.rssi_inst()
-        {
-            noise.sample(rssi);
-            mesh.ctx.stats.noise_floor = noise.floor;
-            if let Some(r) = room.as_mut() {
-                r.ctx.stats.noise_floor = noise.floor;
+        // a burst every 2 s; one cut short by a packet goes on in the next one
+        if now >= next_noise {
+            next_noise = now + NoiseFloor::INTERVAL_MS;
+            if noise.measure(|| if radio.is_receiving().unwrap_or(true) { None } else { radio.rssi_inst().ok() }) {
+                mesh.ctx.stats.noise_floor = noise.floor;
+                if let Some(r) = room.as_mut() {
+                    r.ctx.stats.noise_floor = noise.floor;
+                }
             }
         }
 
@@ -1076,7 +1078,6 @@ async fn main(spawner: Spawner) -> ! {
                 if radio.reset_agc().await.is_err() {
                     warn!("AGC reset failed");
                 }
-                noise = NoiseFloor::new();
             }
             next_agc_reset = now + agc_secs * 1000;
         }

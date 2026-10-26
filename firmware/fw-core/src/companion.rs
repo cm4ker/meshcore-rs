@@ -457,6 +457,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     log::set_max_level(log::LevelFilter::Off);
 
     let mut noise = NoiseFloor::new();
+    let mut next_noise = 0u64;
     let mut next_batt = now_ms() + 60_000;
     let mut next_clock_save = now_ms() + CLOCK_SAVE_INTERVAL_MS;
     let mut last_clock = mesh.ctx.current_time();
@@ -560,11 +561,12 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             ui.wake(now);
         }
 
-        if !radio.is_receiving().unwrap_or(true)
-            && let Ok(rssi) = radio.rssi_inst()
-        {
-            noise.sample(rssi);
-            mesh.ctx.stats.noise_floor = noise.floor;
+        // a burst every 2 s; one cut short by a packet goes on in the next one
+        if now >= next_noise {
+            next_noise = now + NoiseFloor::INTERVAL_MS;
+            if noise.measure(|| if radio.is_receiving().unwrap_or(true) { None } else { radio.rssi_inst().ok() }) {
+                mesh.ctx.stats.noise_floor = noise.floor;
+            }
         }
         if now >= next_batt {
             next_batt = now + 60_000;
