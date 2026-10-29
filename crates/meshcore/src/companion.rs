@@ -1355,7 +1355,7 @@ impl MeshApp for Companion {
                     let mut reply = String::new();
                     if self.contacts[idx].is_remote_cli_allowed() {
                         let command = String::from_utf8_lossy(text).into_owned();
-                        reply = self.handle_command(ctx, &command);
+                        reply = self.handle_command(ctx, true, &command);
                     } else {
                         self.queue_message(idx, TXT_TYPE_CLI_COMMAND, pkt, sender_timestamp, &[], text);
                     }

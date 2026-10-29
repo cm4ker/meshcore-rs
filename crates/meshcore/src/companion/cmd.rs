@@ -14,6 +14,12 @@ fn ftoa3(v: f32) -> String {
     ftoa(v as f64, 3)
 }
 
+/// Release keys: `<fingerprint>[,<fingerprint>...]`, or `off` for none.
+fn parse_keys(text: &str) -> Option<Vec<release::Fingerprint>> {
+    let text = text.trim();
+    if text == "off" { Some(Vec::new()) } else { release::parse_fingerprints(text) }
+}
+
 impl Companion {
     /// Handle one command frame from the app; replies are queued for [`Self::take_frame`].
     pub fn handle_frame(&mut self, ctx: &mut MeshCtx, frame: &[u8]) {
@@ -74,7 +80,7 @@ impl Companion {
             }
             CMD_RUN_CLI_COMMAND if len >= 3 => {
                 let text = String::from_utf8_lossy(c_str(&frame[1..])).into_owned();
-                let reply = self.handle_command(ctx, &text);
+                let reply = self.handle_command(ctx, false, &text);
                 let mut f = alloc::vec![RESP_CODE_CLI_REPLY];
                 f.extend_from_slice(reply.as_bytes());
                 f.truncate(MAX_FRAME_SIZE);
@@ -651,34 +657,20 @@ impl Companion {
                         self.effects.save_prefs = true;
                         self.write_ok();
                     }
-                    b"ota_root" => {
-                        let text = core::str::from_utf8(value).unwrap_or("?").trim();
-                        let roots = if text == "off" { Some(alloc::vec::Vec::new()) } else { release::parse_fingerprints(text) };
-                        match roots {
-                            Some(roots) => {
-                                self.ota.roots = roots.clone();
-                                self.prefs.ota_roots = roots;
-                                self.effects.save_prefs = true;
-                                self.write_ok();
-                            }
-                            None => self.write_err(ERR_CODE_ILLEGAL_ARG),
+                    b"ota_root" => match parse_keys(core::str::from_utf8(value).unwrap_or("?")) {
+                        Some(roots) => {
+                            self.pin_ota_roots(roots);
+                            self.write_ok();
                         }
-                    }
-                    b"ota_owner" => {
-                        let text = core::str::from_utf8(value).unwrap_or("?").trim();
-                        let owners = if text == "off" { Some(alloc::vec::Vec::new()) } else { release::parse_fingerprints(text) };
-                        match owners {
-                            // an owner key means nothing without a root
-                            Some(owners) if owners.is_empty() || !self.prefs.ota_roots.is_empty() => {
-                                self.ota.owners = owners.clone();
-                                self.prefs.ota_owners = owners;
-                                self.effects.save_prefs = true;
-                                self.write_ok();
-                            }
-                            Some(_) => self.write_err(ERR_CODE_BAD_STATE),
-                            None => self.write_err(ERR_CODE_ILLEGAL_ARG),
-                        }
-                    }
+                        None => self.write_err(ERR_CODE_ILLEGAL_ARG),
+                    },
+                    b"ota_owner" => match parse_keys(core::str::from_utf8(value).unwrap_or("?")) {
+                        Some(owners) => match self.pin_ota_owners(owners) {
+                            true => self.write_ok(),
+                            false => self.write_err(ERR_CODE_BAD_STATE),
+                        },
+                        None => self.write_err(ERR_CODE_ILLEGAL_ARG),
+                    },
                     b"fw_pull" => {
                         let mode = match value {
                             b"off" | b"0" => Some(FW_PULL_OFF),
@@ -1005,16 +997,16 @@ impl Companion {
 
     // -------------------------------------------------------------------- CLI
 
-    /// `MyMesh::handleCommand` (USB rescue CLI, `CMD_RUN_CLI_COMMAND`, remote CLI). An `xx|`
-    /// prefix is echoed back.
-    pub fn handle_command(&mut self, _ctx: &mut MeshCtx, command: &str) -> String {
+    /// `MyMesh::handleCommand` (USB rescue CLI, `CMD_RUN_CLI_COMMAND`, `remote` CLI from a
+    /// contact). An `xx|` prefix is echoed back.
+    pub fn handle_command(&mut self, _ctx: &mut MeshCtx, remote: bool, command: &str) -> String {
         let mut command = command.trim_start_matches(' ');
         let mut reply = String::new();
         if command.len() > 4 && command.as_bytes()[2] == b'|' {
             reply.push_str(&command[..3]);
             command = &command[3..];
         }
-        match self.handle_command_inner(command) {
+        match self.handle_command_inner(remote, command) {
             Some(r) => reply.push_str(&r),
             None => reply.push_str("Unknown command"),
         }
@@ -1050,14 +1042,51 @@ impl Companion {
         vars.join(",")
     }
 
-    /// Updates pulled from a neighbouring repeater: `fw update`, `fw status`, `set|get fw.pull`,
-    /// `fw.channel`, `fw.source`.
-    fn handle_fw_command(&mut self, cmd: &str) -> Option<String> {
+    /// Pins the root keys whose signed releases are installed (`set ota.root`, the `ota_root`
+    /// custom variable); with none, unsigned ones are and nothing is pulled from a repeater.
+    fn pin_ota_roots(&mut self, roots: Vec<release::Fingerprint>) {
+        self.ota.roots = roots.clone();
+        self.prefs.ota_roots = roots;
+        self.effects.save_prefs = true;
+    }
+
+    /// Pins the owner keys that must sign a release too (`set ota.owner`, the `ota_owner` custom
+    /// variable); false while no root is pinned, as an owner key means nothing without one.
+    fn pin_ota_owners(&mut self, owners: Vec<release::Fingerprint>) -> bool {
+        if !owners.is_empty() && self.prefs.ota_roots.is_empty() {
+            return false;
+        }
+        self.ota.owners = owners.clone();
+        self.prefs.ota_owners = owners;
+        self.effects.save_prefs = true;
+        true
+    }
+
+    /// Updates: the keys a release must be signed by (`set|get ota.root`, `ota.owner`, as on a
+    /// repeater), and those pulled from a neighbouring repeater: `fw update`, `fw status`,
+    /// `set|get fw.pull`, `fw.channel`, `fw.source`. The keys are never set by a `remote`
+    /// contact: a companion takes no firmware over the mesh until a root is pinned, and pinning
+    /// one is what lets a repeater hand it firmware.
+    fn handle_fw_command(&mut self, remote: bool, cmd: &str) -> Option<String> {
         let save = |c: &mut Self, r: &str| {
             c.effects.save_prefs = true;
             String::from(r)
         };
+        let bad_keys = || format!("Error: up to {} fingerprints of 64 hex digits, or off", release::MAX_ROOTS);
         Some(match cmd {
+            "get ota.root" => {
+                let b = &self.ota.build;
+                let build = format!("{}/{} #{}", release::board_name(b.board), release::role_name(b.role), b.counter);
+                match self.prefs.ota_roots.is_empty() {
+                    true => format!("> none, unsigned updates accepted, none pulled ({build})"),
+                    false => format!("> {} ({build})", release::join_fingerprints(&self.prefs.ota_roots, ", ")),
+                }
+            }
+            "get ota.owner" => match (self.prefs.ota_owners.is_empty(), self.prefs.ota_roots.is_empty()) {
+                (true, _) => "> none, the root's signature is enough".into(),
+                (false, true) => format!("> {} (no root pinned: not checked)", release::join_fingerprints(&self.prefs.ota_owners, ", ")),
+                (false, false) => format!("> {}", release::join_fingerprints(&self.prefs.ota_owners, ", ")),
+            },
             "fw update" => match self.fw_update_now() {
                 Ok(r) => format!("OK - {r}"),
                 Err(e) => format!("Error: {e}"),
@@ -1067,8 +1096,31 @@ impl Companion {
             "get fw.channel" => format!("> {}", release::channel_name(self.prefs.fw_channel)),
             "get fw.source" if self.prefs.fw_source.is_empty() => "> auto".into(),
             "get fw.source" => format!("> {}", crate::util::to_hex(&self.prefs.fw_source)),
+            _ if remote && (cmd.starts_with("set ota.root ") || cmd.starts_with("set ota.owner ")) => {
+                "Error: release keys are set only in the app or over USB".into()
+            }
             _ => {
-                if let Some(v) = cmd.strip_prefix("set fw.pull ") {
+                if let Some(v) = cmd.strip_prefix("set ota.root ") {
+                    let Some(roots) = parse_keys(v) else {
+                        return Some(bad_keys());
+                    };
+                    self.pin_ota_roots(roots);
+                    match self.prefs.ota_roots.is_empty() {
+                        true => "OK - unsigned updates accepted, none pulled".into(),
+                        false => format!("OK - only releases signed by {} are installed", release::join_fingerprints(&self.prefs.ota_roots, ", ")),
+                    }
+                } else if let Some(v) = cmd.strip_prefix("set ota.owner ") {
+                    let Some(owners) = parse_keys(v) else {
+                        return Some(bad_keys());
+                    };
+                    if !self.pin_ota_owners(owners) {
+                        return Some("Error: pin the root key first (set ota.root)".into());
+                    }
+                    match self.prefs.ota_owners.is_empty() {
+                        true => "OK - the root's signature is enough".into(),
+                        false => format!("OK - a release must be signed by {} too", release::join_fingerprints(&self.prefs.ota_owners, ", ")),
+                    }
+                } else if let Some(v) = cmd.strip_prefix("set fw.pull ") {
                     match v.trim() {
                         "off" => self.prefs.fw_pull = FW_PULL_OFF,
                         "on" => self.prefs.fw_pull = FW_PULL_ON,
@@ -1097,12 +1149,12 @@ impl Companion {
         })
     }
 
-    fn handle_command_inner(&mut self, cmd: &str) -> Option<String> {
+    fn handle_command_inner(&mut self, remote: bool, cmd: &str) -> Option<String> {
         if let Some(r) = self.handle_radio_command(cmd) {
             self.effects.save_prefs = true;
             return Some(r);
         }
-        if let Some(r) = self.handle_fw_command(cmd) {
+        if let Some(r) = self.handle_fw_command(remote, cmd) {
             return Some(r);
         }
         let p = &mut self.prefs;

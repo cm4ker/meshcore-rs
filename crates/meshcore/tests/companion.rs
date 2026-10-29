@@ -856,6 +856,39 @@ fn companion_ota_root_custom_var() {
     assert!(a.app.ota.owners.is_empty());
 }
 
+/// The same keys from the companion's CLI, with a repeater's commands; never from a contact's
+/// remote CLI, as pinning a root is what lets a repeater hand the companion firmware.
+#[test]
+fn companion_ota_root_cli() {
+    let mut c = companion(1, "Alice");
+    let local = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
+    let remote = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, true, s);
+    let (root, a, b) = ("9a".repeat(32), "3c".repeat(32), "0b".repeat(32));
+    assert!(local(&mut c, "get ota.root").starts_with("> none, unsigned updates accepted, none pulled ("));
+    assert_eq!(local(&mut c, "set ota.root 12ab"), "Error: up to 4 fingerprints of 64 hex digits, or off");
+    let refused = "Error: release keys are set only in the app or over USB";
+    assert_eq!(remote(&mut c, &format!("set ota.root {root}")), refused);
+    assert!(c.app.ota.roots.is_empty());
+    assert_eq!(local(&mut c, &format!("set ota.owner {a}")), "Error: pin the root key first (set ota.root)");
+
+    assert_eq!(local(&mut c, &format!("set ota.root {root}")), format!("OK - only releases signed by {root} are installed"));
+    assert!(c.app.take_effects().save_prefs);
+    assert_eq!(c.app.ota.roots, vec![[0x9a; 32]]);
+    assert!(c.app.prefs.serialize().contains(&format!("ota_root={root}\n")));
+    assert!(remote(&mut c, "get ota.root").starts_with(&format!("> {root} (")));
+    assert_eq!(remote(&mut c, "set ota.root off"), refused);
+    assert!(local(&mut c, "fw update").starts_with("Error: no update slot"), "the root is in: only the slot is missing");
+
+    assert_eq!(remote(&mut c, &format!("set ota.owner {a}")), refused);
+    assert_eq!(local(&mut c, &format!("set ota.owner {a},{b}")), format!("OK - a release must be signed by {a}, {b} too"));
+    assert_eq!(c.app.ota.owners, vec![[0x3c; 32], [0x0b; 32]]);
+    assert_eq!(local(&mut c, "get ota.owner"), format!("> {a}, {b}"));
+    assert_eq!(local(&mut c, "set ota.owner off"), "OK - the root's signature is enough");
+    assert_eq!(local(&mut c, "get ota.owner"), "> none, the root's signature is enough");
+    assert_eq!(local(&mut c, "set ota.root off"), "OK - unsigned updates accepted, none pulled");
+    assert!(c.app.ota.roots.is_empty());
+}
+
 /// `ota.owner`: a release must carry an owner's signature as well as the root's. The same rule as
 /// for the root: an admin may pin the first one, a change takes the serial console.
 #[test]
@@ -1284,9 +1317,9 @@ fn a_dev_release_reaches_only_the_nodes_that_follow_dev() {
     assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Idle { up_to_date: true }, "stable: a dev release is no update");
 
     // following dev, and with `fw_pull` off: `fw update` fetches it and installs it at once
-    assert_eq!(c.app.handle_command(&mut c.ctx, "set fw.channel dev"), "OK");
-    assert_eq!(c.app.handle_command(&mut c.ctx, "set fw.pull off"), "OK");
-    assert!(c.app.handle_command(&mut c.ctx, "fw update").starts_with("OK - asking the repeater"));
+    assert_eq!(c.app.handle_command(&mut c.ctx, false, "set fw.channel dev"), "OK");
+    assert_eq!(c.app.handle_command(&mut c.ctx, false, "set fw.pull off"), "OK");
+    assert!(c.app.handle_command(&mut c.ctx, false, "fw update").starts_with("OK - asking the repeater"));
     air.run(&mut [&mut r, &mut c], 60_000);
     assert!(slot.borrow().1, "installed");
     assert!(c.app.take_effects().reboot);
@@ -1331,7 +1364,7 @@ fn fw_update_by_hand_does_not_take_the_repeaters_old_answer() {
     assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Idle { up_to_date: true });
 
     // asked by hand, the repeater asks its server again: the update comes and installs itself
-    assert!(c.app.handle_command(&mut c.ctx, "fw update").starts_with("OK"));
+    assert!(c.app.handle_command(&mut c.ctx, false, "fw update").starts_with("OK"));
     air.run(&mut [&mut r, &mut c], 60_000);
     assert!(slot.borrow().1, "installed");
     assert!(c.app.take_effects().reboot);

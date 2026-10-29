@@ -162,7 +162,7 @@ impl Companion {
     /// restarts), whatever `fw_pull` says. An update already fetched is installed at once.
     pub fn fw_update_now(&mut self) -> Result<String, String> {
         if self.ota.roots.is_empty() {
-            return Err("pin the release root key first (ota_root)".into());
+            return Err("pin the release root key first (set ota.root)".into());
         }
         if self.ota.target.is_none() {
             return Err("no update slot on this device".into());
