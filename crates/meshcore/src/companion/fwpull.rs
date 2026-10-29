@@ -146,7 +146,7 @@ impl Companion {
     pub fn fw_status_text(&self) -> String {
         match &self.fwpull.status {
             FwPullStatus::Off => "off".into(),
-            FwPullStatus::NotTrusted => "needs a pinned root key (ota_root)".into(),
+            FwPullStatus::NotTrusted => "needs a pinned root key (set ota.root)".into(),
             FwPullStatus::Idle { up_to_date: true } => "up to date".into(),
             FwPullStatus::Idle { up_to_date: false } => "waiting".into(),
             FwPullStatus::NoRepeater => "no repeater heard directly".into(),
