@@ -106,6 +106,20 @@ fn write(path: &str, data: &[u8]) {
     std::fs::write(path, data).unwrap_or_else(|e| fail(format!("{path}: {e}")))
 }
 
+/// A new file only its owner can read (on Unix; on Windows it takes the folder's access rights).
+fn write_secret(path: &str, data: &[u8]) {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path).unwrap_or_else(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => fail(format!("{path} exists, not overwriting a key")),
+        _ => fail(format!("{path}: {e}")),
+    });
+    file.write_all(data).unwrap_or_else(|e| fail(format!("{path}: {e}")))
+}
+
 /// The envelope and the image of a `.mcfw` file.
 fn open(path: &str) -> (Envelope, Vec<u8>) {
     let data = read(path);
@@ -223,12 +237,9 @@ fn main() -> ExitCode {
     match command.as_str() {
         "keygen" => {
             let path = args.file(0);
-            if std::path::Path::new(path).exists() {
-                fail(format!("{path} exists, not overwriting a key"));
-            }
             let mut seed = [0u8; 32];
             getrandom::fill(&mut seed).unwrap_or_else(|e| fail(format!("no randomness: {e}")));
-            write(path, format!("{}\n", to_hex(&seed).to_ascii_lowercase()).as_bytes());
+            write_secret(path,format!("{}\n", to_hex(&seed).to_ascii_lowercase()).as_bytes());
             println!("key written to {path}: keep it secret, devices pin the fingerprint");
             print_key(&LocalIdentity::from_seed(&seed));
         }

@@ -8,6 +8,9 @@
 # The root key is the secret MCFW_ROOT_KEY (the 32-byte seed in hex, from `ota-sign keygen`).
 # Its fingerprint is published with every release (root.txt).
 #
+# The actions are pinned by commit: the toolchain action's code runs where the signed images are
+# built. Releases are made from master only.
+#
 # A release carries only the boards and roles whose code changed, so the others don't update for
 # nothing. Each image is built once more with no release number and a fixed date (MCFW_COUNTER=0,
 # SOURCE_DATE_EPOCH=0); the hash of that build (<board>-<role>.content) changes only with the
@@ -49,16 +52,16 @@ jobs:
     name: Tests (protocol core and tools)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - run: cargo test --workspace
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: cargo test --workspace --locked
 
   esp32s3:
     name: Heltec V4 and V3 (ESP32-S3)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
-      - uses: esp-rs/xtensa-toolchain@v1.6
+      - uses: esp-rs/xtensa-toolchain@67649b28a0139171102259d9982f93106aa2b54a # v1.6.0
         with:
           default: true
           buildtargets: esp32s3
@@ -69,24 +72,24 @@ jobs:
         working-directory: firmware/models/heltec-v4
         run: |
           mkdir -p ../../../content
-          cargo build --release
+          cargo build --locked --release
           espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../heltec-v4-repeater.bin
           espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/companion ../../../heltec-v4-companion.bin
-          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --release
+          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --locked --release
           espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../content/heltec-v4-repeater.bin
           espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/companion ../../../content/heltec-v4-companion.bin
       - name: Heltec V3
         working-directory: firmware/models/heltec-v4
         run: |
-          cargo build --release --features heltec-v3
+          cargo build --locked --release --features heltec-v3
           espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../heltec-v3-repeater.bin
           espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/companion ../../../heltec-v3-companion.bin
-          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --release --features heltec-v3
+          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --locked --release --features heltec-v3
           espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../content/heltec-v3-repeater.bin
           espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/companion ../../../content/heltec-v3-companion.bin
       - name: Content hashes
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: images-esp32s3
           path: |
@@ -97,7 +100,7 @@ jobs:
     name: XIAO ESP32-C6
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
       - run: rustup toolchain install
         working-directory: firmware/models/xiao-c6
@@ -105,13 +108,13 @@ jobs:
       - working-directory: firmware/models/xiao-c6
         run: |
           mkdir -p ../../../content
-          cargo build --release
+          cargo build --locked --release
           espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/companion ../../../xiao-c6-companion.bin
-          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --release
+          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --locked --release
           espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/companion ../../../content/xiao-c6-companion.bin
       - name: Content hashes
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: images-esp32c6
           path: |
@@ -122,7 +125,7 @@ jobs:
     name: LilyGO T-Echo (nRF52840)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
       # nrf-sdc and nrf-mpsl generate their bindings with libclang
       - run: sudo apt-get update && sudo apt-get install -y libclang-dev
@@ -131,13 +134,13 @@ jobs:
       - working-directory: firmware/models/t-echo
         run: |
           mkdir -p ../../../content
-          cargo build --release
+          cargo build --locked --release
           python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../t-echo-companion.uf2 --bin ../../../t-echo-companion.bin
-          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --release
+          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --locked --release
           python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../content/t-echo-companion.uf2 --bin ../../../content/t-echo-companion.bin
       - name: Content hashes
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: images-nrf52840
           path: |
@@ -153,12 +156,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: images
           merge-multiple: true
-      - run: cargo build --release -p ota-sign
+      - run: cargo build --locked --release -p ota-sign
       - name: Pack and sign
         env:
           MCFW_ROOT_KEY: ${{ secrets.MCFW_ROOT_KEY }}
@@ -166,6 +169,16 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$MCFW_ROOT_KEY" || { echo "the MCFW_ROOT_KEY secret is not set"; exit 1; }
+          test "$GITHUB_REF" = refs/heads/master || { echo "releases are made from master only, not $GITHUB_REF"; exit 1; }
+          [[ "$MCFW_VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]] || { echo "version '$MCFW_VERSION': letters, digits, '.', '+' and '-' only"; exit 1; }
+          # devices never install a lower counter than they run: one far ahead (a typo such as
+          # 4294967295) would leave them refusing every later release, until a USB update
+          [[ "$MCFW_COUNTER" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "counter '$MCFW_COUNTER' is not a release number"; exit 1; }
+          last=$(gh release list --limit 100 --exclude-drafts --json tagName -q '.[].tagName' | sed -n 's/.*-r\([0-9]\+\)$/\1/p' | sort -n | tail -1)
+          last=${last:-0}
+          test "$MCFW_COUNTER" -gt "$last" || { echo "counter $MCFW_COUNTER: release #$last is out, devices that run it would refuse this one"; exit 1; }
+          limit=$(( (last > GITHUB_RUN_NUMBER ? last : GITHUB_RUN_NUMBER) + 1000 ))
+          test "$MCFW_COUNTER" -le "$limit" || { echo "counter $MCFW_COUNTER is far ahead of release #$last and run #$GITHUB_RUN_NUMBER (a typo?)"; exit 1; }
           sign=target/release/ota-sign
           root=$($sign fingerprint --key-env MCFW_ROOT_KEY | awk '/fingerprint/{print $2}')
           test "$root" = "$MCFW_RELEASE_ROOT" || { echo "MCFW_ROOT_KEY is not the root the images pin ($MCFW_RELEASE_ROOT)"; exit 1; }
