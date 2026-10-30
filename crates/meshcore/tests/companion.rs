@@ -584,6 +584,11 @@ fn cli_settings_signing_and_keys() {
     assert_eq!(cli(&mut a, "get tx"), "> 22");
     assert_eq!(cli(&mut a, "bogus"), "Unknown command");
     assert!(a.app.take_effects().save_prefs);
+    // a key prefix whose hex half ends inside a letter of two bytes: an error, not a panic
+    assert!(cli(&mut a, "set fw.source aaaaaaaé").starts_with("Error"));
+    let mut f = vec![CMD_SET_CUSTOM_VAR];
+    f.extend_from_slice("fw_source:aaaaaaaé".as_bytes());
+    assert_eq!(cmd(&mut a, &f), vec![vec![RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG]]);
 
     // radio params from the app
     let mut f = vec![CMD_SET_RADIO_PARAMS];
@@ -731,6 +736,33 @@ fn ota_over_the_app_link() {
     assert!(a.app.take_effects().reboot);
 }
 
+/// Anyone on the LAN reaches the TCP port, as upstream's: it serves the app as usual, but with no
+/// root pinned an update over it doesn't begin.
+#[test]
+fn ota_over_tcp_needs_a_pinned_root() {
+    use meshcore::ota::*;
+
+    let (flash, target) = ram_target(ESP_CHIP_ID_ESP32C6);
+    let mut a = companion(1, "Alice");
+    a.app.ota.target = Some(target);
+    let mut open = |f: &[u8]| {
+        frames(&mut a);
+        a.app.handle_open_frame(&mut a.ctx, f);
+        frames(&mut a)
+    };
+    assert_eq!(open(&[REQ_TYPE_OTA_INFO])[0][1], 1, "has target");
+    assert_eq!(open(&[CMD_DEVICE_QUERY, 3])[0][0], RESP_CODE_DEVICE_INFO, "the app is served");
+
+    let img = test_image(ESP_CHIP_ID_ESP32C6);
+    let mut begin = vec![REQ_TYPE_OTA_BEGIN];
+    begin.extend_from_slice(&(img.len() as u32).to_le_bytes());
+    begin.extend_from_slice(&[0; 32]);
+    begin.extend_from_slice(&172u16.to_le_bytes());
+    assert_eq!(open(&begin), [vec![REQ_TYPE_OTA_BEGIN, OtaError::NoRoot as u8, 0, 0]]);
+    assert_eq!(open(&[REQ_TYPE_OTA_STATUS, 0, 0])[0][1], OtaError::NoSession as u8);
+    assert!(!flash.borrow().activated);
+}
+
 /// `start ota ble` on a repeater: a fresh PIN for the admin, then the update over the BLE link
 /// with the companion's requests (and its device query, which the update tool asks first).
 #[test]
@@ -808,7 +840,7 @@ fn repeater_ota_root_cli() {
     let serial = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
     let remote = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 1_800_000_000, c);
     let (a, b) = ("9a".repeat(32), "0b".repeat(32));
-    assert!(serial(&mut r, "get ota.root").starts_with("> none, unsigned updates accepted (?/repeater #"));
+    assert!(serial(&mut r, "get ota.root").starts_with("> none, unsigned updates accepted over BLE, Wi-Fi and USB, none over LoRa (?/repeater #"));
     assert_eq!(remote(&mut r, "set ota.root 12ab"), "Error: up to 4 fingerprints of 64 hex digits, or off");
     assert_eq!(remote(&mut r, &format!("set ota.root {a}")), format!("OK - only releases signed by {a} are installed"));
     assert_eq!(r.app.ota.roots, vec![[0x9a; 32]]);
@@ -820,7 +852,7 @@ fn repeater_ota_root_cli() {
     assert_eq!(remote(&mut r, &format!("set ota.root {a}")), "OK", "unchanged");
     assert_eq!(serial(&mut r, &format!("set ota.root {a},{b}")), format!("OK - only releases signed by {a}, {b} are installed"));
     assert!(serial(&mut r, "get ota.root").starts_with(&format!("> {a}, {b} (")));
-    assert_eq!(serial(&mut r, "set ota.root off"), "OK - unsigned updates accepted");
+    assert_eq!(serial(&mut r, "set ota.root off"), "OK - unsigned updates accepted over BLE, Wi-Fi and USB, none over LoRa");
     assert!(r.app.ota.roots.is_empty());
 }
 
@@ -864,7 +896,7 @@ fn companion_ota_root_cli() {
     let local = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
     let remote = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, true, s);
     let (root, a, b) = ("9a".repeat(32), "3c".repeat(32), "0b".repeat(32));
-    assert!(local(&mut c, "get ota.root").starts_with("> none, unsigned updates accepted, none pulled ("));
+    assert!(local(&mut c, "get ota.root").starts_with("> none, unsigned updates accepted over BLE and USB, none pulled ("));
     assert_eq!(local(&mut c, "set ota.root 12ab"), "Error: up to 4 fingerprints of 64 hex digits, or off");
     let refused = "Error: release keys are set only in the app or over USB";
     assert_eq!(remote(&mut c, &format!("set ota.root {root}")), refused);
@@ -885,7 +917,7 @@ fn companion_ota_root_cli() {
     assert_eq!(local(&mut c, "get ota.owner"), format!("> {a}, {b}"));
     assert_eq!(local(&mut c, "set ota.owner off"), "OK - the root's signature is enough");
     assert_eq!(local(&mut c, "get ota.owner"), "> none, the root's signature is enough");
-    assert_eq!(local(&mut c, "set ota.root off"), "OK - unsigned updates accepted, none pulled");
+    assert_eq!(local(&mut c, "set ota.root off"), "OK - unsigned updates accepted over BLE and USB, none pulled");
     assert!(c.app.ota.roots.is_empty());
 }
 

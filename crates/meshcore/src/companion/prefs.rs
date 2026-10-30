@@ -123,7 +123,7 @@ impl Default for CompanionPrefs {
             gps_enabled: false,
             gps_interval: 0,
             round_trip_path: false,
-            ota_roots: Vec::new(),
+            ota_roots: crate::release::default_roots(),
             ota_owners: Vec::new(),
             fw_pull: 0,
             fw_source: Vec::new(),

@@ -817,7 +817,9 @@ impl<A: MeshApp> Mesh<A> {
     fn handle_peer_datagram(ctx: &mut MeshCtx, app: &mut A, pkt: &Packet, src_hash: u8) -> bool {
         let num = app.search_peers_by_hash(ctx, src_hash);
         for j in 0..num {
-            let Some(secret) = app.peer_shared_secret(ctx, j) else {
+            // a peer whose key gave no secret is kept with zeros (an ACL entry, say): such a
+            // "secret" is no secret, and a packet anyone can make must not pass for theirs
+            let Some(secret) = app.peer_shared_secret(ctx, j).filter(|s| *s != [0; PUB_KEY_SIZE]) else {
                 continue;
             };
             let mut data = [0u8; MAX_PACKET_PAYLOAD];

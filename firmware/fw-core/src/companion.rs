@@ -519,7 +519,11 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             Either3::Second((link, frame)) => {
                 reply_to = link;
                 mesh.ctx.now = now_ms();
-                mesh.app.handle_frame(&mut mesh.ctx, &frame);
+                // USB is at hand and BLE paired with a passkey; anyone on the LAN reaches TCP
+                match link {
+                    Link::Tcp => mesh.app.handle_open_frame(&mut mesh.ctx, &frame),
+                    _ => mesh.app.handle_frame(&mut mesh.ctx, &frame),
+                }
             }
             Either3::Third(()) => {}
         }

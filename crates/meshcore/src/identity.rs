@@ -93,7 +93,9 @@ fn derive_pub(prv: &[u8; PRV_KEY_SIZE]) -> [u8; PUB_KEY_SIZE] {
 fn key_exchange(prv: &[u8; PRV_KEY_SIZE], other_pub: &[u8; PUB_KEY_SIZE]) -> Option<Secret> {
     let point = CompressedEdwardsY(*other_pub).decompress()?;
     let scalar: [u8; 32] = prv[..32].try_into().unwrap();
-    Some(point.to_montgomery().mul_clamped(scalar).to_bytes())
+    let secret = point.to_montgomery().mul_clamped(scalar).to_bytes();
+    // a point of small order gives all zeros, a "secret" everyone can compute
+    (secret != [0; PUB_KEY_SIZE]).then_some(secret)
 }
 
 impl LocalIdentity {
@@ -133,7 +135,8 @@ impl LocalIdentity {
         raw_sign::<Sha512>(&esk, message, &vk).to_bytes()
     }
 
-    /// ECDH shared secret with a peer (`None` if their key is not a valid curve point).
+    /// ECDH shared secret with a peer (`None` if their key is not a valid curve point, or one of
+    /// small order: no private key belongs to it).
     pub fn calc_shared_secret(&self, other_pub: &[u8; PUB_KEY_SIZE]) -> Option<Secret> {
         key_exchange(&self.prv_key, other_pub)
     }
@@ -222,6 +225,16 @@ mod tests {
         );
         let ss = a.calc_shared_secret(b.pub_key()).unwrap();
         assert_eq!(hex::encode(ss), "d8d4bde871ffa6bbd5b6ad71e067ba502546e3d62de63e47cb703f6e47a16658");
+    }
+
+    #[test]
+    fn keys_nobody_holds_give_no_secret() {
+        let a = LocalIdentity::from_seed(&[1; 32]);
+        let mut identity = [0u8; PUB_KEY_SIZE];
+        identity[0] = 1; // the neutral point, of order 1
+        assert_eq!(a.calc_shared_secret(&identity), None);
+        let off_curve = (2u8..).map(|k| [k; PUB_KEY_SIZE]).find(|k| CompressedEdwardsY(*k).decompress().is_none());
+        assert_eq!(a.calc_shared_secret(&off_curve.unwrap()), None);
     }
 
     #[test]

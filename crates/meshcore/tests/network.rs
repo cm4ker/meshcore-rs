@@ -323,10 +323,24 @@ fn payload_crypto_roundtrip_through_builders() {
     assert_eq!(m, 16);
 }
 
+/// `setperm` with a mistyped key that is no curve point: refused, as it would give no secret
+/// (kept with zeros, it would match packets anyone can make).
+#[test]
+fn setperm_refuses_a_key_that_gives_no_secret() {
+    let mut r = repeater(1);
+    let me = r.ctx.self_id.clone();
+    let hex = |k: &[u8]| k.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let bad = (2u8..).map(|k| [k; 32]).find(|k| me.calc_shared_secret(k).is_none()).unwrap();
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, &format!("setperm {} 3", hex(&bad))), "Err - invalid params");
+    let good = LocalIdentity::from_seed(&[9; 32]);
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, &format!("setperm {} 3", hex(good.pub_key()))), "OK");
+}
+
 /// Full LoRa firmware update through admin requests, as the host tool drives it.
 #[test]
 fn lora_ota_update() {
-    use meshcore::ota::{FirmwareTarget, LORA_CHUNK_SIZE};
+    use meshcore::ota::{FirmwareTarget, LORA_CHUNK_SIZE, OtaError, REQ_TYPE_OTA_MANIFEST};
+    use meshcore::release::{Envelope, Manifest, board, role};
     use meshcore::repeater::*;
     use sha2::{Digest, Sha256};
     use std::cell::RefCell;
@@ -415,6 +429,35 @@ fn lora_ota_update() {
     begin.extend_from_slice(&(img.len() as u32).to_le_bytes());
     begin.extend_from_slice(&sha);
     begin.extend_from_slice(&LORA_CHUNK_SIZE.to_le_bytes());
+    // the admin password alone installs nothing over LoRa: only a release a pinned root signed
+    assert_eq!(req(&begin, &mut r, &mut c).unwrap()[..3], [OtaError::NoRoot as u8, 0, 0]);
+
+    let root = LocalIdentity::from_seed(&[0x5A; 32]);
+    r.app.ota.roots = vec![meshcore::release::fingerprint(root.pub_key())];
+    r.app.ota.build.board = board::HELTEC_V4;
+    r.app.ota.build.counter = 4; // whatever MCFW_COUNTER this test was built with
+    let manifest = Manifest {
+        board: board::HELTEC_V4,
+        role: role::REPEATER,
+        flags: 0,
+        counter: 5,
+        image_len: img.len() as u32,
+        image_sha256: sha,
+        issued: 0,
+        version: "test".into(),
+    };
+    let mut env = Envelope { manifest, signatures: Vec::new() };
+    env.add_signature(*root.pub_key(), root.sign(&Envelope::signed_message(&env.manifest)));
+    let env = env.to_bytes();
+    for (k, piece) in env.chunks(100).enumerate() {
+        let mut m = vec![REQ_TYPE_OTA_MANIFEST];
+        m.extend_from_slice(&((k * 100) as u16).to_le_bytes());
+        m.extend_from_slice(&(env.len() as u16).to_le_bytes());
+        m.push(piece.len() as u8);
+        m.extend_from_slice(piece);
+        assert_eq!(req(&m, &mut r, &mut c).unwrap()[0], 0);
+    }
+
     let b = req(&begin, &mut r, &mut c).unwrap();
     assert_eq!(b[0], 0);
     let total = u16::from_le_bytes([b[1], b[2]]) as usize;

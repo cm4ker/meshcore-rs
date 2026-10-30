@@ -36,6 +36,9 @@ on:
         required: false
 
 env:
+  # The root key's fingerprint (root.txt of every release). The images pin it from the start
+  # (MCFW_ROOT at build time), and the release step refuses a signing key that isn't this root.
+  MCFW_RELEASE_ROOT: 7da3cdc4aca52140a5e650646d58df737625536027bd16e78fa50f1b88a012ea
   MCFW_COUNTER: ${{ inputs.counter || github.run_number }}
   MCFW_VERSION: ${{ inputs.version }}
   MCFW_CHANNEL: ${{ inputs.channel || 'dev' }}
@@ -54,6 +57,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
       - uses: esp-rs/xtensa-toolchain@v1.6
         with:
           default: true
@@ -94,6 +98,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
       - run: rustup toolchain install
         working-directory: firmware/models/xiao-c6
       - run: cargo install espflash --version 4.6.0 --locked
@@ -118,6 +123,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
       # nrf-sdc and nrf-mpsl generate their bindings with libclang
       - run: sudo apt-get update && sudo apt-get install -y libclang-dev
       - run: rustup toolchain install
@@ -161,6 +167,8 @@ jobs:
           set -euo pipefail
           test -n "$MCFW_ROOT_KEY" || { echo "the MCFW_ROOT_KEY secret is not set"; exit 1; }
           sign=target/release/ota-sign
+          root=$($sign fingerprint --key-env MCFW_ROOT_KEY | awk '/fingerprint/{print $2}')
+          test "$root" = "$MCFW_RELEASE_ROOT" || { echo "MCFW_ROOT_KEY is not the root the images pin ($MCFW_RELEASE_ROOT)"; exit 1; }
           mkdir -p out
           # the release this one follows, and the code its boards and roles run
           if [ "$MCFW_CHANNEL" = stable ]; then

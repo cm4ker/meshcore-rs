@@ -85,6 +85,11 @@ impl Board for TEcho {
         PAGES
     }
 
+    /// The e-paper shows a random pairing PIN, as upstream's T-Echo build does.
+    fn has_screen(&self) -> bool {
+        true
+    }
+
     fn show_view(&mut self, view: &View) {
         SCREEN.signal(view.clone());
     }

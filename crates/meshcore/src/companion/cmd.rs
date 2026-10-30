@@ -23,6 +23,16 @@ fn parse_keys(text: &str) -> Option<Vec<release::Fingerprint>> {
 impl Companion {
     /// Handle one command frame from the app; replies are queued for [`Self::take_frame`].
     pub fn handle_frame(&mut self, ctx: &mut MeshCtx, frame: &[u8]) {
+        self.handle_frame_from(ctx, frame, true);
+    }
+
+    /// [`Self::handle_frame`] for a frame from a link nobody authenticated (TCP, upstream's port
+    /// 5000): the same commands, but an update over it must be a release a pinned root signed.
+    pub fn handle_open_frame(&mut self, ctx: &mut MeshCtx, frame: &[u8]) {
+        self.handle_frame_from(ctx, frame, false);
+    }
+
+    fn handle_frame_from(&mut self, ctx: &mut MeshCtx, frame: &[u8], authenticated: bool) {
         let Some(&code) = frame.first() else {
             return;
         };
@@ -34,7 +44,10 @@ impl Companion {
         match code {
             // firmware update (this firmware's extension), same requests as over LoRa
             code if OtaEndpoint::is_request(code) => {
-                let (reply, outcome) = self.ota.handle(frame, FIRMWARE_VERSION);
+                let (reply, outcome) = match authenticated {
+                    true => self.ota.handle(frame, FIRMWARE_VERSION),
+                    false => self.ota.handle_remote(frame, FIRMWARE_VERSION),
+                };
                 if let Some(body) = reply {
                     let mut f = alloc::vec![code];
                     f.extend_from_slice(&body);
@@ -698,7 +711,7 @@ impl Companion {
                         let mut key = alloc::vec![0u8; (text.len() / 2).min(PUB_KEY_SIZE)];
                         if text == "auto" {
                             key.clear();
-                        } else if key.len() < 4 || !crate::util::from_hex(&mut key, &text[..(text.len() / 2).min(PUB_KEY_SIZE) * 2]) {
+                        } else if key.len() < 4 || !text.get(..key.len() * 2).is_some_and(|h| crate::util::from_hex(&mut key, h)) {
                             return self.write_err(ERR_CODE_ILLEGAL_ARG);
                         }
                         self.prefs.fw_source = key;
@@ -1078,7 +1091,7 @@ impl Companion {
                 let b = &self.ota.build;
                 let build = format!("{}/{} #{}", release::board_name(b.board), release::role_name(b.role), b.counter);
                 match self.prefs.ota_roots.is_empty() {
-                    true => format!("> none, unsigned updates accepted, none pulled ({build})"),
+                    true => format!("> none, unsigned updates accepted over BLE and USB, none pulled ({build})"),
                     false => format!("> {} ({build})", release::join_fingerprints(&self.prefs.ota_roots, ", ")),
                 }
             }
@@ -1106,7 +1119,7 @@ impl Companion {
                     };
                     self.pin_ota_roots(roots);
                     match self.prefs.ota_roots.is_empty() {
-                        true => "OK - unsigned updates accepted, none pulled".into(),
+                        true => "OK - unsigned updates accepted over BLE and USB, none pulled".into(),
                         false => format!("OK - only releases signed by {} are installed", release::join_fingerprints(&self.prefs.ota_roots, ", ")),
                     }
                 } else if let Some(v) = cmd.strip_prefix("set ota.owner ") {
@@ -1139,7 +1152,7 @@ impl Companion {
                     let mut key = alloc::vec![0u8; (v.len() / 2).min(PUB_KEY_SIZE)];
                     if v == "auto" {
                         key.clear();
-                    } else if key.len() < 4 || !crate::util::from_hex(&mut key, &v[..(v.len() / 2).min(PUB_KEY_SIZE) * 2]) {
+                    } else if key.len() < 4 || !v.get(..key.len() * 2).is_some_and(|h| crate::util::from_hex(&mut key, h)) {
                         return Some("Error: a key prefix of 8+ hex digits, or auto".into());
                     }
                     self.prefs.fw_source = key;

@@ -15,7 +15,8 @@
 //! Once the device pins a root key ([`OtaEndpoint::roots`]), a session only begins after the
 //! envelope of a signed release (see [`crate::release`]) for this board and role, and for the
 //! very image announced in BEGIN, has been accepted: whoever delivers it, only a release signed by
-//! a pinned root is installed.
+//! a pinned root is installed. Without a pinned root, requests from afar (LoRa, the companion's
+//! TCP port) can't begin a session at all: see [`OtaEndpoint::handle_remote`].
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -136,6 +137,9 @@ pub enum OtaError {
     BadEnvelope = 14,
     /// Owner keys are pinned and none of them signed the release.
     NotOwner = 15,
+    /// The request came over the mesh or an open link, which installs only signed releases, and
+    /// no root is pinned to check them against.
+    NoRoot = 16,
 }
 
 impl From<Refusal> for OtaError {
@@ -395,6 +399,11 @@ impl ImageWriter {
     fn new(size: u32) -> Self {
         Self { size, written: 0, sector: Vec::with_capacity(SECTOR_SIZE as usize) }
     }
+
+    /// Bytes the image still takes.
+    fn room(&self) -> u64 {
+        self.size as u64 - self.written as u64 - self.sector.len() as u64
+    }
 }
 
 impl Sink for ImageWriter {
@@ -467,7 +476,11 @@ impl Sink for Patcher {
                         let field = |i: usize| u64::from_le_bytes(record[i..i + 8].try_into().unwrap());
                         let (mix, copy, raw_seek) = (field(0), field(8), field(16));
                         let seek = if raw_seek >> 63 == 0 { raw_seek as i64 } else { -((raw_seek & !(1 << 63)) as i64) };
-                        if self.base_pos as u64 + mix > self.base_len as u64 {
+                        // the patch isn't signed (only the image it makes is): both lengths must
+                        // fit what is left, which also keeps them in a 32-bit `usize` below (cut
+                        // there, 2^32 bytes to go would turn into 0 and the loop would never end)
+                        let room = self.out.room();
+                        if self.base_pos as u64 + mix > self.base_len as u64 || mix.saturating_add(copy) > room {
                             return Err(OtaError::BadImage);
                         }
                         self.state = PatchState::Mix { left: mix, copy, seek };
@@ -604,6 +617,18 @@ impl OtaEndpoint {
     /// An update has begun and is neither committed nor aborted.
     pub fn busy(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// [`Self::handle`] for a request from afar: over LoRa, where an admin password is all it
+    /// takes, or over a link nobody authenticated (the companion's TCP port). Such a request
+    /// may install only a release a pinned root signed, so with no root an update can't begin.
+    pub fn handle_remote(&mut self, payload: &[u8], firmware_version: &str) -> (Option<Vec<u8>>, OtaOutcome) {
+        if payload.first() == Some(&REQ_TYPE_OTA_BEGIN) && self.roots.is_empty() {
+            self.requests = self.requests.wrapping_add(1);
+            self.session = None;
+            return (Some(vec![OtaError::NoRoot as u8, 0, 0]), OtaOutcome::None);
+        }
+        self.handle(payload, firmware_version)
     }
 
     /// Handle one request (`payload[0]` is its type); the reply body, if one is due.
@@ -1284,6 +1309,23 @@ mod tests {
         let h: [u8; 32] = Sha256::digest(&img).into();
         img.extend_from_slice(&h);
         img
+    }
+
+    /// A patch whose record asks for more than the image holds is refused on the spot: on a
+    /// 32-bit chip 2^32 bytes to copy used to turn into steps of 0 and hang the update.
+    #[test]
+    fn patch_lengths_beyond_the_image_are_refused() {
+        let mut t = RamTarget::new(64 * 1024, 0xFF, vec![0; 8192]);
+        let record = |mix: u64, copy: u64| [mix.to_le_bytes(), copy.to_le_bytes(), 0u64.to_le_bytes()].concat();
+        for (mix, copy) in [(0, 1 << 32), (0, u64::MAX), (100, 4997), (4000, 1001), (9000, 0)] {
+            let mut p = Patcher::new(5000, 8192);
+            assert_eq!(p.put(&mut t, &record(mix, copy)), Err(OtaError::BadImage), "mix {mix}, copy {copy}");
+        }
+        let mut p = Patcher::new(5000, 8192);
+        let mut stream = record(1000, 4000);
+        stream.extend_from_slice(&[0; 5000]);
+        assert_eq!(p.put(&mut t, &stream), Ok(()), "exactly the image");
+        assert_eq!(p.finish(&mut t), Ok(()));
     }
 
     fn send_all(s: &mut OtaSession, t: &mut RamTarget, data: &[u8]) {

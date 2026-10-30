@@ -50,7 +50,9 @@ ERRORS = {1: "no OTA slot", 2: "image too large", 3: "bad parameters", 4: "no se
           11: "the release is not signed by the root key the device pins",
           12: "the release is for another board or role", 13: "the release is older than the one the device runs",
           14: "unreadable release envelope",
-          15: "the release is not signed by the owner key the device pins (sign it on the release server)"}
+          15: "the release is not signed by the owner key the device pins (sign it on the release server)",
+          16: "over LoRa or TCP the device takes only signed releases, and it pins no root key "
+              "(pin one with `set ota.root`, or update over BLE or USB)"}
 BOARDS = {1: "heltec-v4", 2: "heltec-v3", 3: "xiao-c6", 4: "t-echo"}
 ROLES = {1: "repeater", 2: "companion"}
 REPO = pathlib.Path(__file__).resolve().parents[2]

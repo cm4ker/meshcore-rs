@@ -163,7 +163,7 @@ impl Default for NodePrefs {
             bridge_source_rx: false,
             bridge_channel: 1,
             bridge_secret: "LVSITANOS".into(),
-            ota_roots: Vec::new(),
+            ota_roots: crate::release::default_roots(),
             ota_owners: Vec::new(),
             fw_serve: false,
             fw_server: "nw.ommesh.ru".into(),

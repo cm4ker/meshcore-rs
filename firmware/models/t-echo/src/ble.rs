@@ -1,8 +1,9 @@
 //! BLE companion interface on the nRF52840, as upstream's `SerialBLEInterface`: the Nordic UART
 //! service, frames written to RX, answers notified on TX, over trouble-host with Nordic's
 //! SoftDevice Controller (the SoftDevice in flash stays unused). Both characteristics need an
-//! authenticated link: the phone pairs with a passkey (the app's PIN, else upstream's 123456),
-//! and the bonds are kept in the store so a paired phone reconnects without asking again.
+//! authenticated link: the phone pairs with a passkey (the app's PIN, else a random one on the
+//! e-paper, as upstream), and the bonds are kept in the store so a paired phone reconnects
+//! without asking again.
 
 use alloc::boxed::Box;
 use alloc::string::String;

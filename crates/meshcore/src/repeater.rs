@@ -514,9 +514,14 @@ impl Repeater {
             let Some(id) = Identity::from_slice(pubkey) else {
                 return false; // need the complete key to add/modify
             };
+            // a mistyped key may be no curve point at all: nobody could log in with it, and
+            // with no secret the entry would be good for nothing (upstream adds it anyway)
+            let Some(secret) = self_id.calc_shared_secret(&id.pub_key) else {
+                return false;
+            };
             let i = self.put_client(id, 0);
             self.acl[i].permissions = perms;
-            self.acl[i].shared_secret = self_id.calc_shared_secret(&id.pub_key).unwrap_or([0; PUB_KEY_SIZE]);
+            self.acl[i].shared_secret = secret;
         }
         true
     }
@@ -743,7 +748,7 @@ impl Repeater {
             if !self.acl[client_idx].is_admin() {
                 return Vec::new();
             }
-            let (reply, outcome) = self.ota.handle(payload, FIRMWARE_VERSION);
+            let (reply, outcome) = self.ota.handle_remote(payload, FIRMWARE_VERSION);
             self.ota_outcome(outcome);
             return match reply {
                 Some(body) => {
@@ -1890,16 +1895,18 @@ impl Repeater {
         let b = &self.ota.build;
         let build = format!("{}/{} #{}", release::board_name(b.board), release::role_name(b.role), b.counter);
         if self.prefs.ota_roots.is_empty() {
-            format!("> none, unsigned updates accepted ({build})")
+            format!("> none, unsigned updates accepted over BLE, Wi-Fi and USB, none over LoRa ({build})")
         } else {
             format!("> {} ({build})", release::join_fingerprints(&self.prefs.ota_roots, ", "))
         }
     }
 
     /// `set ota.root <fingerprint>[,<fingerprint>...]` pins the root keys whose signed releases
-    /// are installed; `set ota.root off` unpins them. The first pin may come from an admin, as an
-    /// admin can install any firmware until then; once a root is pinned only the serial console
-    /// changes it, so a leaked admin password can't swap the root along with the firmware.
+    /// are installed; `set ota.root off` unpins them. Over LoRa only such releases are taken:
+    /// with no root pinned, updates come over BLE, Wi-Fi or USB alone. The first pin may come
+    /// from an admin, as an admin can open the BLE update window until then; once a root is
+    /// pinned only the serial console changes it, so a leaked admin password can't swap the root
+    /// along with the firmware.
     fn set_ota_root(&mut self, serial: bool, value: &str) -> String {
         let value = value.trim();
         let roots = if value == "off" { Some(Vec::new()) } else { release::parse_fingerprints(value) };
@@ -1916,7 +1923,7 @@ impl Repeater {
         self.prefs.ota_roots = roots;
         self.save_prefs();
         if self.prefs.ota_roots.is_empty() {
-            "OK - unsigned updates accepted".into()
+            "OK - unsigned updates accepted over BLE, Wi-Fi and USB, none over LoRa".into()
         } else {
             format!("OK - only releases signed by {} are installed", release::join_fingerprints(&self.prefs.ota_roots, ", "))
         }

@@ -80,6 +80,13 @@ pub fn channel_by_name(name: &str) -> Option<u8> {
 /// Release number of this build, from `MCFW_COUNTER` at build time (0 for local builds).
 pub const RELEASE_COUNTER: u32 = parse_u32(option_env!("MCFW_COUNTER"));
 
+/// Root keys a device pins until told otherwise: the fingerprints in `MCFW_ROOT` at build time.
+/// The release build sets the project's root, so a node fresh from a release takes only signed
+/// updates over the air from the start; a local build pins none.
+pub fn default_roots() -> Vec<Fingerprint> {
+    option_env!("MCFW_ROOT").and_then(parse_fingerprints).unwrap_or_default()
+}
+
 /// How a build names itself to people (`ver`, the app's device info, logs): a release by its
 /// number, a local build by its date.
 pub fn build_label(build_date: &str) -> String {
