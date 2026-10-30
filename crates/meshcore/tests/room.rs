@@ -371,12 +371,14 @@ fn room_password_admin_cli_and_status() {
 
     // only admins are persisted, with their sync_since
     let acl = r.app.acl_serialize();
-    assert_eq!(acl.len(), 136);
+    assert_eq!(acl.len(), 136 + 2 + 4, "a record, then the timestamps");
     assert_eq!(&acl[..32], &admin.pub_key());
     let mut again = room_server(NodePrefs::room_server_defaults());
     let self_id = again.ctx.self_id.clone();
     again.app.acl_load(&acl, &self_id);
     assert!(again.app.clients()[0].is_admin());
+    let stamp = |m: &Mesh<Repeater>| m.app.clients().iter().find(|c| c.is_admin()).unwrap().last_timestamp;
+    assert_eq!(stamp(&again), stamp(&r));
 }
 
 /// The firmware's hosted room (`set room on`): repeater and room share one radio, so every

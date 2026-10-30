@@ -44,6 +44,13 @@ pub const PERM_ACL_ADMIN: u8 = 3;
 pub const OUT_PATH_UNKNOWN: u8 = 0xFF;
 
 pub const MAX_CLIENTS: usize = 32;
+/// Leads the clients' last timestamps after the ACL records (see [`Repeater::acl_serialize`]).
+const ACL_STAMPS_MAGIC: &[u8; 2] = b"TS";
+const _: () = assert!(2 + 4 * MAX_CLIENTS < 136, "the timestamps must stay shorter than a record");
+/// Wrong passwords taken in [`BAD_LOGINS_SECS`]; past them, no password is compared until the
+/// window ends.
+const BAD_LOGINS_MAX: u16 = 10;
+const BAD_LOGINS_SECS: u32 = 600;
 pub const MAX_NEIGHBOURS: usize = 50;
 
 const REQ_TYPE_GET_STATUS: u8 = 0x01;
@@ -143,6 +150,11 @@ struct RateLimiter {
 impl RateLimiter {
     const fn new(maximum: u16, secs: u32) -> Self {
         Self { start: 0, secs, maximum, count: 0 }
+    }
+
+    /// The window's allowance is used up (without counting anything).
+    fn exhausted(&self, now: u32) -> bool {
+        now < self.start.wrapping_add(self.secs) && self.count >= self.maximum
     }
 
     fn allow(&mut self, now: u32) -> bool {
@@ -277,6 +289,10 @@ pub struct Repeater {
     bridge_out: Vec<Vec<u8>>,
     /// Passphrase of the Wi-Fi update access point, made at the first `start ota`.
     wifi_ota_key: String,
+    /// Wrong passwords, whoever sent them (see [`Self::check_password`]).
+    bad_logins: RateLimiter,
+    /// An admin's last timestamp moved since the ACL was last saved.
+    stamps_dirty: bool,
 }
 
 fn read_u32(b: &[u8], at: usize) -> u32 {
@@ -339,6 +355,8 @@ impl Repeater {
             bridge,
             bridge_out: Vec::new(),
             wifi_ota_key: String::new(),
+            bad_logins: RateLimiter::new(BAD_LOGINS_MAX, BAD_LOGINS_SECS),
+            stamps_dirty: false,
         }
     }
 
@@ -379,6 +397,18 @@ impl Repeater {
     }
 
     pub fn take_effects(&mut self) -> Effects {
+        // before a restart the admins' last timestamps go to flash, or the packet that brought it
+        // about (`reboot`, an update) could be played again after it, and again
+        let fx = &self.effects;
+        if (fx.reboot || fx.network_changed || fx.bridge_changed || fx.power_off)
+            && (self.stamps_dirty || self.dirty_contacts_expiry != 0)
+        {
+            self.dirty_contacts_expiry = 0;
+            self.effects.save_acl = true;
+        }
+        if self.effects.save_acl {
+            self.stamps_dirty = false;
+        }
         core::mem::take(&mut self.effects)
     }
 
@@ -451,9 +481,12 @@ impl Repeater {
     }
 
     /// ACL in upstream's `/s_contacts` record format (136 bytes per client). A room server keeps
-    /// only its admins (upstream `saveFilter`).
+    /// only its admins (upstream `saveFilter`). Then `TS` and each client's last timestamp (u32),
+    /// so that their packets can't be played again after a restart (upstream keeps them in RAM
+    /// only); shorter than a record, older firmware reads past it.
     pub fn acl_serialize(&self) -> Vec<u8> {
         let mut out = Vec::new();
+        let mut stamps = Vec::from(&ACL_STAMPS_MAGIC[..]);
         let room = self.room.is_some();
         for c in self.acl.iter().filter(|c| c.permissions != 0 && (!room || c.is_admin())) {
             out.extend_from_slice(&c.id.pub_key);
@@ -463,13 +496,22 @@ impl Repeater {
             out.push(c.out_path_len);
             out.extend_from_slice(&c.out_path);
             out.extend_from_slice(&c.shared_secret);
+            stamps.extend_from_slice(&c.last_timestamp.to_le_bytes());
+        }
+        if !out.is_empty() {
+            out.extend_from_slice(&stamps);
         }
         out
     }
 
     pub fn acl_load(&mut self, data: &[u8], self_id: &LocalIdentity) {
         self.acl.clear();
-        for rec in data.as_chunks::<136>().0.iter().take(MAX_CLIENTS) {
+        let (records, rest) = data.as_chunks::<136>();
+        let stamps = rest
+            .strip_prefix(&ACL_STAMPS_MAGIC[..])
+            .filter(|s| s.len() == 4 * records.len())
+            .map(|s| s.as_chunks::<4>().0);
+        for (k, rec) in records.iter().take(MAX_CLIENTS).enumerate() {
             let id = Identity::from_slice(&rec[..32]).unwrap();
             let mut c = ClientInfo::new(id, rec[32]);
             c.room.sync_since = read_u32(rec, 33);
@@ -477,7 +519,41 @@ impl Repeater {
             c.out_path.copy_from_slice(&rec[40..104]);
             // recalculated in case our private key changed
             c.shared_secret = self_id.calc_shared_secret(&id.pub_key).unwrap_or([0; PUB_KEY_SIZE]);
+            c.last_timestamp = stamps.map_or(0, |s| u32::from_le_bytes(s[k]));
             self.acl.push(c);
+        }
+    }
+
+    /// An admin's packet moved its last timestamp: it reaches flash with the ACL before any
+    /// restart, and a command's also a few seconds later (a request's may wait: an app asks for
+    /// the status every few seconds, more writes than the flash should take).
+    fn note_admin_timestamp(&mut self, ctx: &MeshCtx, i: usize, is_command: bool) {
+        if self.acl[i].is_admin() {
+            self.stamps_dirty = true;
+            if is_command {
+                self.dirty_contacts_expiry = ctx.now + LAZY_CONTACTS_WRITE_DELAY;
+            }
+        }
+    }
+
+    /// Which password this is: `Some(true)` the admin's, `Some(false)` the guest's (a room's
+    /// password), `None` neither. Wrong ones are counted, whoever sends them (keys cost nothing):
+    /// past [`BAD_LOGINS_MAX`] in [`BAD_LOGINS_SECS`] none is compared until the window ends, so
+    /// a search for the password over LoRa takes ages. An empty one is no guess and isn't counted.
+    fn check_password(&mut self, ctx: &MeshCtx, password: &[u8]) -> Option<bool> {
+        let now = (ctx.now / 1000) as u32;
+        if self.bad_logins.exhausted(now) {
+            return None;
+        }
+        if password == self.prefs.password.as_bytes() {
+            Some(true)
+        } else if password == self.prefs.guest_password.as_bytes() {
+            Some(false)
+        } else {
+            if !password.is_empty() {
+                self.bad_logins.allow(now);
+            }
+            None
         }
     }
 
@@ -657,12 +733,10 @@ impl Repeater {
     ) -> bool {
         let mut client = if password.is_empty() { self.get_client(&sender.pub_key) } else { None };
         if client.is_none() {
-            let perms = if password == self.prefs.password.as_bytes() {
-                PERM_ACL_ADMIN
-            } else if password == self.prefs.guest_password.as_bytes() {
-                PERM_ACL_GUEST
-            } else {
-                return false;
+            let perms = match self.check_password(ctx, password) {
+                Some(true) => PERM_ACL_ADMIN,
+                Some(false) => PERM_ACL_GUEST,
+                None => return false,
             };
             let i = self.put_client(*sender, 0);
             let now = ctx.current_time();
@@ -1086,6 +1160,7 @@ impl MeshApp for Repeater {
             client.last_activity = now;
             let id = client.id;
             let out = client.out_path().map(|(l, p)| (l, p.to_vec()));
+            self.note_admin_timestamp(ctx, i, false);
             if pkt.is_route_flood() {
                 if let Some(path) = ctx.create_path_return(id.hash(), secret, pkt.path_len, &pkt.path, PAYLOAD_TYPE_RESPONSE, &reply) {
                     self.send_flood_reply(ctx, path, SERVER_RESPONSE_DELAY, phs);
@@ -1111,6 +1186,9 @@ impl MeshApp for Repeater {
             client.last_activity = now;
             let id = client.id;
             let out = client.out_path().map(|(l, p)| (l, p.to_vec()));
+            if !is_retry {
+                self.note_admin_timestamp(ctx, i, true);
+            }
             let text = c_str(&data[5..]);
 
             if flags == TXT_TYPE_PLAIN {

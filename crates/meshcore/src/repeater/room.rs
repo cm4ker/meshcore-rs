@@ -254,14 +254,11 @@ impl Repeater {
 
         let mut client = if password.is_empty() { self.get_client(&sender.pub_key) } else { None };
         if client.is_none() {
-            let perm = if password == self.prefs.password.as_bytes() {
-                PERM_ACL_ADMIN
-            } else if password == self.prefs.guest_password.as_bytes() {
-                PERM_ACL_READ_WRITE // the room password
-            } else if self.prefs.allow_read_only {
-                PERM_ACL_GUEST
-            } else {
-                return; // wrong room password: no response, the client times out
+            let perm = match self.check_password(ctx, password) {
+                Some(true) => PERM_ACL_ADMIN,
+                Some(false) => PERM_ACL_READ_WRITE, // the room password
+                None if self.prefs.allow_read_only => PERM_ACL_GUEST,
+                None => return, // wrong room password: no response, the client times out
             };
             let i = self.put_client(*sender, 0);
             if sender_timestamp <= self.acl[i].last_timestamp {
@@ -332,6 +329,9 @@ impl Repeater {
                 return; // replay; retries (same timestamp) still get their ACK
             }
             let is_retry = timestamp == self.acl[i].last_timestamp;
+            if !is_retry {
+                self.note_admin_timestamp(ctx, i, true);
+            }
             let now = ctx.current_time_unique();
             let c = &mut self.acl[i];
             c.last_timestamp = timestamp;
@@ -402,6 +402,7 @@ impl Repeater {
             if timestamp < self.acl[i].last_timestamp {
                 return; // replay
             }
+            self.note_admin_timestamp(ctx, i, false);
             let now = ctx.current_time();
             let c = &mut self.acl[i];
             c.last_timestamp = timestamp;

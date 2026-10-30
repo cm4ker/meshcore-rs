@@ -17,7 +17,9 @@ use embassy_time::{Duration, Timer};
 use log::{info, warn};
 use meshcore::companion::MAX_FRAME_SIZE;
 use meshcore_fw_core::frames::{FRAMES_IN, Link};
-use meshcore_fw_core::links::{BLE_CONNECTED, BLE_ENABLED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
+use meshcore_fw_core::links::{
+    BLE_CONNECTED, BLE_ENABLED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED, pairing_begins, pairing_succeeded,
+};
 use nrf_sdc::SoftdeviceController;
 use trouble_host::prelude::*;
 
@@ -230,10 +232,20 @@ async fn events<C: Controller>(
                 info!("BLE: disconnected ({reason:?})");
                 return;
             }
-            GattConnectionEvent::PassKeyDisplay(key) => BLE_PASSKEY.store(key.value().max(1), Ordering::Relaxed),
+            GattConnectionEvent::PassKeyDisplay(key) => {
+                if pairing_begins() {
+                    BLE_PASSKEY.store(key.value().max(1), Ordering::Relaxed);
+                } else {
+                    warn!("BLE: pairing refused after failed ones, try later");
+                    conn.raw().disconnect();
+                }
+            }
             GattConnectionEvent::PairingComplete { security_level, bond } => {
                 BLE_PASSKEY.store(0, Ordering::Relaxed);
                 info!("BLE: paired ({security_level:?})");
+                if security_level == SecurityLevel::EncryptedAuthenticated {
+                    pairing_succeeded();
+                }
                 if bond.is_some() {
                     BONDS_CHANGED.signal(stack.with_bond_information(serialize_bonds));
                 }

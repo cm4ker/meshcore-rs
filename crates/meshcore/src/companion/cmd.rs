@@ -1194,9 +1194,15 @@ impl Companion {
         } else if cmd == "get name" {
             format!("> {}", p.node_name)
         } else if let Some(v) = cmd.strip_prefix("set pin ") {
-            p.ble_pin = atoi(v);
-            self.effects.save_prefs = true;
-            format!("> pin is now {:06}", p.ble_pin)
+            // as CMD_SET_DEVICE_PIN: 0 (the default, or a random one on a screen) or six digits
+            let pin = atoi(v);
+            if pin == 0 || (100_000..=999_999).contains(&pin) {
+                p.ble_pin = pin;
+                self.effects.save_prefs = true;
+                format!("> pin is now {:06}", p.ble_pin)
+            } else {
+                "Error, the PIN is 0 or 6 digits".into()
+            }
         } else if let Some(v) = cmd.strip_prefix("set wifi.ssid ") {
             p.wifi_ssid = crate::util::truncate_str(v, 33);
             self.effects.save_prefs = true;

@@ -628,6 +628,62 @@ fn cli_settings_signing_and_keys() {
     assert_eq!(cmd(&mut a, &[CMD_GET_STATS, 9]), vec![vec![RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG]]);
 }
 
+/// Remote CLI from a contact allowed it: a command from before the node started is not taken, so
+/// a recorded `reboot` played again can't keep restarting it (upstream takes any).
+#[test]
+fn remote_cli_on_a_companion_is_not_played_again() {
+    let mut air = Air::new();
+    air.link(0, 1);
+    let mut a = companion(1, "Alice");
+    let mut b = companion(2, "Bob");
+    exchange_adverts(&mut air, &mut a, &mut b);
+    let mut bob = cmd(&mut a, &[CMD_GET_CONTACT_BY_KEY].iter().copied().chain(pub_key(&b)).collect::<Vec<_>>()).remove(0);
+    bob[0] = CMD_ADD_UPDATE_CONTACT;
+    bob[34] |= 0x10; // remote CLI allowed
+    assert_eq!(cmd(&mut a, &bob), vec![vec![RESP_CODE_OK]]);
+
+    let mut cli = vec![CMD_SEND_TXT_MSG, TXT_TYPE_CLI_COMMAND, 0, 0, 0, 0, 0];
+    cli.extend_from_slice(&pub_key(&a)[..6]);
+    cli.extend_from_slice(b"get name");
+    cmd(&mut b, &cli);
+    let recorded: Vec<Vec<u8>> = (0..50).flat_map(|k| b.tx(air.now + k * 100)).collect();
+    assert_eq!(recorded.len(), 1);
+    air.now += 5000;
+    a.rx(air.now, &recorded[0]);
+    air.run(&mut [&mut a, &mut b], 5000);
+    let replies = sync_messages(&mut b);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(&replies[0][16..], b"> Alice");
+
+    // Alice restarts, her clock where it stopped (the firmware keeps it); Bob's old command is heard again
+    let started = a.ctx.current_time() + 1;
+    let mut a = Mesh::new(
+        MeshCtx::new(LocalIdentity::from_seed(&[1; 32]), [1; 16], RadioParams::default(), started),
+        Companion::new(CompanionPrefs { node_name: "Alice".into(), ..Default::default() }, Board::default()),
+    );
+    a.begin(0);
+    a.app.start(&mut a.ctx);
+    assert_eq!(cmd(&mut a, &bob), vec![vec![RESP_CODE_OK]]);
+    a.rx(air.now, &recorded[0]);
+    air.run(&mut [&mut a, &mut b], 5000);
+    assert!(sync_messages(&mut b).is_empty(), "the command from before the restart is ignored");
+
+    // a new one is taken (sent after the restart: Bob's clock has passed Alice's start)
+    cmd(&mut b, &cli);
+    air.run(&mut [&mut a, &mut b], 5000);
+    assert_eq!(&sync_messages(&mut b)[0][16..], b"> Alice");
+
+    // as CMD_SET_DEVICE_PIN: 0 or six digits
+    let pin = |m: &mut Mesh<Companion>, v: &str| {
+        let r = cmd(m, &[&[CMD_RUN_CLI_COMMAND][..], format!("set pin {v}").as_bytes()].concat());
+        String::from_utf8(r[0][1..].to_vec()).unwrap()
+    };
+    assert_eq!(pin(&mut a, "654321"), "> pin is now 654321");
+    assert_eq!(pin(&mut a, "0"), "> pin is now 000000");
+    assert!(pin(&mut a, "1234").starts_with("Error"));
+    assert!(pin(&mut a, "1234567").starts_with("Error"));
+}
+
 /// In-RAM firmware slot for the update tests.
 struct Flash {
     mem: Vec<u8>,

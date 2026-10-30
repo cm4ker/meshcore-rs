@@ -233,6 +233,8 @@ pub struct ContactInfo {
     /// The app set the out-path: the contact may not know its way back (see
     /// [`CompanionPrefs::round_trip_path`]). Not stored.
     rt_pending: bool,
+    /// Timestamp of the last remote CLI command taken from this contact. Not stored.
+    cli_timestamp: u32,
 }
 
 impl ContactInfo {
@@ -251,6 +253,7 @@ impl ContactInfo {
             sync_since: 0,
             secret: None,
             rt_pending: false,
+            cli_timestamp: 0,
         }
     }
 
@@ -1354,6 +1357,13 @@ impl MeshApp for Companion {
                     self.mark_connection_active(ctx, idx);
                     let mut reply = String::new();
                     if self.contacts[idx].is_remote_cli_allowed() {
+                        // a command is taken once, and not from before this start: a recorded
+                        // `reboot` would restart the node again and again (upstream takes any)
+                        let started = ctx.current_time().saturating_sub((ctx.now / 1000) as u32);
+                        if sender_timestamp <= self.contacts[idx].cli_timestamp.max(started) {
+                            return;
+                        }
+                        self.contacts[idx].cli_timestamp = sender_timestamp;
                         let command = String::from_utf8_lossy(text).into_owned();
                         reply = self.handle_command(ctx, true, &command);
                     } else {

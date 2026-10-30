@@ -325,6 +325,76 @@ fn payload_crypto_roundtrip_through_builders() {
 
 /// `setperm` with a mistyped key that is no curve point: refused, as it would give no secret
 /// (kept with zeros, it would match packets anyone can make).
+/// Wrong passwords are counted, whoever sends them: past ten in ten minutes none is compared, not
+/// even the right one, until the window ends.
+#[test]
+fn password_guesses_are_limited() {
+    let mut r = repeater(1);
+    let mut c = client(2);
+    let r_id = r.ctx.self_id.id;
+    let secret = c.ctx.self_id.calc_shared_secret(&r_id.pub_key).unwrap();
+    let mut login = |r: &mut Mesh<Repeater>, ts: u32, password: &[u8], now: u64| {
+        let mut data = ts.to_le_bytes().to_vec();
+        data.extend_from_slice(password);
+        let mut req = c.ctx.create_anon_datagram(&r_id, &secret, &data).unwrap();
+        req.set_route_type(ROUTE_TYPE_DIRECT);
+        req.path_len = 0;
+        r.on_rx_frame(now, &frame(&req), 7.0, -60.0);
+        !drain_tx(r, now + 10_000).is_empty()
+    };
+    let t = 1_760_000_100;
+    assert!(login(&mut r, t, b"", 0), "the guest's (empty) password: no guess, not counted");
+    for k in 1..=10 {
+        assert!(!login(&mut r, t + k, b"guess", k as u64 * 20_000));
+    }
+    assert!(!login(&mut r, t + 20, b"password", 300_000), "locked for the rest of the ten minutes");
+    assert!(login(&mut r, t + 30, b"password", 620_000));
+}
+
+/// The admins' last timestamps reach flash before a restart: a recorded `reboot` played again
+/// after it is ignored (upstream keeps them in RAM, and would restart again, and again).
+#[test]
+fn a_recorded_command_does_not_outlive_a_restart() {
+    let mut r = repeater(1);
+    let mut c = client(2);
+    let r_id = r.ctx.self_id.id;
+    let secret = c.ctx.self_id.calc_shared_secret(&r_id.pub_key).unwrap();
+    let mut data = 1_760_000_100u32.to_le_bytes().to_vec();
+    data.extend_from_slice(b"password");
+    let mut req = c.ctx.create_anon_datagram(&r_id, &secret, &data).unwrap();
+    req.set_route_type(ROUTE_TYPE_DIRECT);
+    req.path_len = 0;
+    r.on_rx_frame(10, &frame(&req), 7.0, -60.0);
+    assert_eq!(drain_tx(&mut r, LATER).len(), 1, "logged in");
+    assert!(r.app.take_effects().save_acl);
+
+    let mut cmd = 1_760_000_200u32.to_le_bytes().to_vec();
+    cmd.push(3 << 2);
+    cmd.extend_from_slice(b"reboot");
+    let mut msg = c.ctx.create_datagram(PAYLOAD_TYPE_TXT_MSG, &r_id, &secret, &cmd).unwrap();
+    msg.set_route_type(ROUTE_TYPE_DIRECT);
+    msg.path_len = 0;
+    let recorded = frame(&msg);
+    r.on_rx_frame(2 * LATER, &recorded, 7.0, -60.0);
+    drain_tx(&mut r, 2 * LATER + 100);
+    let fx = r.app.take_effects();
+    assert!(fx.reboot && fx.save_acl, "saved at once, not a few seconds later");
+
+    let mut again = repeater(1);
+    let self_id = again.ctx.self_id.clone();
+    again.app.acl_load(&r.app.acl_serialize(), &self_id);
+    assert_eq!(again.app.clients()[0].last_timestamp, 1_760_000_200);
+    again.on_rx_frame(10, &recorded, 7.0, -60.0);
+    drain_tx(&mut again, LATER);
+    assert!(!again.app.take_effects().reboot, "the replay is ignored");
+
+    // an ACL saved by older firmware has no timestamps
+    let old = &r.app.acl_serialize()[..136];
+    again.app.acl_load(old, &self_id);
+    assert_eq!(again.app.clients()[0].last_timestamp, 0);
+    assert!(again.app.clients()[0].is_admin());
+}
+
 #[test]
 fn setperm_refuses_a_key_that_gives_no_secret() {
     let mut r = repeater(1);

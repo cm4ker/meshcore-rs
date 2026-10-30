@@ -25,6 +25,7 @@ use trouble_host::prelude::*;
 
 use crate::frames::{FRAMES_IN, Link};
 pub use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
+use meshcore_fw_core::links::{pairing_begins, pairing_succeeded};
 
 /// The BLE task runs (and holds the controller).
 pub static BLE_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -272,10 +273,20 @@ async fn events(server: &Server<'_>, conn: &GattConnection<'_, '_, DefaultPacket
                 info!("BLE: disconnected ({reason:?})");
                 return;
             }
-            GattConnectionEvent::PassKeyDisplay(key) => BLE_PASSKEY.store(key.value().max(1), Ordering::Relaxed),
+            GattConnectionEvent::PassKeyDisplay(key) => {
+                if pairing_begins() {
+                    BLE_PASSKEY.store(key.value().max(1), Ordering::Relaxed);
+                } else {
+                    warn!("BLE: pairing refused after failed ones, try later");
+                    conn.raw().disconnect();
+                }
+            }
             GattConnectionEvent::PairingComplete { security_level, bond } => {
                 BLE_PASSKEY.store(0, Ordering::Relaxed);
                 info!("BLE: paired ({security_level:?})");
+                if security_level == SecurityLevel::EncryptedAuthenticated {
+                    pairing_succeeded();
+                }
                 BLE_CONNECTED.store(security_level == SecurityLevel::EncryptedAuthenticated, Ordering::Relaxed);
                 if bond.is_some() {
                     BONDS_CHANGED.signal(stack.with_bond_information(serialize_bonds));
