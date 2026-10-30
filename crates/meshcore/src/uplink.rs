@@ -159,6 +159,22 @@ pub fn status_json(obs: &Observer<'_>, now: u32, online: bool, stats: Option<&St
     j
 }
 
+/// `s` inside a JSON string.
+fn json_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn base64url(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -179,11 +195,12 @@ pub fn jwt(id: &LocalIdentity, aud: &str, iat: u32, owner: Option<&str>, email: 
         to_hex(id.pub_key()),
         iat + TOKEN_LIFETIME_SECS
     );
+    // what the admin typed: a quote must not end the string and add claims of its own
     if let Some(o) = owner {
-        let _ = write!(payload, ",\"owner\":\"{o}\"");
+        let _ = write!(payload, ",\"owner\":\"{}\"", json_text(o));
     }
     if let Some(e) = email {
-        let _ = write!(payload, ",\"email\":\"{e}\"");
+        let _ = write!(payload, ",\"email\":\"{}\"", json_text(e));
     }
     payload.push('}');
     let signed = format!("{}.{}", base64url(br#"{"alg":"Ed25519","typ":"JWT"}"#), base64url(payload.as_bytes()));
@@ -463,6 +480,15 @@ mod tests {
         // payload decodes back to the expected JSON
         let b64 = parts[1];
         assert_eq!(base64url(format!("{{\"publicKey\":\"{}\",\"aud\":\"agent.ommesh.ru\",\"iat\":1792670000,\"exp\":1792673600}}", to_hex(id.pub_key())).as_bytes()), b64);
+
+        // an email with a quote stays one string, it adds no claim
+        let t = jwt(&id, "a", 1, None, Some("x\",\"owner\":\"y\n"));
+        let payload = t.split('.').nth(1).unwrap();
+        let expected = format!(
+            "{{\"publicKey\":\"{}\",\"aud\":\"a\",\"iat\":1,\"exp\":3601,\"email\":\"x\\\",\\\"owner\\\":\\\"y\\u000a\"}}",
+            to_hex(id.pub_key())
+        );
+        assert_eq!(payload, base64url(expected.as_bytes()));
     }
 
     #[test]

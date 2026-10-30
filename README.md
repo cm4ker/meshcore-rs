@@ -434,9 +434,12 @@ get mqtt.status              # wifi:up ntp:up iata:OMS meshcoretel:up ... ommesh
 ## Перенос существующей ноды (с сохранением ID)
 
 ```
-cargo run -p provision -- --prv <ключ из get prv.key> --prefs prefs.txt --admin <pubkey> --clock <unix-время> --out part.bin
+cargo run -p provision -- --prv-file key.txt --prefs prefs.txt --admin <pubkey> --clock <unix-время> --out part.bin
 espflash write-bin 0x400000 part.bin
 ```
+
+`key.txt` — ключ из `get prv.key` (128 hex-символов). Файл, а не `--prv <ключ>`: командную строку видят
+другие пользователи машины, и она остаётся в истории шелла.
 
 ## Проверки
 

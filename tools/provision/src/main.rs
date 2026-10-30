@@ -2,9 +2,11 @@
 //! given identity and configuration (e.g. when moving an existing node to this firmware).
 //!
 //! ```text
-//! provision --prv <128-hex> --prefs <prefs.txt> --out <image.bin>
+//! provision --prv-file <key.txt> --prefs <prefs.txt> --out <image.bin>
 //!           [--admin <64-hex>]... [--clock <epoch-secs>]
 //! ```
+//! `key.txt` holds the private key, 128 hex chars. `--prv <128-hex>` takes it on the command line,
+//! which other users of the machine see in the process list and the shell keeps in its history.
 //! `prefs.txt` uses the firmware's `key=value` prefs format (see `meshcore::prefs`).
 //! Flash with: `espflash write-bin 0x400000 <image.bin>`.
 //!
@@ -66,6 +68,10 @@ fn main() {
         let mut val = || args.next().unwrap_or_else(|| die(&format!("{a} needs a value")));
         match a.as_str() {
             "--prv" => prv_hex = Some(val()),
+            "--prv-file" => {
+                let path = val();
+                prv_hex = Some(std::fs::read_to_string(&path).unwrap_or_else(|e| die(&format!("{path}: {e}"))));
+            }
             "--prefs" => prefs_path = Some(val()),
             "--out" => out = Some(val()),
             "--admin" => admins.push(val()),
@@ -73,7 +79,7 @@ fn main() {
             _ => die(&format!("unknown argument {a}")),
         }
     }
-    let prv_hex = prv_hex.unwrap_or_else(|| die("--prv is required"));
+    let prv_hex = prv_hex.unwrap_or_else(|| die("--prv-file (or --prv) is required"));
     let out = out.unwrap_or_else(|| die("--out is required"));
 
     let mut prv = [0u8; 64];
