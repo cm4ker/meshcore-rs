@@ -793,7 +793,8 @@ fn repeater_ble_update_window() {
     assert!(r.app.take_effects().reboot);
 }
 
-/// `start ota`: the Wi-Fi upload page wants a fresh one-time code (on a LAN anyone could reach it).
+/// `start ota`: the Wi-Fi upload page wants a fresh one-time code (on a LAN anyone could reach it);
+/// the access point has a random passphrase, not the admin password.
 #[test]
 fn repeater_wifi_update_code() {
     let mut r = repeater(3);
@@ -801,13 +802,18 @@ fn repeater_wifi_update_code() {
 
     r.app.board.wifi_ota_ssid = Some("MeshCore-OTA-R".into());
     let reply = r.app.handle_command(&mut r.ctx, 0, "start ota");
-    let code = r.app.take_effects().start_ota.expect("started");
+    let (code, key) = r.app.take_effects().start_ota.expect("started");
     assert!((100_000..1_000_000).contains(&code));
-    assert_eq!(reply, format!("Started: http://192.168.4.1/update (Wi-Fi 'MeshCore-OTA-R') code {code}"));
+    assert_eq!(key.len(), 10);
+    assert_ne!(key, r.app.prefs.password, "the access point has a passphrase of its own");
+    assert_eq!(reply, format!("Started: http://192.168.4.1/update (Wi-Fi 'MeshCore-OTA-R' password {key}) code {code}"));
+
+    r.app.handle_command(&mut r.ctx, 0, "start ota");
+    assert_eq!(r.app.take_effects().start_ota.unwrap().1, key, "the point comes up once a boot");
 
     r.app.board.wifi_ip = Some("10.0.0.5".into());
     let reply = r.app.handle_command(&mut r.ctx, 0, "start ota");
-    let lan_code = r.app.take_effects().start_ota.expect("started");
+    let (lan_code, _) = r.app.take_effects().start_ota.expect("started");
     assert_eq!(reply, format!("Started: http://10.0.0.5/update code {lan_code}"));
     assert_ne!(lan_code, code, "a new code each time");
 }

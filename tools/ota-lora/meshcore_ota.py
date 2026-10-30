@@ -22,6 +22,7 @@ that key signed.
 
 import argparse
 import asyncio
+import getpass
 import hashlib
 import math
 import os
@@ -52,7 +53,8 @@ ERRORS = {1: "no OTA slot", 2: "image too large", 3: "bad parameters", 4: "no se
           14: "unreadable release envelope",
           15: "the release is not signed by the owner key the device pins (sign it on the release server)",
           16: "over LoRa or TCP the device takes only signed releases, and it pins no root key "
-              "(pin one with `set ota.root`, or update over BLE or USB)"}
+              "(pin one with `set ota.root`, or update over BLE or USB)",
+          17: "an update is already installed and the device is restarting into it"}
 BOARDS = {1: "heltec-v4", 2: "heltec-v3", 3: "xiao-c6", 4: "t-echo"}
 ROLES = {1: "repeater", 2: "companion"}
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -174,7 +176,8 @@ async def main():
     ap.add_argument("image")
     ap.add_argument("--port")
     ap.add_argument("--node", help="repeater contact name (or public key prefix)")
-    ap.add_argument("--password", help="admin password")
+    ap.add_argument("--password", help="admin password (other users see it in the process list: "
+                    "prefer --password-file, or leave both out to be asked)")
     ap.add_argument("--password-file")
     ap.add_argument("--gap-ms", type=int, default=150, help="extra gap between chunks")
     ap.add_argument("--no-compress", action="store_true", help="send the raw image (older firmware)")
@@ -194,6 +197,8 @@ async def main():
     password = args.password
     if args.password_file:
         password = open(args.password_file, encoding="utf-8").read().strip()
+    if password is None:
+        password = getpass.getpass("admin password: ")
     image, envelope = load_firmware(args.image)
     sha = hashlib.sha256(image).digest()  # always of the inflated image
     if envelope:

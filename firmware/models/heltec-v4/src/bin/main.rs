@@ -1282,7 +1282,7 @@ async fn main(spawner: Spawner) -> ! {
         if let Some(on) = fx.fem_lna {
             fem.set_lna(on);
         }
-        if let Some(code) = fx.start_ota {
+        if let Some((code, key)) = fx.start_ota {
             if let (Some(stack), Some(s), Some(sl)) = (station, &store, slots) {
                 let params = wifi_ota::Params {
                     ssid: alloc::format!("LAN {}", net::ipv4(&stack).unwrap_or_default()),
@@ -1303,10 +1303,9 @@ async fn main(spawner: Spawner) -> ! {
             } else {
             match (wifi.take(), &store, slots) {
                 (Some(w), Some(s), Some(sl)) => {
-                    let pw = mesh.app.prefs.password.clone();
                     let params = wifi_ota::Params {
                         ssid: ota_ssid(&mesh.app.prefs.node_name),
-                        password: (pw.len() >= 8).then_some(pw),
+                        password: Some(key),
                         node_name: mesh.app.prefs.node_name.clone(),
                         version: meshcore::FIRMWARE_VERSION,
                         code,

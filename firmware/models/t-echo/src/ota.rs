@@ -56,13 +56,20 @@ impl FirmwareTarget for StagingTarget {
         RECORD - STAGING
     }
 
+    // a staged update waits for the restart as verified: nothing may write over it
     fn erase(&mut self, offset: u32, len: u32) -> bool {
         feed_watchdog();
+        if INSTALL_PENDING.load(Ordering::Relaxed) {
+            return false;
+        }
         let from = STAGING + offset;
         NorFlash::erase(self.store.borrow_mut().flash(), from, from + len).is_ok()
     }
 
     fn write(&mut self, offset: u32, data: &[u8]) -> bool {
+        if INSTALL_PENDING.load(Ordering::Relaxed) {
+            return false;
+        }
         // the QSPI's DMA wants word-aligned RAM and whole words: through a buffer, padded
         let mut buf = [0u32; 64];
         let mut store = self.store.borrow_mut();
@@ -123,7 +130,7 @@ impl FirmwareTarget for StagingTarget {
         (rec[2], rec[3]) = (size, !size);
         let mut store = self.store.borrow_mut();
         let ok = NorFlash::erase(store.flash(), RECORD, RECORD + PAGE).is_ok() && NorFlash::write(store.flash(), RECORD, as_bytes_mut(&mut rec)).is_ok();
-        INSTALL_PENDING.store(ok, Ordering::Relaxed);
+        INSTALL_PENDING.fetch_or(ok, Ordering::Relaxed);
         ok
     }
 }

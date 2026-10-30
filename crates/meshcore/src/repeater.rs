@@ -171,8 +171,9 @@ pub struct Effects {
     pub tx_power: Option<i8>,
     pub rx_boosted_gain: Option<bool>,
     pub fem_lna: Option<bool>,
-    /// Bring up the Wi-Fi update page (`start ota`); uploads must carry this one-time code.
-    pub start_ota: Option<u32>,
+    /// Bring up the Wi-Fi update page (`start ota`): the one-time code uploads must carry, and
+    /// the passphrase of the access point (one per boot, as the point comes up only once).
+    pub start_ota: Option<(u32, String)>,
     /// Open the BLE update window (`start ota ble`) with this pairing PIN.
     pub start_ble_ota: Option<u32>,
     /// Persist the region map.
@@ -274,6 +275,8 @@ pub struct Repeater {
     bridge: Bridge,
     /// Frames for the bridge's medium, taken by the firmware.
     bridge_out: Vec<Vec<u8>>,
+    /// Passphrase of the Wi-Fi update access point, made at the first `start ota`.
+    wifi_ota_key: String,
 }
 
 fn read_u32(b: &[u8], at: usize) -> u32 {
@@ -335,6 +338,7 @@ impl Repeater {
             room: None,
             bridge,
             bridge_out: Vec::new(),
+            wifi_ota_key: String::new(),
         }
     }
 
@@ -1463,10 +1467,18 @@ impl Repeater {
             };
             // a fresh code each time: on the LAN anyone could reach the page otherwise
             let code = 100_000 + ctx.rng.next_u32() % 900_000;
-            self.effects.start_ota = Some(code);
+            // not the admin password: a recorded handshake would give it away to an offline search
+            if self.wifi_ota_key.is_empty() {
+                const CHARS: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+                self.wifi_ota_key = (0..10).map(|_| CHARS[ctx.rng.next_u32() as usize % CHARS.len()] as char).collect();
+            }
+            self.effects.start_ota = Some((code, self.wifi_ota_key.clone()));
             return match self.board.wifi_ip.clone() {
                 Some(ip) => format!("Started: http://{ip}/update code {code}"),
-                None => format!("Started: http://192.168.4.1/update (Wi-Fi '{ssid}') code {code}"),
+                None => format!(
+                    "Started: http://192.168.4.1/update (Wi-Fi '{ssid}' password {}) code {code}",
+                    self.wifi_ota_key
+                ),
             };
         }
         if cmd.starts_with("clock") {

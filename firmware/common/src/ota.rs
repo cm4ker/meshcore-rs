@@ -10,6 +10,7 @@
 
 use alloc::rc::Rc;
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use esp_bootloader_esp_idf::ota::OtaImageState;
 use esp_bootloader_esp_idf::ota_updater::OtaUpdater;
@@ -104,6 +105,10 @@ pub fn rollback(store: &mut EspStore<'_>, slots: Slots) -> bool {
     select_slot(store, slots.target.0, OtaImageState::Valid)
 }
 
+/// An update was selected for the next boot. Its slot then holds a verified image, which no
+/// writer may touch until the restart: each link (LoRa, BLE, the Wi-Fi page) has a target of its own.
+static ACTIVATED: AtomicBool = AtomicBool::new(false);
+
 /// The inactive app slot, as seen by the update session.
 pub struct FlashTarget<'d> {
     store: SharedStore<'d>,
@@ -126,12 +131,18 @@ impl FirmwareTarget for FlashTarget<'_> {
     // watchdog.
     fn erase(&mut self, offset: u32, len: u32) -> bool {
         crate::reset::feed();
+        if ACTIVATED.load(Ordering::Relaxed) {
+            return false;
+        }
         let base = self.slots.target.1 + offset;
         self.store.borrow_mut().flash().erase(base, base + len).is_ok()
     }
 
     fn write(&mut self, offset: u32, data: &[u8]) -> bool {
         crate::reset::feed();
+        if ACTIVATED.load(Ordering::Relaxed) {
+            return false;
+        }
         self.store.borrow_mut().flash().write_nor(self.slots.target.1 + offset, data).is_ok()
     }
 
@@ -156,6 +167,8 @@ impl FirmwareTarget for FlashTarget<'_> {
     fn activate(&mut self, _size: u32) -> bool {
         let mut store = self.store.borrow_mut();
         let (slot, booted) = (self.slots.target.0, self.slots.booted);
-        store.save(Blob::OtaTrial, &[slot, booted, 0]) && select_slot(&mut store, slot, OtaImageState::New)
+        let ok = store.save(Blob::OtaTrial, &[slot, booted, 0]) && select_slot(&mut store, slot, OtaImageState::New);
+        ACTIVATED.fetch_or(ok, Ordering::Relaxed);
+        ok
     }
 }

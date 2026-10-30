@@ -140,6 +140,9 @@ pub enum OtaError {
     /// The request came over the mesh or an open link, which installs only signed releases, and
     /// no root is pinned to check them against.
     NoRoot = 16,
+    /// An update is committed and the device is about to restart into it: nothing more is taken
+    /// until then (the slot holds the verified image).
+    Installed = 17,
 }
 
 impl From<Refusal> for OtaError {
@@ -260,6 +263,10 @@ impl OtaSession {
             return Err(OtaError::BadParams);
         }
         let chunks = size.div_ceil(chunk_size as u32) as usize;
+        // chunks are numbered in a u16; tiny chunks would also make the bitmap a burden on the heap
+        if chunks > u16::MAX as usize {
+            return Err(OtaError::BadParams);
+        }
         let sectors = size.div_ceil(SECTOR_SIZE) as usize;
         Ok(Self {
             size,
@@ -564,6 +571,8 @@ pub struct OtaEndpoint {
     envelope: Vec<u8>,
     /// The signed release accepted for the next session.
     release: Option<Manifest>,
+    /// An update was committed: the slot is selected and must stay as verified until the restart.
+    committed: bool,
 }
 
 impl OtaEndpoint {
@@ -634,6 +643,15 @@ impl OtaEndpoint {
     /// Handle one request (`payload[0]` is its type); the reply body, if one is due.
     pub fn handle(&mut self, payload: &[u8], firmware_version: &str) -> (Option<Vec<u8>>, OtaOutcome) {
         self.requests = self.requests.wrapping_add(1);
+        if self.committed {
+            let installed = OtaError::Installed as u8;
+            match payload.first().copied().unwrap_or(0) {
+                REQ_TYPE_OTA_MANIFEST | REQ_TYPE_OTA_BEGIN => return (Some(vec![installed, 0, 0]), OtaOutcome::None),
+                REQ_TYPE_OTA_COMMIT => return (Some(vec![installed]), OtaOutcome::None),
+                REQ_TYPE_OTA_DATA => return (None, OtaOutcome::None),
+                _ => {}
+            }
+        }
         let read_u32 = |i: usize| payload.get(i..i + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
         let u16_at = |i: usize| payload.get(i..i + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
         let status = |r: Result<(), OtaError>| match r {
@@ -765,6 +783,7 @@ impl OtaEndpoint {
                     (Ok(()), ..) => {
                         self.session = None;
                         self.release = None;
+                        self.committed = true;
                         OtaOutcome::Committed
                     }
                     (Err(e), Some(s), Some(t)) => {
@@ -1120,6 +1139,22 @@ mod tests {
         assert_eq!(&status[..8], &[0, 5, 0, 6, 0, 1, 2, 0], "chunk 2 is missing");
         ep.handle(&data(2, false), "v");
         assert_eq!(ep.handle(&[REQ_TYPE_OTA_COMMIT], "v").0.unwrap()[0], 0);
+
+        // until the restart, the verified slot is left alone, whatever comes
+        let installed = OtaError::Installed as u8;
+        assert_eq!(ep.handle(&begin, "v").0.unwrap(), [installed, 0, 0]);
+        assert_eq!(ep.handle(&[REQ_TYPE_OTA_MANIFEST, 0, 0, 10, 0, 0], "v").0.unwrap(), [installed, 0, 0]);
+        assert_eq!(ep.handle(&data(0, false), "v").0, None);
+        ep.handle(&[REQ_TYPE_OTA_ABORT], "v");
+        assert_eq!(ep.handle(&[REQ_TYPE_OTA_COMMIT], "v").0.unwrap(), [installed]);
+        assert_eq!(ep.handle(&[REQ_TYPE_OTA_INFO], "v").0.unwrap()[0], 1, "INFO is still answered");
+    }
+
+    #[test]
+    fn chunks_too_small_to_number_are_refused() {
+        let t = RamTarget::new(1 << 20, 0, Vec::new());
+        assert_eq!(OtaSession::begin(&t, 65_535 * 4 + 4, None, 4).err(), Some(OtaError::BadParams));
+        assert!(OtaSession::begin(&t, 65_535 * 4, None, 4).is_ok());
     }
 
     /// Fake nRF52840 image: app bytes, then the trailer, like tools/uf2/elf2uf2.py writes it.
@@ -1455,6 +1490,8 @@ mod tests {
             ep.handle(&d, "v");
         }
         assert_eq!(ep.handle(&[REQ_TYPE_OTA_COMMIT], "v").0.unwrap()[0], 0);
+        assert_eq!(begin_status(&mut ep), OtaError::Installed as u8);
+        ep.committed = false; // as after the restart
         assert_eq!(begin_status(&mut ep), OtaError::Unsigned as u8, "a release is good for one session");
 
         let info = ep.handle(&[REQ_TYPE_OTA_INFO], "v").0.unwrap();

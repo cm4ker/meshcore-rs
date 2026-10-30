@@ -1,6 +1,6 @@
 //! Firmware update over Wi-Fi (CLI `start ota`, also usable remotely over LoRa).
 //!
-//! Brings up an access point (WPA2 with the admin password when it is long enough), or uses the
+//! Brings up an access point (WPA2 with the random passphrase `start ota` printed), or uses the
 //! Wi-Fi station's LAN address, serves an upload page at `/`, streams the image into the inactive
 //! slot and reboots into it on trial. Also accepts
 //! `curl --data-binary @firmware.bin "http://192.168.4.1/update?code=123456"`.
@@ -156,6 +156,22 @@ async fn dhcp_task(stack: Stack<'static>) {
     }
 }
 
+/// `s` as HTML text: the node name is anyone's choice.
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn page(params: &Params) -> String {
     format!(
         "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>\
@@ -171,7 +187,7 @@ var x=new XMLHttpRequest(),s=document.getElementById('s');x.open('POST','/update
 x.upload.onprogress=function(e){{document.getElementById('p').value=e.loaded*100/e.total}};\
 x.onload=function(){{s.textContent=x.responseText}};x.onerror=function(){{s.textContent='upload failed'}};\
 s.textContent='uploading...';x.send(f)}}</script>",
-        name = params.node_name,
+        name = escape_html(&params.node_name),
         ver = params.version,
         slot = params.slots.booted,
         signed = if params.roots.is_empty() { "" } else { " (a root key is pinned: only signed releases)" }
