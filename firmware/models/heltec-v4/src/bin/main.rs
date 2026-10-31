@@ -31,7 +31,7 @@ use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
-use esp_println::{print, println};
+use esp_println::print;
 use esp_storage::FlashStorage;
 use log::{info, warn};
 
@@ -69,6 +69,17 @@ use meshcore_ui::{
 };
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// esp-println's `println!` ends a line with LF only. The console's lines end with CR LF, as the
+/// Arduino firmware's do: MeshCore's web consoles show a line only once its CR LF has come.
+macro_rules! println {
+    () => {
+        print!("\r\n")
+    };
+    ($($arg:tt)*) => {
+        print!("{}\r\n", format_args!($($arg)*))
+    };
+}
 
 const BUILD_EPOCH: &str = env!("BUILD_EPOCH");
 const BUILD_DATE: &str = env!("BUILD_DATE");
