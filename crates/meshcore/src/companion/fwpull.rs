@@ -227,12 +227,17 @@ impl Companion {
         self.fw_sleep(ctx, RETRY_LATER_MS, FwPullStatus::Failed(why.into()));
     }
 
-    /// The update's delta is larger than LoRa carries: until the next check (a later release may
-    /// have a small delta from this image), it goes in over USB or BLE.
+    /// The update's delta is larger than this node takes over LoRa: until the next check (a later
+    /// release may have a small delta from this image), it goes in over USB or BLE.
     fn fw_too_large(&mut self, ctx: &MeshCtx, len: u32) {
-        let (kb, max) = (len.div_ceil(1024), fwshare::MAX_LORA_FILE / 1024);
-        let why = alloc::format!("the update is {kb} KB, more than LoRa carries ({max} KB): install it over USB or BLE");
+        let (kb, max) = (len.div_ceil(1024), self.fw_max_file() / 1024);
+        let why = alloc::format!("the update is {kb} KB, more than this node takes over LoRa ({max} KB): install it over USB or BLE");
         self.fw_sleep(ctx, CHECK_EVERY_MS, FwPullStatus::Failed(why));
+    }
+
+    /// The largest update this node takes over LoRa: what its slot holds, at most the ceiling.
+    fn fw_max_file(&mut self) -> u32 {
+        self.ota.delta_room().min(fwshare::MAX_LORA_FILE)
     }
 
     /// The repeater to ask: the one set (`fw_source`), else the best heard directly lately.
@@ -290,6 +295,7 @@ impl Companion {
             channel: self.prefs.fw_channel,
             fresh: core::mem::take(&mut self.fwpull.fresh),
             owner8: FwQuery::owner_of(&self.ota.owners),
+            max_file: self.fw_max_file(),
         };
         self.fwpull.step = Step::Query;
         if !matches!(self.fwpull.status, FwPullStatus::RepeaterFetching) {
@@ -326,7 +332,7 @@ impl Companion {
         match (self.fwpull.step, data[4]) {
             // a repeater from before the limit offers it anyway: not loaded either
             (Step::Query, status::TOO_LARGE) if body.len() >= 4 => self.fw_too_large(ctx, read_u32(body, 0)),
-            (Step::Query, status::READY) if body.len() >= 13 && read_u32(body, 0) > fwshare::MAX_LORA_FILE => {
+            (Step::Query, status::READY) if body.len() >= 13 && read_u32(body, 0) > self.fw_max_file() => {
                 self.fw_too_large(ctx, read_u32(body, 0))
             }
             (Step::Query, status::READY) if body.len() >= 13 => {

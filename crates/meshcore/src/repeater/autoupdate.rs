@@ -242,7 +242,13 @@ impl Repeater {
             channel: self.prefs.fw_channel,
             fresh: false,
             owner8: FwQuery::owner_of(&self.ota.owners),
+            max_file: self.lora_max_file(),
         })
+    }
+
+    /// The largest update this node takes over LoRa: what its slot holds, at most the ceiling.
+    fn lora_max_file(&mut self) -> u32 {
+        self.ota.delta_room().min(MAX_LORA_FILE)
     }
 
     fn auto_load(&mut self, ctx: &mut MeshCtx, id: u32, mut offset: u32) {
@@ -288,13 +294,14 @@ impl Repeater {
         self.lora_next(ctx);
     }
 
-    /// The update's delta is larger than LoRa carries: no neighbour can hand it on, so the check
-    /// is over until the next one (a later release may have a small delta from this image).
+    /// The update's delta is larger than this node takes over LoRa: no neighbour can hand it on,
+    /// so the check is over until the next one (a later release may have a small delta from this
+    /// image).
     fn lora_too_large(&mut self, ctx: &mut MeshCtx, len: u32) {
         self.autoupdate.fresh = false;
         let next = CHECK_EVERY_MS + Self::auto_jitter(ctx);
-        let (kb, max) = (len.div_ceil(1024), MAX_LORA_FILE / 1024);
-        self.auto_sleep(ctx, next, format!("the update is {kb} KB, more than LoRa carries ({max} KB): install it over USB"));
+        let (kb, max) = (len.div_ceil(1024), self.lora_max_file() / 1024);
+        self.auto_sleep(ctx, next, format!("the update is {kb} KB, more than this node takes over LoRa ({max} KB): install it over USB"));
     }
 
     /// The next neighbour to ask, or the check is over.
@@ -380,7 +387,7 @@ impl Repeater {
         match (self.autoupdate.step, data[4]) {
             // a neighbour from before the limit offers it anyway: not loaded either
             (Step::Ask, status::TOO_LARGE) if body.len() >= 4 => self.lora_too_large(ctx, read_u32(body, 0)),
-            (Step::Ask, status::READY) if body.len() >= 13 && read_u32(body, 0) > MAX_LORA_FILE => {
+            (Step::Ask, status::READY) if body.len() >= 13 && read_u32(body, 0) > self.lora_max_file() => {
                 self.lora_too_large(ctx, read_u32(body, 0))
             }
             (Step::Ask, status::READY) if body.len() >= 13 => {

@@ -58,14 +58,15 @@ pub mod status {
     /// FW_GET: the repeater holds another file now; query again.
     pub const CHANGED: u8 = 4;
     pub const BAD_REQUEST: u8 = 5;
-    /// FW_QUERY: there is an update, but its delta (length follows) is larger than LoRa carries
-    /// ([`super::MAX_LORA_FILE`]): it goes in over USB or BLE.
+    /// FW_QUERY: there is an update, but its delta (length follows) is larger than the asking
+    /// node takes over LoRa ([`super::FwQuery::max_file`]): it goes in over USB or BLE.
     pub const TOO_LARGE: u8 = 6;
 }
 
-/// The largest update file handed on over LoRa. 60 KB already keeps the channel busy for ~40
-/// minutes at SF7/62.5 kHz, and is about what a Pro Micro can stage next to the image it rebuilds.
-pub const MAX_LORA_FILE: u32 = 60 * 1024;
+/// The largest update file any node takes over LoRa: 160 KB keeps the shared channel busy for
+/// some 1.5 hours near the two nodes at SF7/62.5 kHz. A node with less room for an update asks for
+/// less ([`FwQuery::max_file`]; a Pro Micro about 60 KB).
+pub const MAX_LORA_FILE: u32 = 160 * 1024;
 
 /// What a companion asks for: an update for its board and role, from the image it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,13 +84,16 @@ pub struct FwQuery {
     /// The first bytes of the fingerprint of the owner key whose signature an update must carry;
     /// zeroes for none.
     pub owner8: [u8; 8],
+    /// The largest update file the node takes: what its update slot holds next to the image it
+    /// rebuilds, at most [`MAX_LORA_FILE`] (a query without it, from older firmware, gets that).
+    pub max_file: u32,
 }
 
 /// Bit 7 of FW_QUERY's channel byte: [`FwQuery::fresh`].
 const FRESH: u8 = 0x80;
 
 impl FwQuery {
-    pub const LEN: usize = 27;
+    pub const LEN: usize = 31;
     /// Without an owner key.
     pub const NO_OWNER: [u8; 8] = [0; 8];
 
@@ -106,11 +110,13 @@ impl FwQuery {
         b.extend_from_slice(&self.base_sha8);
         b.push(self.channel | if self.fresh { FRESH } else { 0 });
         b.extend_from_slice(&self.owner8);
+        b.extend_from_slice(&self.max_file.to_le_bytes());
         b
     }
 
-    /// A query; without the channel byte (the first version of the request), stable, and without
-    /// the owner (older companions), none. The datagram's zero padding reads the same.
+    /// A query; without the channel byte (the first version of the request), stable, without the
+    /// owner (older companions), none, and without the largest file (older firmware), the
+    /// ceiling. The datagram's zero padding reads the same.
     pub fn parse(b: &[u8]) -> Option<Self> {
         let f = b.get(..18)?;
         Some(Self {
@@ -122,6 +128,11 @@ impl FwQuery {
             channel: b.get(18).map(|c| c & !FRESH).filter(|&c| c == release::channel::DEV).unwrap_or(release::channel::STABLE),
             fresh: b.get(18).is_some_and(|c| c & FRESH != 0),
             owner8: b.get(19..27).map_or(Self::NO_OWNER, |o| o.try_into().unwrap()),
+            max_file: b
+                .get(27..31)
+                .map(|m| u32::from_le_bytes(m.try_into().unwrap()))
+                .filter(|&m| m != 0)
+                .map_or(MAX_LORA_FILE, |m| m.min(MAX_LORA_FILE)),
         })
     }
 }
@@ -367,7 +378,7 @@ pub fn answer(store: &mut dyn FwStore, kind: u8, data: &[u8], reply: &mut Vec<u8
             }
             match store.offer(&q) {
                 Offer::Ready { counter, .. } if counter <= q.counter => reply.push(status::NONE),
-                Offer::Ready { len, .. } if len > MAX_LORA_FILE => {
+                Offer::Ready { len, .. } if len > q.max_file.min(MAX_LORA_FILE) => {
                     reply.push(status::TOO_LARGE);
                     reply.extend_from_slice(&len.to_le_bytes());
                 }
@@ -524,11 +535,18 @@ mod tests {
             channel: release::channel::STABLE,
             fresh: false,
             owner8: FwQuery::NO_OWNER,
+            max_file: MAX_LORA_FILE,
         };
         assert_eq!(FwQuery::parse(&q.to_bytes()), Some(q));
         let owned = FwQuery { owner8: [1, 2, 3, 4, 5, 6, 7, 8], ..q };
         assert_eq!(FwQuery::parse(&owned.to_bytes()), Some(owned));
         assert_eq!(FwQuery::parse(&q.to_bytes()[..19]), Some(q), "a query from before owner keys");
+        assert_eq!(FwQuery::parse(&q.to_bytes()[..27]), Some(q), "a query from before the largest file");
+        let mut padded = q.to_bytes()[..27].to_vec();
+        padded.resize(32, 0);
+        assert_eq!(FwQuery::parse(&padded), Some(q), "zero padding asks for the ceiling");
+        let small = FwQuery { max_file: 60 * 1024, ..q };
+        assert_eq!(FwQuery::parse(&small.to_bytes()), Some(small));
         let fresh_dev = FwQuery { channel: release::channel::DEV, fresh: true, ..q };
         assert_eq!(FwQuery::parse(&fresh_dev.to_bytes()), Some(fresh_dev));
         let dev = FwQuery { channel: release::channel::DEV, ..q };
@@ -594,11 +612,21 @@ mod tests {
             channel: release::channel::STABLE,
             fresh: false,
             owner8: FwQuery::NO_OWNER,
+            max_file: MAX_LORA_FILE,
         };
         let mut r = Vec::new();
         assert!(answer(&mut store, ANON_REQ_TYPE_FW_QUERY, &q.to_bytes(), &mut r));
         assert_eq!(r[0], status::TOO_LARGE);
         assert_eq!(u32::from_le_bytes(r[1..5].try_into().unwrap()), file.len() as u32);
+
+        // a 70 KB delta: fine for a node with room, too large for one that asks for 60 KB at most
+        let file = delta_file(&env, 9, &base_sha, &alloc::vec![0xAB; 70 * 1024]);
+        let mut store = MemStore::new(file, 77);
+        for (max_file, expected) in [(MAX_LORA_FILE, status::READY), (60 * 1024, status::TOO_LARGE)] {
+            let mut r = Vec::new();
+            answer(&mut store, ANON_REQ_TYPE_FW_QUERY, &FwQuery { max_file, ..q }.to_bytes(), &mut r);
+            assert_eq!(r[0], expected, "max_file {max_file}");
+        }
     }
 
     /// The release workflow warns about deltas over the same limit.

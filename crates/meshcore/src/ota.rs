@@ -623,6 +623,14 @@ impl OtaEndpoint {
         self.running_image
     }
 
+    /// The largest compressed update (a delta) the slot holds next to an image as large as the
+    /// running one, which it is rebuilt into; 0 without a slot or a readable running image.
+    pub fn delta_room(&mut self) -> u32 {
+        let Some((len, _)) = self.running() else { return 0 };
+        let capacity = self.target.as_deref().map_or(0, |t| t.capacity());
+        capacity.saturating_sub(sector_align(len))
+    }
+
     /// An update has begun and is neither committed nor aborted.
     pub fn busy(&self) -> bool {
         self.session.is_some()
