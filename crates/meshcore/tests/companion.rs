@@ -1052,6 +1052,32 @@ fn gps_setting_position_and_telemetry() {
     assert_eq!(&t[0][8..], &[1, 116, 0x01, 0x86]);
 }
 
+/// `adc.multiplier` as on a repeater: only on boards that take one, over the CLI and as a custom
+/// variable, 0 = the board's own, kept in prefs.
+#[test]
+fn adc_multiplier_on_a_companion() {
+    let mut a = companion(1, "Alice");
+    let cli = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
+    assert_eq!(cli(&mut a, "get adc.multiplier"), "Error: unsupported");
+    assert_eq!(cli(&mut a, "set adc.multiplier 1.7"), "Error: unsupported");
+    assert_eq!(cmd(&mut a, b"\x29adc_multiplier:1.7")[0][0], RESP_CODE_ERR);
+    assert_eq!(a.app.prefs.adc_multiplier, 0.0);
+
+    a.app.board.adc_multiplier = Some(5.42);
+    assert_eq!(cli(&mut a, "get adc.multiplier"), "> 5.420");
+    assert!(cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..].starts_with(b"adc_multiplier:5.420,ota_root:"));
+    assert_eq!(cli(&mut a, "set adc.multiplier 5.6"), "OK - multiplier set to 5.600");
+    assert!(a.app.take_effects().save_prefs);
+    assert_eq!(cli(&mut a, "get adc.multiplier"), "> 5.600");
+    let saved = CompanionPrefs::deserialize(&a.app.prefs.serialize(), 22);
+    assert_eq!(saved.adc_multiplier, 5.6);
+
+    assert_eq!(cmd(&mut a, b"\x29adc_multiplier:5.3")[0][0], RESP_CODE_OK);
+    assert!(cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..].starts_with(b"adc_multiplier:5.300,"));
+    assert_eq!(cli(&mut a, "set adc.multiplier 0"), "OK - using default board multiplier");
+    assert_eq!(a.app.adc_multiplier(), Some(5.42));
+}
+
 #[test]
 fn round_trip_manual_path() {
     // Alice -- Repeater -- Bob; the app gives Alice a path to Bob, and Bob learns the way back

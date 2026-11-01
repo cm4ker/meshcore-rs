@@ -670,6 +670,10 @@ impl Companion {
                         self.effects.save_prefs = true;
                         self.write_ok();
                     }
+                    b"adc_multiplier" if self.board.adc_multiplier.is_some() => {
+                        self.set_adc_multiplier(core::str::from_utf8(value).unwrap_or("0"));
+                        self.write_ok();
+                    }
                     b"ota_root" => match parse_keys(core::str::from_utf8(value).unwrap_or("?")) {
                         Some(roots) => {
                             self.pin_ota_roots(roots);
@@ -1026,10 +1030,11 @@ impl Companion {
         reply
     }
 
-    /// The custom variables, comma-separated: the GPS's settings, the root keys whose signed
-    /// releases are installed and the owner keys that must sign them too (fingerprints separated
-    /// by spaces; `short`: their first 16 hex digits, when the whole ones do not fit in a frame),
-    /// and the updates pulled from a neighbouring repeater.
+    /// The custom variables, comma-separated: the GPS's settings, the battery multiplier in use
+    /// (boards that take one), the root keys whose signed releases are installed and the owner
+    /// keys that must sign them too (fingerprints separated by spaces; `short`: their first 16
+    /// hex digits, when the whole ones do not fit in a frame), and the updates pulled from a
+    /// neighbouring repeater.
     fn custom_vars(&self, short: bool) -> String {
         let fps = |name: &str, list: &[release::Fingerprint]| match (list.is_empty(), short) {
             (true, _) => alloc::format!("{name}:off"),
@@ -1043,6 +1048,9 @@ impl Companion {
         if self.board.has_gps {
             vars.push(String::from(if self.prefs.gps_enabled { "gps:1" } else { "gps:0" }));
         }
+        if let Some(m) = self.adc_multiplier() {
+            vars.push(alloc::format!("adc_multiplier:{m:.3}"));
+        }
         vars.push(fps("ota_root", &self.prefs.ota_roots));
         vars.push(fps("ota_owner", &self.prefs.ota_owners));
         vars.push(alloc::format!("fw_pull:{}", ["off", "on", "auto"][self.prefs.fw_pull.min(2) as usize]));
@@ -1053,6 +1061,18 @@ impl Companion {
         vars.push(alloc::format!("fw_channel:{}", release::channel_name(self.prefs.fw_channel)));
         vars.push(alloc::format!("fw_status:{}", self.fw_status_text()));
         vars.join(",")
+    }
+
+    /// `set adc.multiplier` (the `adc_multiplier` custom variable) as upstream's `CommonCLI`: the
+    /// battery reading's calibration, 0 = the board's own; none if the board takes none.
+    fn set_adc_multiplier(&mut self, v: &str) -> Option<String> {
+        self.board.adc_multiplier?;
+        self.prefs.adc_multiplier = (atof(v) as f32).clamp(0.0, 10.0);
+        self.effects.save_prefs = true;
+        Some(match self.prefs.adc_multiplier == 0.0 {
+            true => "OK - using default board multiplier".into(),
+            false => format!("OK - multiplier set to {:.3}", self.prefs.adc_multiplier),
+        })
     }
 
     /// Pins the root keys whose signed releases are installed (`set ota.root`, the `ota_root`
@@ -1169,6 +1189,12 @@ impl Companion {
         }
         if let Some(r) = self.handle_fw_command(remote, cmd) {
             return Some(r);
+        }
+        if cmd == "get adc.multiplier" {
+            return Some(self.adc_multiplier().map_or("Error: unsupported".into(), |m| format!("> {m:.3}")));
+        }
+        if let Some(v) = cmd.strip_prefix("set adc.multiplier ") {
+            return Some(self.set_adc_multiplier(v).unwrap_or_else(|| "Error: unsupported".into()));
         }
         let p = &mut self.prefs;
         let r: String = if cmd == "reboot" {

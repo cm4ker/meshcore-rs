@@ -69,6 +69,11 @@ pub trait Board {
     async fn battery_mv(&mut self) -> u16 {
         0
     }
+    /// The board's own battery multiplier (upstream `ADC_MULTIPLIER`) if `set adc.multiplier`
+    /// calibrates its reading: [`Self::battery_mv`] is then scaled by the one set over this one.
+    fn adc_multiplier(&self) -> Option<f32> {
+        None
+    }
     fn button_down(&mut self) -> bool {
         false
     }
@@ -188,6 +193,16 @@ impl<F: NorFlash> BlobStore for FlashBlobs<F> {
 
 fn now_ms() -> u64 {
     Instant::now().as_millis()
+}
+
+/// The board's battery reading, scaled by the multiplier `set` with `set adc.multiplier` (0 =
+/// none) over the board's own.
+async fn battery_mv<B: Board>(board: &mut B, set: f32) -> u16 {
+    let mv = board.battery_mv().await;
+    match board.adc_multiplier() {
+        Some(own) if set > 0.0 => (mv as f32 * set / own) as u16,
+        _ => mv,
+    }
 }
 
 /// Why a pulled update failed, in the screen's words (the core says it in English).
@@ -390,7 +405,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         id
     });
     info!("Companion ID: {}", to_hex(self_id.pub_key()));
-    let batt_mv = board.battery_mv().await;
+    let batt_mv = battery_mv(&mut board, prefs.adc_multiplier).await;
     platform.feed_watchdog();
 
     // ---- mesh
@@ -413,6 +428,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         mcu_temp_c: None,
         max_tx_power_dbm: max_tx,
         has_gps: board.has_gps(),
+        adc_multiplier: board.adc_multiplier(),
         ..Default::default()
     };
     let mut mesh = Mesh::new(ctx, Companion::new(prefs, info));
@@ -574,7 +590,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         }
         if now >= next_batt {
             next_batt = now + 60_000;
-            mesh.app.board.batt_mv = board.battery_mv().await;
+            mesh.app.board.batt_mv = battery_mv(&mut board, mesh.app.prefs.adc_multiplier).await;
         }
 
         let ble_state = match (links.ble && BLE_ENABLED.load(Ordering::Relaxed), ble_app) {

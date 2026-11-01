@@ -67,6 +67,9 @@ pub struct CompanionPrefs {
     pub gps_enabled: bool,
     /// Seconds between GPS position updates; 0 = every second.
     pub gps_interval: u32,
+    /// Battery reading calibration (`set adc.multiplier`, the `adc_multiplier` custom variable,
+    /// as a repeater's) on boards that take one; 0 = the board's own.
+    pub adc_multiplier: f32,
     /// Round-trip manual paths (`set rtpath on`): a path the app sets for a contact also goes to
     /// the contact, reversed, so its replies come back direct. Off by default.
     pub round_trip_path: bool,
@@ -122,6 +125,7 @@ impl Default for CompanionPrefs {
             wifi_enabled: true,
             gps_enabled: false,
             gps_interval: 0,
+            adc_multiplier: 0.0,
             round_trip_path: false,
             ota_roots: crate::release::default_roots(),
             ota_owners: Vec::new(),
@@ -149,6 +153,7 @@ impl CompanionPrefs {
         self.node_name = truncate_str(&self.node_name, NAME_MAX);
         self.default_scope_name = truncate_str(&self.default_scope_name, SCOPE_NAME_MAX);
         self.gps_interval = self.gps_interval.min(86_400);
+        self.adc_multiplier = self.adc_multiplier.clamp(0.0, 10.0);
     }
 
     pub fn is_repeat_enabled(&self) -> bool {
@@ -194,6 +199,7 @@ impl CompanionPrefs {
         let _ = writeln!(s, "wifi_enabled={}", b(self.wifi_enabled));
         let _ = writeln!(s, "gps={}", b(self.gps_enabled));
         let _ = writeln!(s, "gps_int={}", self.gps_interval);
+        let _ = writeln!(s, "adc_mult={}", self.adc_multiplier);
         let _ = writeln!(s, "rt_path={}", b(self.round_trip_path));
         let _ = writeln!(s, "ota_root={}", join_fingerprints(&self.ota_roots, ","));
         let _ = writeln!(s, "ota_owner={}", join_fingerprints(&self.ota_owners, ","));
@@ -253,6 +259,7 @@ impl CompanionPrefs {
                 "wifi_enabled" => p.wifi_enabled = flag(),
                 "gps" => p.gps_enabled = flag(),
                 "gps_int" => p.gps_interval = atoi(v),
+                "adc_mult" => p.adc_multiplier = atof(v) as f32,
                 "rt_path" => p.round_trip_path = flag(),
                 "ota_root" => p.ota_roots = parse_fingerprints(v).unwrap_or_default(),
                 "ota_owner" => p.ota_owners = parse_fingerprints(v).unwrap_or_default(),

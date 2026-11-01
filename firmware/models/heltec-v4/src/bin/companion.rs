@@ -103,6 +103,10 @@ impl Board for HeltecV4<'_> {
         self.battery.read_mv().await
     }
 
+    fn adc_multiplier(&self) -> Option<f32> {
+        heltec_v4::board::ADC_MULTIPLIER
+    }
+
     fn button_down(&mut self) -> bool {
         self.button.is_low()
     }

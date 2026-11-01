@@ -433,6 +433,9 @@ pub struct Board {
     pub wifi_ip: Option<String>,
     /// A GPS receiver: its `gps` setting is offered to the app.
     pub has_gps: bool,
+    /// The board's own battery multiplier if `set adc.multiplier` calibrates its reading; none =
+    /// unsupported.
+    pub adc_multiplier: Option<f32>,
     /// Altitude of the latest GPS position, in metres.
     pub altitude_m: f64,
 }
@@ -448,6 +451,7 @@ impl Default for Board {
             wifi_status: String::new(),
             wifi_ip: None,
             has_gps: false,
+            adc_multiplier: None,
             altitude_m: 0.0,
         }
     }
@@ -1025,6 +1029,13 @@ impl Companion {
             }
             None => false,
         }
+    }
+
+    /// The battery multiplier in use: the one set with `set adc.multiplier`, else the board's own
+    /// (none if the board takes none).
+    pub fn adc_multiplier(&self) -> Option<f32> {
+        let own = self.board.adc_multiplier?;
+        Some(if self.prefs.adc_multiplier > 0.0 { self.prefs.adc_multiplier } else { own })
     }
 
     /// The GPS is on: its positions are the node's.
