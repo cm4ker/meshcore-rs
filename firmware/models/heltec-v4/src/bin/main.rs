@@ -158,6 +158,9 @@ impl WatchdogFeeder {
 
 /// The screen stays lit this long after boot or a button press.
 const SCREEN_ON_MS: u64 = 60_000;
+/// `poweroff` or a long press on the home page: the board goes off this long after (upstream's
+/// `POWEROFF_DELAY`).
+const POWER_OFF_DELAY_MS: u64 = 3000;
 /// The screen's pages; the update page only with two firmware slots.
 const PAGES: &[Page] = &[
     Page::Home,
@@ -574,7 +577,8 @@ async fn main(spawner: Spawner) -> ! {
         .with_sck(p.GPIO9)
         .with_mosi(p.GPIO10)
         .with_miso(p.GPIO11);
-    let nss = Output::new(p.GPIO8, Level::High, OutputConfig::default());
+    let mut nss = Output::new(p.GPIO8, Level::High, OutputConfig::default());
+    nss.set_pad_hold(false); // held high through a power-off
     let reset = Output::new(p.GPIO12, Level::High, OutputConfig::default());
     let busy = Input::new(p.GPIO13, InputConfig::default().with_pull(Pull::None));
     let dio1 = Input::new(p.GPIO14, InputConfig::default().with_pull(Pull::Down));
@@ -840,8 +844,10 @@ async fn main(spawner: Spawner) -> ! {
         (Some(_), Some(_)) => PAGES,
         (Some(_), None) => PAGES_SINGLE_SLOT,
     };
-    let mut ui = Ui::new(pages).with_screen_timeout(SCREEN_ON_MS, now_ms());
-    let mut ui_button = Button::default();
+    // a long press on the home page turns the node off, as upstream's repeater button
+    let mut ui = Ui::new(pages).with_screen_timeout(SCREEN_ON_MS, now_ms()).with_home_action(Action::PowerOff);
+    // still down after the press that turned the board on: that press must not turn it off again
+    let mut ui_button = if button.is_low() { Button::held() } else { Button::default() };
     let mut screen = ScreenPolicy::default();
     let (mut next_view, mut next_oled_try, mut oled_failures) = (0u64, 0u64, 0u8);
     // the PIN of the open update window, for the screen
@@ -871,6 +877,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut next_clock_save = now_ms() + CLOCK_SAVE_INTERVAL_MS;
     let mut last_clock = mesh.ctx.current_time();
     let mut reboot_at: Option<u64> = None;
+    let mut power_off_at: Option<u64> = None;
     let mut ble_until: Option<u64> = None;
     let mut in_trial = in_trial;
     let confirm_at = now_ms() + TRIAL_HEALTHY_MS;
@@ -945,6 +952,7 @@ async fn main(spawner: Spawner) -> ! {
             && wifi.is_some() // no update access point either
             && ble_until.is_none()
             && reboot_at.is_none()
+            && power_off_at.is_none()
             && !(mesh.app.ota.busy() && now < ota_seen + OTA_IDLE_MS)
             && mesh.ctx.outbound_len() == 0
             && room.as_ref().is_none_or(|r| r.ctx.outbound_len() == 0)
@@ -1106,9 +1114,12 @@ async fn main(spawner: Spawner) -> ! {
             next_view = 0;
         }
         ui.tick(now);
-        if let Some(intent) = ui_button.poll(down, now) {
+        if let Some(intent) = ui_button.poll(down, now)
+            && power_off_at.is_none()
+        {
             next_view = 0;
             match ui.press(intent, now) {
+                Some(Action::PowerOff) => mesh.app.effects.power_off = true,
                 Some(Action::Advert) => {
                     let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "advert");
                     ui.alert(Alert::AdvertSent, now);
@@ -1146,7 +1157,11 @@ async fn main(spawner: Spawner) -> ! {
                     wifi: station.is_some(),
                     asleep_pct: sleeper.asleep_pct(),
                 };
-                let view = repeater_view(&mut ui, &mesh, &info, now);
+                let mut view = repeater_view(&mut ui, &mesh, &info, now);
+                if power_off_at.is_some() {
+                    view.body = Body::Off { name: mesh.app.prefs.node_name.clone() };
+                    view.alert = None;
+                }
                 if screen.due(&view, now) {
                     o.set_on(true);
                     if o.show(&view) {
@@ -1408,14 +1423,33 @@ async fn main(spawner: Spawner) -> ! {
                 println!("[room] radio, regions, erase and power are managed on the repeater: ignored");
             }
         }
-        if fx.power_off {
-            println!("Powering off...");
+        // as upstream: "Turning OFF" on the screen and the LED lit for a few seconds (a remote
+        // `poweroff` gets its reply out meanwhile), then deep sleep
+        if fx.power_off && power_off_at.is_none() {
+            println!("Powering off in {} s (the PRG button turns it on again)...", POWER_OFF_DELAY_MS / 1000);
+            power_off_at = Some(now + POWER_OFF_DELAY_MS);
+            ui.wake(now);
+            next_view = 0;
+            led.set_high();
+        }
+        if power_off_at.is_some_and(|t| now >= t) {
+            save(&store, Blob::Clock, &mesh.ctx.current_time().to_le_bytes());
             let _ = radio.sleep();
-            fem.shutdown();
+            fem.power_off();
+            // the radio sleeps until NSS goes low: keep it high while the chip's pins are off
+            let mut nss = Output::new(unsafe { esp_hal::peripherals::GPIO8::steal() }, Level::High, OutputConfig::default());
+            nss.set_pad_hold(true);
             led.set_low();
-            loop {
-                Timer::after_secs(3600).await;
+            if let Some(o) = oled.as_mut() {
+                o.set_on(false);
             }
+            // a button still down would end the sleep at once
+            while button.is_low() {
+                wdt.feed();
+                Timer::after_millis(50).await;
+            }
+            Timer::after_millis(100).await;
+            sleeper.power_off(&mut button);
         }
         prof.mark("end");
         if in_trial && now >= confirm_at {

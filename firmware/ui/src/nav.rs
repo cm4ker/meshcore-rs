@@ -20,13 +20,32 @@ pub struct Ui {
     lit_until: u64,
     /// The press under way began on a dark screen: it only lights it.
     waking: bool,
+    /// What a long press on the home page asks for: nothing on the companion, power-off on the
+    /// repeater (upstream's repeater button).
+    home_action: Option<Action>,
 }
 
 impl Ui {
     /// `pages` in the order [`Intent::Next`] goes through them, the home page first; none = the
     /// board has no interface of its own.
     pub fn new(pages: &'static [Page]) -> Self {
-        Self { pages, idx: 0, last_press: 0, alert: None, battery_mv: None, lit_ms: None, lit_until: 0, waking: false }
+        Self {
+            pages,
+            idx: 0,
+            last_press: 0,
+            alert: None,
+            battery_mv: None,
+            lit_ms: None,
+            lit_until: 0,
+            waking: false,
+            home_action: None,
+        }
+    }
+
+    /// A long press on the home page asks for `action`.
+    pub fn with_home_action(mut self, action: Action) -> Self {
+        self.home_action = Some(action);
+        self
     }
 
     /// The screen goes dark `ms` after the last press (lit from `now` on); a press on a dark
@@ -64,7 +83,12 @@ impl Ui {
         match intent {
             Intent::Next => self.idx = (self.idx + 1) % n,
             Intent::Back => self.idx = (self.idx + n - 1) % n,
-            Intent::Act => return self.page().action(),
+            Intent::Act => {
+                return match self.page() {
+                    Page::Home => self.home_action,
+                    p => p.action(),
+                };
+            }
         }
         None
     }
@@ -135,6 +159,16 @@ mod tests {
         ui.tick(200_000);
         assert!(!ui.screen_on(200_000));
         assert_eq!(ui.page(), Page::Home);
+    }
+
+    #[test]
+    fn a_long_press_on_the_home_page_asks_for_its_action() {
+        let mut ui = Ui::new(PAGES);
+        assert_eq!(ui.press(Intent::Act, 1000), None);
+        let mut ui = Ui::new(PAGES).with_home_action(Action::PowerOff);
+        assert_eq!(ui.press(Intent::Act, 1000), Some(Action::PowerOff));
+        assert_eq!(ui.press(Intent::Next, 2000), None);
+        assert_eq!(ui.press(Intent::Act, 3000), None);
     }
 
     #[test]

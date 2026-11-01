@@ -27,7 +27,7 @@ pub enum FemType {
 #[cfg(not(feature = "heltec-v3"))]
 pub struct Fem<'d> {
     pub kind: FemType,
-    _ldo: Output<'d>,
+    ldo: Output<'d>,
     csd: Flex<'d>,
     /// GC1109: CPS (high = full PA). KCT8103L: CTX (high = TX / LNA bypass).
     ctl: Output<'d>,
@@ -40,7 +40,8 @@ impl<'d> Fem<'d> {
     pub async fn init(
         ldo_pin: AnyPin<'d>, csd_pin: AnyPin<'d>, gc1109_cps: AnyPin<'d>, kct_ctx: AnyPin<'d>, lna_enabled: bool,
     ) -> Self {
-        let ldo = Output::new(ldo_pin, Level::High, OutputConfig::default());
+        let mut ldo = Output::new(ldo_pin, Level::High, OutputConfig::default());
+        ldo.set_pad_hold(false); // held low through a power-off
         Timer::after_millis(1).await; // FEM startup after cold power-on
 
         let mut csd = Flex::new(csd_pin);
@@ -58,7 +59,7 @@ impl<'d> Fem<'d> {
                 Output::new(kct_ctx, if lna_enabled { Level::Low } else { Level::High }, OutputConfig::default())
             }
         };
-        let mut fem = Self { kind, _ldo: ldo, csd, ctl, lna_enabled };
+        let mut fem = Self { kind, ldo, csd, ctl, lna_enabled };
         fem.rx_mode();
         fem
     }
@@ -89,6 +90,13 @@ impl<'d> Fem<'d> {
     pub fn shutdown(&mut self) {
         self.csd.set_low();
         self.ctl.set_low();
+    }
+
+    /// Unpowered until the next boot: the LDO stays off through deep sleep.
+    pub fn power_off(&mut self) {
+        self.shutdown();
+        self.ldo.set_low();
+        self.ldo.set_pad_hold(true);
     }
 
     pub fn name(&self) -> &'static str {
@@ -124,6 +132,8 @@ impl<'d> Fem<'d> {
     pub fn set_lna(&mut self, _enabled: bool) {}
 
     pub fn shutdown(&mut self) {}
+
+    pub fn power_off(&mut self) {}
 
     pub fn name(&self) -> &'static str {
         "Heltec V3"

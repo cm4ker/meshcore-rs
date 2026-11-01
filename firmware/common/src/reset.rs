@@ -29,6 +29,15 @@ pub fn feed() {
     });
 }
 
+/// Stop the watchdog: it keeps counting in deep sleep and would end it with a reset.
+pub fn disarm() {
+    critical_section::with(|cs| {
+        if let Some(rtc) = RTC.borrow_ref_mut(cs).as_mut() {
+            rtc.rwdt.disable();
+        }
+    });
+}
+
 /// Reboot like a cold start.
 pub fn hard_reset() -> ! {
     critical_section::with(|cs| {

@@ -24,6 +24,12 @@ pub struct Button {
 }
 
 impl Button {
+    /// A button already down at boot (its press woke the board): that press is spent, the
+    /// button reports nothing until it goes up.
+    pub fn held() -> Self {
+        Self { down_at: Some(0), long_sent: true, ..Self::default() }
+    }
+
     /// The button's level, sampled every loop pass.
     pub fn poll(&mut self, down: bool, now: u64) -> Option<Intent> {
         match (down, self.down_at) {
@@ -84,5 +90,13 @@ mod tests {
         assert_eq!(run(&mut b, &[(true, 0), (false, 100), (true, 200), (false, 250), (false, 900)]), [Intent::Back]);
         let mut b = Button::default();
         assert_eq!(run(&mut b, &[(true, 0), (true, 999), (true, 1000), (true, 1500), (false, 1600), (false, 2500)]), [Intent::Act]);
+    }
+
+    #[test]
+    fn a_press_held_from_boot_does_nothing() {
+        let mut b = Button::held();
+        assert!(b.is_down());
+        assert_eq!(run(&mut b, &[(true, 100), (true, 5000), (false, 5100), (false, 6000)]), []);
+        assert_eq!(run(&mut b, &[(true, 7000), (true, 8000), (false, 8100)]), [Intent::Act]);
     }
 }

@@ -6,6 +6,7 @@
 //! module only adds the one condition the hardware can tell: a USB host on the port means the
 //! console is in use, and a sleeping chip drops off the bus.
 
+use esp_hal::gpio::{Event, Input, WakeupConfig};
 use esp_hal::peripherals::{LPWR, USB_DEVICE};
 use esp_hal::rtc_cntl::sleep::{LowPower, RtcSleepConfig};
 use esp_hal::time::{Duration, Instant};
@@ -49,6 +50,17 @@ impl<'d> Sleeper<'d> {
         crate::reset::feed();
         self.asleep += start.elapsed();
         self.wakes += 1;
+    }
+
+    /// Off, as upstream's `ESP32Board::powerOff`: deep sleep with the watchdog stopped. A low
+    /// level on `wake` (a low-power pad: the button, pulled up) turns the board on again, as a
+    /// reset does; it must be up by now, or the sleep ends at once. Hold the pads that must keep
+    /// their level first.
+    pub fn power_off(&mut self, wake: &mut Input<'_>) -> ! {
+        let _ = wake.apply_wakeup_config(&WakeupConfig::default().with_low_power_path(true));
+        wake.listen(Event::LowLevel);
+        crate::reset::disarm();
+        self.lp.sleep_deep(RtcSleepConfig::deep())
     }
 
     /// The share of the uptime spent asleep, in percent.
