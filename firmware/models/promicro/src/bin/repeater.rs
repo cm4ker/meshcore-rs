@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -48,7 +49,7 @@ use meshcore_fw_core::storage::{Blob, SharedStore, Store};
 use meshcore_fw_core::sx1262::Sx1262;
 use promicro::board::{self, Battery};
 use promicro::ina219::{self, Ina219};
-use promicro::{DATA_REGION, console, println};
+use promicro::{DATA_REGION, console, ota, println};
 use static_cell::StaticCell;
 
 const BUILD_EPOCH: &str = env!("BUILD_EPOCH");
@@ -246,6 +247,9 @@ async fn main(spawner: Spawner) {
     // ---- persistent state
     let flash = Nvmc::new(p.NVMC);
     let store: NrfStore = Some(Rc::new(RefCell::new(Store::with_regions(flash, DATA_REGION, None))));
+    if let Some(s) = &store {
+        ota::clear_request(s);
+    }
     let prefs = load(&store, Blob::Prefs)
         .map(|d| NodePrefs::deserialize(&String::from_utf8_lossy(&d)))
         .unwrap_or_else(|| NodePrefs { tx_power_dbm: DEFAULT_TX_DBM, ..Default::default() });
@@ -360,6 +364,10 @@ async fn main(spawner: Spawner) {
         mesh.app.regions = meshcore::region::RegionMap::deserialize(&String::from_utf8_lossy(&regions));
     }
     mesh.app.ota.build.board = meshcore::release::board::PROMICRO;
+    match store.clone().and_then(ota::StagingTarget::new) {
+        Some(t) => mesh.app.ota.target = Some(Box::new(t)),
+        None => warn!("OTA: the bootloader checks this app's CRC (BLE DFU): updates over USB only"),
+    }
     mesh.begin(now_ms());
     mesh.app.start(&mut mesh.ctx);
     let mut room = mesh.app.prefs.room.then(|| {
@@ -577,7 +585,7 @@ async fn main(spawner: Spawner) {
             let _ = radio.set_rx_boosted_gain(on);
         }
         if fx.start_ota.is_some() || fx.start_ble_ota.is_some() {
-            println!("updates on this board go over USB (UF2)");
+            println!("no Wi-Fi or BLE on this board: updates go over LoRa or USB (UF2)");
         }
         if fx.erase {
             if let Some(s) = &store {
@@ -619,6 +627,9 @@ async fn main(spawner: Spawner) {
 
         if reboot_at.is_some_and(|t| now >= t) {
             save(&store, Blob::Clock, &mesh.ctx.current_time().to_le_bytes());
+            if ota::INSTALL_PENDING.load(core::sync::atomic::Ordering::Relaxed) {
+                ota::hand_over();
+            }
             cortex_m::peripheral::SCB::sys_reset();
         }
     }

@@ -6,6 +6,7 @@ encrypted with the admin's shared secret, so only a logged-in admin can push fir
     pip install meshcore
     espflash save-image --chip esp32s3 --flash-size 16mb <elf> firmware.bin
     python meshcore_ota.py --port COM4 --node PKIO --password-file pw.txt firmware.bin
+    python meshcore_ota.py --ble D8:E6:C5:14:21:A8 --node PKIO ...   # a companion over BLE
 
 Delta updates: the repeater reports the SHA-256 of the image it runs; if that image is in the
 image store (--images, default firmware/models/heltec-v4/images), only a bsdiff patch is sent (made by
@@ -174,7 +175,8 @@ class Ota:
 async def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("image")
-    ap.add_argument("--port")
+    ap.add_argument("--port", help="the companion's serial port")
+    ap.add_argument("--ble", help="or its BLE address (paired with this computer first)")
     ap.add_argument("--node", help="repeater contact name (or public key prefix)")
     ap.add_argument("--password", help="admin password (other users see it in the process list: "
                     "prefer --password-file, or leave both out to be asked)")
@@ -191,8 +193,8 @@ async def main():
     if args.register:
         log(f"stored as {store_image(args.images, load_firmware(args.image)[0])}")
         return
-    if not args.port or not args.node:
-        sys.exit("--port and --node are required")
+    if not (args.port or args.ble) or not args.node:
+        sys.exit("--port (or --ble) and --node are required")
 
     password = args.password
     if args.password_file:
@@ -205,7 +207,10 @@ async def main():
         log(describe_envelope(envelope))
     payload = image if args.no_compress else zlib.compress(image, 9)
 
-    mc = await MeshCore.create_serial(args.port, 115200, only_error=True)
+    if args.ble:
+        mc = await MeshCore.create_ble(args.ble, only_error=True)
+    else:
+        mc = await MeshCore.create_serial(args.port, 115200, only_error=True)
     try:
         info = (await mc.commands.send_appstart()).payload
         sf, bw, cr = info["radio_sf"], info["radio_bw"], info["radio_cr"]

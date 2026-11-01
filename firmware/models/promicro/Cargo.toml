@@ -29,6 +29,7 @@ embedded-alloc = "0.6"
 static_cell = "2.1.1"
 log = "0.4.27"
 heapless = "0.9"
+embedded-storage = "0.3"
 meshcore = { version = "0.1.0", path = "../../../crates/meshcore" }
 meshcore-fw-core = { version = "0.1.0", path = "../../fw-core" }
 

@@ -15,11 +15,11 @@
 | Heltec WiFi LoRa 32 V3 | тот же, фича `heltec-v3` | ESP32-S3, SX1262 без FEM, flash 8 МБ | OLED 128×64 | да, как V4 | собирается, на плате не проверен | как V4 | как V4, слоты по 3,4 МБ |
 | Seeed XIAO ESP32-C6 + Waveshare Core2021-HF | `firmware/models/xiao-c6` | ESP32-C6, Semtech LR2021, flash 4 МБ | нет | нет | да | BLE или Wi-Fi (не вместе; TCP пока ненадёжен), USB | через подключение приложения; два слота по 1,75 МБ, целый образ без сжатия |
 | LilyGO T-Echo | `firmware/models/t-echo` | nRF52840, SX1262, QSPI-флешка | e-paper 200×200 | нет | да, с GPS L76K | BLE, USB | через подключение приложения; один слот, без отката; первая прошивка — UF2 |
-| nRF52840 Pro Micro («Faketec», upstream `promicro`) | `firmware/models/promicro` | nRF52840, SX1262 (HT-RA62, E22), только внутренняя flash | нет | да: room server, INA219 в телеметрии; без Wi-Fi и BLE | нет | USB (консоль) | нет, только UF2 по USB |
+| nRF52840 Pro Micro («Faketec», upstream `promicro`) | `firmware/models/promicro` | nRF52840, SX1262 (HT-RA62, E22), только внутренняя flash | нет | да: room server, INA219 в телеметрии; без Wi-Fi и BLE | нет | USB (консоль) | LoRa (подписанный релиз, дельта); один слот, без отката; первая прошивка — UF2 |
 
 В выпуске на GitHub у каждой сборки свой файл `<плата>-<роль>-<версия>-r<номер>.mcfw`
 (`heltec-v4-repeater`, `heltec-v3-companion`, `xiao-c6-companion`, `t-echo-companion`…), у T-Echo
-и Pro Micro ещё `.uf2` для загрузчика по USB (Pro Micro обновляется только им).
+и Pro Micro ещё `.uf2` для загрузчика по USB.
 
 ## Возможности
 
@@ -136,6 +136,7 @@ firmware/models/        платы, у каждой свой крейт: про�
   promicro/             nRF52840 Pro Micro + SX1262 (embassy-nrf): репитер; консоль на USB,
                         настройки во внутренней flash (0xDA000..0xEA000); INA219 на I2C
                         (SDA P1.04, SCL P0.11) в телеметрии, как у upstream
+    installer/          установщик обновления (переносит принятый образ из 0x7B000 в 0x26000)
 tools/uf2/              ELF -> UF2 и прошивка платы с UF2-загрузчиком (T-Echo, Pro Micro)
 tools/provision/        образ раздела настроек (перенос ключа и конфигурации с другой прошивки)
 tools/ota-lora/         обновление репитера по LoRa через компаньон (Python, библиотека meshcore)
@@ -222,6 +223,17 @@ serial DFU, а не в UF2. Дальше `flash_uf2.py` перезапускае
 node.bin@0xDA000` кладёт её в тот же UF2. Загрузчик берёт блоки только ниже 0xEA000: UF2 с блоком
 выше не завершается, и до сброса загрузчик не примет и следующий файл. Файловую систему upstream
 (0xED000..0xF4000, в ней пароль админа и ACL) прошивка не трогает; в `CURRENT.UF2` её нет.
+
+Обновления по LoRa Pro Micro принимает во внутреннюю flash: приложение до 340 КБ (0x26000..0x7B000),
+принятый образ в 0x7B000..0xD9000, после проверки установщик (0xEA000) переносит его на место и при
+потере питания начинает перенос заново. Целый образ со сжатием туда не помещается, поэтому по
+эфиру идут дельты; база — образ, который на узле стоит (`meshcore_ota.py --register --images
+firmware\models\promicro\images` для прошитого по USB). По LoRa принимается только релиз,
+подписанный закреплённым root (`set ota.root` по USB), как на других платах:
+
+```powershell
+python tools\ota-lora\meshcore_ota.py --ble D8:E6:C5:14:21:A8 --node <ключ> --password-file pw.txt --images firmware\models\promicro\images release.mcfw
+```
 
 Спящую ноду (`powersaving on`) по USB не прошить: сначала разбудить её кнопкой PRG или выключить
 сон удалённо (`powersaving off` по LoRa). `--erase-parts otadata` нужен, чтобы загрузчик стартовал со слота 0. Ключ и настройки лежат в
