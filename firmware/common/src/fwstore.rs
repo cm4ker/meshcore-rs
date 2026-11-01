@@ -40,7 +40,8 @@ const SECTOR: usize = 4096;
 /// The server said it has no update from an image: believed this long (a check by hand asks
 /// again at once, see `refresh`).
 const MISS_SECS: u64 = 600;
-/// A neighbour may make this node ask the server again at most this often.
+/// A check by hand makes this node ask the server again about an image at most this often (per
+/// image: one node's checks don't hold up another's, or this node's own `fw update`).
 const REFRESH_SECS: u64 = 60;
 /// After a failed fetch.
 const FAIL_SECS: u64 = 600;
@@ -82,7 +83,8 @@ struct State {
     /// (image, release asked from, until): the server had nothing newer.
     misses: Vec<(Key, u32, u64)>,
     failed_until: u64,
-    last_refresh: u64,
+    /// (image, when): the last checks by hand.
+    refreshed: Vec<(Key, u64)>,
     status: String,
 }
 
@@ -92,7 +94,7 @@ static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
     fetching: None,
     misses: Vec::new(),
     failed_until: 0,
-    last_refresh: 0,
+    refreshed: Vec::new(),
     status: String::new(),
 }));
 static ONLINE: AtomicBool = AtomicBool::new(false);
@@ -185,10 +187,11 @@ impl FwStore for FlashFwStore {
         let key = Key::from(q);
         let now = secs();
         with(|s| {
-            if now < s.last_refresh + REFRESH_SECS && s.last_refresh != 0 {
+            s.refreshed.retain(|r| now < r.1 + REFRESH_SECS);
+            if s.refreshed.iter().any(|r| r.0 == key) {
                 return;
             }
-            s.last_refresh = now;
+            s.refreshed.push((key, now));
             s.misses.retain(|m| m.0 != key);
             s.failed_until = 0;
         });
