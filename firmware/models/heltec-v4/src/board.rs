@@ -139,3 +139,20 @@ pub const DEFAULT_TX_DBM: i8 = 22;
 
 /// Battery voltage divider on the V3 and V4 is 390k/100k.
 pub const BATTERY_DIVIDER: f32 = 4.9;
+
+/// Upstream's `ADC_MULTIPLIER` of the V4 (the V3 has none), which `get adc.multiplier` shows.
+/// Upstream reads the battery as `multiplier × 3.3 V / 1024 × raw`, uncalibrated; this firmware
+/// keeps its calibrated reading and scales it by `multiplier / 5.42`, so a value tuned on
+/// upstream corrects it by as much.
+#[cfg(not(feature = "heltec-v3"))]
+pub const ADC_MULTIPLIER: Option<f32> = Some(5.42);
+#[cfg(feature = "heltec-v3")]
+pub const ADC_MULTIPLIER: Option<f32> = None;
+
+/// How much the multiplier in use (`Repeater::adc_multiplier`) scales the battery reading.
+pub fn battery_scale(multiplier: Option<f32>) -> f32 {
+    match (ADC_MULTIPLIER, multiplier) {
+        (Some(own), Some(m)) if m > 0.0 => m / own,
+        _ => 1.0,
+    }
+}

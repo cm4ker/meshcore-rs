@@ -178,7 +178,9 @@ fn start_room(store: &NrfStore, rep: &Mesh<Repeater>, entropy: &[u8], rng_seed: 
     prefs.radio = rp.radio;
     prefs.tx_power_dbm = rp.tx_power_dbm;
     let ctx = MeshCtx::new(id.clone(), rng_seed, rep.ctx.radio, rep.ctx.current_time());
-    let mut room = Mesh::new(ctx, Repeater::new_room_server(prefs, rep.app.board.clone()));
+    // the battery reading is the repeater's: `adc.multiplier` is set there
+    let board = BoardInfo { adc_multiplier: None, ..rep.app.board.clone() };
+    let mut room = Mesh::new(ctx, Repeater::new_room_server(prefs, board));
     if let Some(acl) = load(store, Blob::RoomAcl) {
         room.app.acl_load(&acl, &id);
     }

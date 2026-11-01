@@ -500,7 +500,8 @@ fn start_room(store: &Option<SharedStore<'_>>, rep: &Mesh<Repeater>, entropy: &[
     });
     prefs.radio = rp.radio;
     prefs.tx_power_dbm = rp.tx_power_dbm;
-    let board = BoardInfo { wifi_ota_ssid: None, ble_ota_name: None, ..rep.app.board.clone() };
+    // the battery reading is the repeater's: `adc.multiplier` is set there
+    let board = BoardInfo { wifi_ota_ssid: None, ble_ota_name: None, adc_multiplier: None, ..rep.app.board.clone() };
     let ctx = MeshCtx::new(id.clone(), rng_seed, rep.ctx.radio, rep.ctx.current_time());
     let mut room = Mesh::new(ctx, Repeater::new_room_server(prefs, board));
     if let Some(acl) = load(store, Blob::RoomAcl) {
@@ -628,7 +629,8 @@ async fn main(spawner: Spawner) -> ! {
     let bat_pin = adc_cfg.enable_pin_with_cal::<_, AdcCalCurve<ADC1>>(p.GPIO1, Attenuation::_11dB);
     let mut battery = Battery::new(Adc::new(p.ADC1, adc_cfg), bat_pin, p.GPIO37);
     info!("boot: battery");
-    let batt_mv = battery.read_mv().await;
+    let set_multiplier = (prefs.adc_multiplier > 0.0).then_some(prefs.adc_multiplier);
+    let batt_mv = (battery.read_mv().await as f32 * heltec_v4::board::battery_scale(set_multiplier)) as u16;
     wdt.feed();
 
     // ---- mesh
@@ -656,6 +658,7 @@ async fn main(spawner: Spawner) -> ! {
         build_date: BUILD_DATE.into(),
         wifi_ota_ssid: slots.map(|_| ota_ssid(&prefs.node_name)),
         ble_ota_name: slots.map(|_| ota_ssid(&prefs.node_name)),
+        adc_multiplier: heltec_v4::board::ADC_MULTIPLIER,
         ..Default::default()
     };
     let mut mesh = Mesh::new(ctx, Repeater::new(prefs, board));
@@ -1075,7 +1078,8 @@ async fn main(spawner: Spawner) -> ! {
         prof.mark("batt");
         if now >= next_batt {
             next_batt = now + 60_000;
-            mesh.app.board.batt_mv = battery.read_mv().await;
+            let scale = heltec_v4::board::battery_scale(mesh.app.adc_multiplier());
+            mesh.app.board.batt_mv = (battery.read_mv().await as f32 * scale) as u16;
             if let Some(r) = room.as_mut() {
                 r.app.board.batt_mv = mesh.app.board.batt_mv;
             }
