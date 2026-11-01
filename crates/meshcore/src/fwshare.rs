@@ -600,4 +600,11 @@ mod tests {
         assert_eq!(r[0], status::TOO_LARGE);
         assert_eq!(u32::from_le_bytes(r[1..5].try_into().unwrap()), file.len() as u32);
     }
+
+    /// The release workflow warns about deltas over the same limit.
+    #[test]
+    fn the_release_workflow_knows_the_lora_limit() {
+        let workflow = include_str!("../../../.github/workflows/release.yml");
+        assert!(workflow.contains(&alloc::format!("lora_max={MAX_LORA_FILE}")), "release.yml: lora_max={MAX_LORA_FILE}");
+    }
 }

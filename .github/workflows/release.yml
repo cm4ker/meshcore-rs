@@ -234,6 +234,9 @@ jobs:
           set -euo pipefail
           sign=target/release/ota-sign
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
+          # meshcore::fwshare::MAX_LORA_FILE: repeaters hand nothing larger on over LoRa
+          lora_max=61440
+          printf '| delta | from | size |\n|---|---|---|\n' > deltas.md
           tags=$(gh release list --limit 30 --exclude-drafts --json tagName -q '.[].tagName')
           declare -A assets
           for tag in $tags; do
@@ -250,10 +253,18 @@ jobs:
               delta=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.from-${tag##*-}.mcfd
               $sign delta "prev/$tag/$base" "$mcfw" -o "$delta"
               $sign verify "$delta" --root "$root" --base "prev/$tag/$base"
+              size=$(stat -c %s "$delta")
+              mark=""
+              if [ "$size" -gt "$lora_max" ]; then
+                mark=" (over the LoRa limit)"
+                echo "::warning title=Delta over the LoRa limit::$name from $tag is $((size / 1024)) KB, more than $((lora_max / 1024)) KB: nodes on $tag take it over Wi-Fi, USB or BLE only, not from a neighbour over LoRa"
+              fi
+              echo "| $name | $tag | $((size / 1024)) KB$mark |" >> deltas.md
               n=$((n + 1))
               [ "$n" -lt 3 ] || break
             done
           done
+          cat deltas.md >> "$GITHUB_STEP_SUMMARY"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
