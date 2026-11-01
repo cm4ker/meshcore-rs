@@ -89,6 +89,8 @@ const LPP_VOLTAGE: u8 = 116;
 const UPLINK_QUEUE_MAX: usize = 24;
 const LPP_TEMPERATURE: u8 = 103;
 const TELEM_CHANNEL_SELF: u8 = 1;
+/// Telemetry of environment sensors (upstream `TELEM_PERM_ENVIRONMENT`).
+const TELEM_PERM_ENVIRONMENT: u8 = 0x04;
 
 /// A client known to this repeater (logged-in admin or guest).
 #[derive(Clone, Debug)]
@@ -239,6 +241,9 @@ pub struct BoardInfo {
     /// The board's own battery multiplier (millivolts per ADC step) if `set adc.multiplier`
     /// calibrates its reading; none = unsupported.
     pub adc_multiplier: Option<f32>,
+    /// Environment sensors as CayenneLPP records (`crate::lpp`; channel 2 on, as upstream numbers
+    /// them), kept by the firmware: telemetry carries them to clients allowed environment data.
+    pub sensor_lpp: Vec<u8>,
     /// How much the board slept, for `powersaving stats`, kept by the firmware.
     pub power_status: String,
     /// Network status lines for `get wifi.status` / `get mqtt.status`, kept by the firmware.
@@ -878,6 +883,12 @@ impl Repeater {
                 let volts = (self.board.batt_mv as u32 / 10) as u16; // 0.01 V
                 r.extend_from_slice(&[TELEM_CHANNEL_SELF, LPP_VOLTAGE]);
                 r.extend_from_slice(&volts.to_be_bytes());
+                // the first byte after the type masks out what the client does not want (inverted);
+                // a guest gets the battery only
+                let guest = self.acl[client_idx].permissions & PERM_ACL_ROLE_MASK == PERM_ACL_GUEST;
+                if !guest && (!at(1) & TELEM_PERM_ENVIRONMENT) != 0 {
+                    r.extend_from_slice(&self.board.sensor_lpp);
+                }
                 if let Some(t) = self.board.mcu_temp_c {
                     r.extend_from_slice(&[TELEM_CHANNEL_SELF, LPP_TEMPERATURE]);
                     r.extend_from_slice(&((t * 10.0) as i16).to_be_bytes());

@@ -10,6 +10,7 @@ extern crate alloc;
 
 pub mod board;
 pub mod console;
+pub mod ina219;
 
 /// The node's data in the internal flash (`meshcore_fw_core::storage`, the 64 KiB layout
 /// `tools/provision` writes): right below 0xEA000, the end of what the Adafruit bootloader takes

@@ -4,7 +4,7 @@
 //! `variant.cpp`): SX1262 on SPI (SCK P1.11, MOSI P1.15, MISO P0.02, NSS P1.13), RESET P0.09,
 //! DIO1 P0.10, BUSY P0.29, its supply on P0.13, RXEN P0.17 (DIO2 switches the antenna to TX),
 //! a 1.8 V TCXO on DIO3; the button P1.00 (low while pressed), the LED P0.15 (active high), the
-//! battery on P0.31 (AIN7) behind a divider.
+//! battery on P0.31 (AIN7) behind a divider; I2C for sensors on SDA P1.04, SCL P0.11.
 
 use core::mem::MaybeUninit;
 
@@ -57,12 +57,10 @@ pub fn clock_store(epoch: u32) {
 /// The serial number the Adafruit firmware gives the USB port (the chip's device ID), so the
 /// host keeps the board's COM port.
 pub fn usb_serial() -> heapless::String<16> {
+    // `%08X%08X` of DEVICEID[1], DEVICEID[0]
     let mut s = heapless::String::new();
-    for i in 0..2 {
-        for b in pac::FICR.deviceid(i).read().to_le_bytes() {
-            let _ = core::fmt::write(&mut s, format_args!("{b:02X}"));
-        }
-    }
+    let (hi, lo) = (pac::FICR.deviceid(1).read(), pac::FICR.deviceid(0).read());
+    let _ = core::fmt::write(&mut s, format_args!("{hi:08X}{lo:08X}"));
     s
 }
 

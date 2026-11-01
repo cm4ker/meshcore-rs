@@ -24,6 +24,8 @@ use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::rng::Rng;
 use embassy_nrf::saadc::{self, ChannelConfig, Saadc};
 use embassy_nrf::spim::{self, Spim};
+use embassy_nrf::temp::{self, Temp};
+use embassy_nrf::twim::{self, Twim};
 use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::wdt::{self, Watchdog};
@@ -45,6 +47,7 @@ use meshcore_fw_core::radio::{LoraRadio, RxEvent, WaitIrq};
 use meshcore_fw_core::storage::{Blob, SharedStore, Store};
 use meshcore_fw_core::sx1262::Sx1262;
 use promicro::board::{self, Battery};
+use promicro::ina219::{self, Ina219};
 use promicro::{DATA_REGION, console, println};
 use static_cell::StaticCell;
 
@@ -65,6 +68,9 @@ const CLOCK_SAVE_INTERVAL_MS: u64 = 30 * 60 * 1000;
 
 const HEAP_SIZE: usize = 144 * 1024;
 
+/// Telemetry answers with sensor readings at most this old.
+const SENSOR_INTERVAL_MS: u64 = 15_000;
+
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
@@ -73,6 +79,8 @@ bind_interrupts!(struct Irqs {
     CLOCK_POWER => usb::vbus_detect::InterruptHandler;
     SPI2 => spim::InterruptHandler<peripherals::SPI2>;
     SAADC => saadc::InterruptHandler;
+    TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+    TEMP => temp::InterruptHandler;
 });
 
 #[panic_handler]
@@ -304,6 +312,24 @@ async fn main(spawner: Spawner) {
     let batt_mv = battery.read_mv(if prefs.adc_multiplier > 0.0 { prefs.adc_multiplier } else { board::BATT_MV_PER_LSB }).await;
     // the button wakes the board from `poweroff`
     let _button = Input::new(p.P1_00, Pull::Up);
+    // the chip's own thermometer, as upstream's nRF52 boards report
+    let mut mcu_temp = Temp::new(p.TEMP, Irqs);
+    let mcu_temp_c = mcu_temp.read().await.to_bits() as f32 / 4.0;
+
+    // ---- sensors on the I2C (upstream scans for them the same way: present or not)
+    let mut icfg = twim::Config::default();
+    icfg.sda_pullup = true;
+    icfg.scl_pullup = true;
+    static TWIM_BUF: StaticCell<[u8; 8]> = StaticCell::new();
+    let i2c = Twim::new(p.TWISPI0, Irqs, p.P1_04, p.P0_11, icfg, TWIM_BUF.init([0; 8]));
+    let mut ina = Ina219::probe(i2c).await;
+    match ina.as_mut() {
+        Some(s) => match s.read().await {
+            Some(r) => info!("INA219 at 0x{:02X}: {:.3} V, {:.1} mA, {:.0} mW", ina219::ADDRESS, r.bus_v, r.current_ma, r.power_mw),
+            None => warn!("INA219 at 0x{:02X}: no reading", ina219::ADDRESS),
+        },
+        None => info!("no INA219 on the I2C"),
+    }
 
     // ---- mesh
     let rng_seed: [u8; 16] = entropy[32..48].try_into().unwrap();
@@ -319,6 +345,7 @@ async fn main(spawner: Spawner) {
     let board_info = BoardInfo {
         manufacturer: "ProMicro DIY".into(),
         batt_mv,
+        mcu_temp_c: Some(mcu_temp_c),
         build_date: BUILD_DATE.into(),
         adc_multiplier: Some(board::BATT_MV_PER_LSB),
         ..Default::default()
@@ -347,6 +374,7 @@ async fn main(spawner: Spawner) {
     let mut noise = NoiseFloor::new();
     let mut next_noise = 0u64;
     let mut next_batt = now_ms() + 60_000;
+    let mut next_sensors = 0u64;
     let mut next_agc_reset = 0u64;
     let mut next_clock_save = now_ms() + CLOCK_SAVE_INTERVAL_MS;
     let mut last_clock = mesh.ctx.current_time();
@@ -463,8 +491,25 @@ async fn main(spawner: Spawner) {
         if now >= next_batt {
             next_batt = now + 60_000;
             mesh.app.board.batt_mv = battery.read_mv(mesh.app.adc_multiplier().unwrap_or(board::BATT_MV_PER_LSB)).await;
+            mesh.app.board.mcu_temp_c = Some(mcu_temp.read().await.to_bits() as f32 / 4.0);
             if let Some(r) = room.as_mut() {
                 r.app.board.batt_mv = mesh.app.board.batt_mv;
+                r.app.board.mcu_temp_c = mesh.app.board.mcu_temp_c;
+            }
+        }
+
+        // sensors for telemetry: the first one found on channel 2, as upstream numbers them
+        if now >= next_sensors {
+            next_sensors = now + SENSOR_INTERVAL_MS;
+            if let Some(s) = ina.as_mut() {
+                let mut lpp = Vec::new();
+                if let Some(r) = s.read().await {
+                    r.lpp(meshcore::lpp::CHANNEL_SELF + 1, &mut lpp);
+                }
+                if let Some(r) = room.as_mut() {
+                    r.app.board.sensor_lpp = lpp.clone();
+                }
+                mesh.app.board.sensor_lpp = lpp;
             }
         }
 

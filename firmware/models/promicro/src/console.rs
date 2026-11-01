@@ -17,6 +17,7 @@ use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
+use embassy_time::Timer;
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{ControlChanged, Receiver, Sender};
 
@@ -125,8 +126,13 @@ pub async fn rx_task(mut rx: Receiver<'static, UsbDriver>, control: ControlChang
 pub async fn tx_task(mut tx: Sender<'static, UsbDriver>) {
     loop {
         let data = OUT.receive().await;
-        while !HOST.load(Ordering::Relaxed) {
-            HOST_CHANGED.wait().await;
+        if !HOST.load(Ordering::Relaxed) {
+            while !HOST.load(Ordering::Relaxed) {
+                HOST_CHANGED.wait().await;
+            }
+            // a host that has just opened the port may clear what came in first (pyserial on
+            // Windows raises DTR, then purges): the boot log would be lost
+            Timer::after_millis(200).await;
         }
         for chunk in data.chunks(PACKET) {
             if tx.write_packet(chunk).await.is_err() {

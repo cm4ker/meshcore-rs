@@ -673,3 +673,51 @@ fn adc_multiplier_calibrates_the_battery_reading() {
     assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set adc.multiplier 0"), "OK - using default board multiplier");
     assert_eq!(r.app.adc_multiplier(), Some(1.815));
 }
+
+/// Log `c` in with `password` (zero-hop direct), then ask for telemetry with the inverted
+/// permission mask byte `mask`; the reply's CayenneLPP records.
+fn telemetry(r: &mut Mesh<Repeater>, c: &mut Mesh<Client>, password: &[u8], mask: u8) -> Vec<u8> {
+    let r_id = r.ctx.self_id.id;
+    let secret = c.ctx.self_id.calc_shared_secret(&r_id.pub_key).unwrap();
+    c.app.peer = Some((r_id, secret));
+    let mut login = 1_760_000_100u32.to_le_bytes().to_vec();
+    login.extend_from_slice(password);
+    let mut pkt = c.ctx.create_anon_datagram(&r_id, &secret, &login).unwrap();
+    pkt.set_route_type(ROUTE_TYPE_DIRECT);
+    pkt.path_len = 0;
+    r.on_rx_frame(10, &frame(&pkt), 7.0, -60.0);
+    for f in drain_tx(r, LATER) {
+        c.on_rx_frame(LATER, &f, 7.0, -60.0);
+    }
+    let mut q = 1_760_000_200u32.to_le_bytes().to_vec();
+    q.extend_from_slice(&[0x03, mask, 0, 0, 0]);
+    let mut p = c.ctx.create_datagram(PAYLOAD_TYPE_REQ, &r_id, &secret, &q).unwrap();
+    p.set_route_type(ROUTE_TYPE_DIRECT);
+    p.path_len = 0;
+    r.on_rx_frame(2 * LATER, &frame(&p), 7.0, -60.0);
+    for f in drain_tx(r, 3 * LATER) {
+        c.on_rx_frame(3 * LATER, &f, 7.0, -60.0);
+    }
+    // the plaintext is padded with zeros to the cipher's block (no record here ends in one)
+    let body = &c.app.responses.last().expect("a telemetry reply")[4..];
+    body[..body.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1)].to_vec()
+}
+
+/// Sensors (an INA219 on channel 2) go to an admin that wants them, never to a guest, as upstream.
+#[test]
+fn telemetry_carries_the_sensors_to_whoever_may_see_them() {
+    let mut r = repeater(1);
+    r.app.prefs.guest_password = "guest".into();
+    let mut sensors = Vec::new();
+    meshcore::lpp::push(&mut sensors, 2, meshcore::lpp::VOLTAGE, 4.12);
+    meshcore::lpp::push(&mut sensors, 2, meshcore::lpp::CURRENT, 0.021);
+    r.app.board.sensor_lpp = sensors.clone();
+    let battery = [1, 116, 0x01, 0x9A]; // 4100 mV
+
+    let all = telemetry(&mut r, &mut client(2), b"password", 0x00);
+    assert_eq!(all, [&battery[..], &sensors[..]].concat());
+    let no_env = telemetry(&mut r, &mut client(3), b"password", 0x04);
+    assert_eq!(no_env, battery, "the client masked environment data out");
+    let guest = telemetry(&mut r, &mut client(4), b"guest", 0x00);
+    assert_eq!(guest, battery, "a guest gets the battery only");
+}
