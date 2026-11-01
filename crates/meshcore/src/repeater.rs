@@ -244,6 +244,9 @@ pub struct BoardInfo {
     /// Environment sensors as CayenneLPP records (`crate::lpp`; channel 2 on, as upstream numbers
     /// them), kept by the firmware: telemetry carries them to clients allowed environment data.
     pub sensor_lpp: Vec<u8>,
+    /// The UF2 bootloader's version on nRF52 boards (`get bootloader.ver`; empty = not found);
+    /// none = the board has no such bootloader.
+    pub bootloader_version: Option<String>,
     /// How much the board slept, for `powersaving stats`, kept by the firmware.
     pub power_status: String,
     /// Network status lines for `get wifi.status` / `get mqtt.status`, kept by the firmware.
@@ -1987,7 +1990,11 @@ impl Repeater {
         } else if self.board.bridge.is_some() && cfg.starts_with("bridge.secret") {
             format!("> {}", p.bridge_secret)
         } else if cfg.starts_with("bootloader.ver") {
-            "Error: unsupported".into()
+            match self.board.bootloader_version.as_deref() {
+                Some("") => "> unknown".into(),
+                Some(v) => format!("> {v}"),
+                None => "Error: unsupported".into(),
+            }
         } else if cfg.starts_with("adc.multiplier") {
             match self.adc_multiplier() {
                 Some(m) => format!("> {m:.3}"),

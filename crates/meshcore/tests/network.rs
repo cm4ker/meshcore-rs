@@ -721,3 +721,14 @@ fn telemetry_carries_the_sensors_to_whoever_may_see_them() {
     let guest = telemetry(&mut r, &mut client(4), b"guest", 0x00);
     assert_eq!(guest, battery, "a guest gets the battery only");
 }
+
+/// `get bootloader.ver` as upstream: the version on nRF52 boards, `unknown` if not found there.
+#[test]
+fn bootloader_version_from_the_board() {
+    let mut r = repeater(1);
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get bootloader.ver"), "Error: unsupported");
+    r.app.board.bootloader_version = Some(String::new());
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get bootloader.ver"), "> unknown");
+    r.app.board.bootloader_version = Some("0.9.2-OTAFIX2.2-BP1.3".into());
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get bootloader.ver"), "> 0.9.2-OTAFIX2.2-BP1.3");
+}

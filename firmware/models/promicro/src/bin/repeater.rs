@@ -354,6 +354,7 @@ async fn main(spawner: Spawner) {
         mcu_temp_c: Some(mcu_temp_c),
         build_date: BUILD_DATE.into(),
         adc_multiplier: Some(board::BATT_MV_PER_LSB),
+        bootloader_version: Some(board::bootloader_version()),
         ..Default::default()
     };
     let mut mesh = Mesh::new(ctx, Repeater::new(prefs, board_info));

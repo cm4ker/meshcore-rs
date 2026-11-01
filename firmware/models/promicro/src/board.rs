@@ -54,6 +54,20 @@ pub fn clock_store(epoch: u32) {
     unsafe { (&raw mut CLOCK).cast::<[u32; 2]>().write_volatile([CLOCK_MAGIC ^ epoch, epoch]) };
 }
 
+/// The UF2 bootloader's version, as upstream's `NRF52Board::getBootloaderVersion` finds it: the
+/// word after "UF2 Bootloader " in its info text (0xFB000..0xFE000); empty if there is none.
+pub fn bootloader_version() -> alloc::string::String {
+    const MARKER: &[u8] = b"UF2 Bootloader ";
+    // SAFETY: the bootloader's flash, memory-mapped and readable
+    let flash = unsafe { core::slice::from_raw_parts(0xFB000 as *const u8, 0x3000) };
+    let Some(at) = flash.windows(MARKER.len()).position(|w| w == MARKER) else {
+        return alloc::string::String::new();
+    };
+    let ver = &flash[at + MARKER.len()..];
+    let len = ver.iter().take(31).position(|&c| matches!(c, 0 | b' ' | b'\n' | b'\r')).unwrap_or(ver.len().min(31));
+    alloc::string::String::from_utf8_lossy(&ver[..len]).into_owned()
+}
+
 /// The serial number the Adafruit firmware gives the USB port (the chip's device ID), so the
 /// host keeps the board's COM port.
 pub fn usb_serial() -> heapless::String<16> {
