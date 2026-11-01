@@ -1556,3 +1556,31 @@ fn fw_source_names_the_neighbour_a_repeater_pulls_from() {
     assert_eq!(cli(&mut r, "set fw.source auto"), "OK - updates from the release server, or from the best neighbour over LoRa without it");
     assert_eq!(cli(&mut r, "get fw.source"), "> auto");
 }
+
+#[test]
+fn a_delta_larger_than_lora_carries_is_not_pulled() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&[1u8; 3000]);
+    // new code that does not compress: its delta is about as large as itself
+    let mut x = 1u32;
+    let noise: Vec<u8> = (0..70_000)
+        .map(|_| {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (x >> 16) as u8
+        })
+        .collect();
+    let file = delta_release(&root, 5, &base, &esp_image(&noise));
+    assert!(file.len() as u32 > meshcore::fwshare::MAX_LORA_FILE, "a large delta: {} bytes", file.len());
+
+    let mut r = serving_repeater(file.clone());
+    let (mut c, slot) = pulling_companion(&root, &base);
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000);
+    c.app.fw_check_now(&c.ctx);
+    air.run(&mut [&mut r, &mut c], 60_000);
+    let kb = (file.len() as u32).div_ceil(1024);
+    let why = format!("the update is {kb} KB, more than LoRa carries (60 KB): install it over USB or BLE");
+    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Failed(why));
+    assert!(!slot.borrow().1);
+}

@@ -227,6 +227,14 @@ impl Companion {
         self.fw_sleep(ctx, RETRY_LATER_MS, FwPullStatus::Failed(why.into()));
     }
 
+    /// The update's delta is larger than LoRa carries: until the next check (a later release may
+    /// have a small delta from this image), it goes in over USB or BLE.
+    fn fw_too_large(&mut self, ctx: &MeshCtx, len: u32) {
+        let (kb, max) = (len.div_ceil(1024), fwshare::MAX_LORA_FILE / 1024);
+        let why = alloc::format!("the update is {kb} KB, more than LoRa carries ({max} KB): install it over USB or BLE");
+        self.fw_sleep(ctx, CHECK_EVERY_MS, FwPullStatus::Failed(why));
+    }
+
     /// The repeater to ask: the one set (`fw_source`), else the best heard directly lately.
     fn fw_repeater(&self, ctx: &MeshCtx) -> Option<usize> {
         if !self.prefs.fw_source.is_empty() {
@@ -316,6 +324,11 @@ impl Companion {
         self.fwpull.tries = 0;
         let body = &data[5..];
         match (self.fwpull.step, data[4]) {
+            // a repeater from before the limit offers it anyway: not loaded either
+            (Step::Query, status::TOO_LARGE) if body.len() >= 4 => self.fw_too_large(ctx, read_u32(body, 0)),
+            (Step::Query, status::READY) if body.len() >= 13 && read_u32(body, 0) > fwshare::MAX_LORA_FILE => {
+                self.fw_too_large(ctx, read_u32(body, 0))
+            }
             (Step::Query, status::READY) if body.len() >= 13 => {
                 let len = read_u32(body, 0);
                 let vlen = (body[12] as usize).min(body.len() - 13);

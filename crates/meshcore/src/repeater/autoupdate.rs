@@ -13,7 +13,7 @@
 use core::cmp::Reverse;
 
 use super::*;
-use crate::fwshare::{FW_PIECE, FwQuery, Loader, Offer, status};
+use crate::fwshare::{FW_PIECE, FwQuery, Loader, MAX_LORA_FILE, Offer, status};
 use crate::ota::REQ_TYPE_OTA_COMMIT;
 
 /// The first check, a while after boot (the node has heard its neighbours by then), then twice a
@@ -282,6 +282,15 @@ impl Repeater {
         self.lora_next(ctx);
     }
 
+    /// The update's delta is larger than LoRa carries: no neighbour can hand it on, so the check
+    /// is over until the next one (a later release may have a small delta from this image).
+    fn lora_too_large(&mut self, ctx: &mut MeshCtx, len: u32) {
+        self.autoupdate.fresh = false;
+        let next = CHECK_EVERY_MS + Self::auto_jitter(ctx);
+        let (kb, max) = (len.div_ceil(1024), MAX_LORA_FILE / 1024);
+        self.auto_sleep(ctx, next, format!("the update is {kb} KB, more than LoRa carries ({max} KB): install it over USB"));
+    }
+
     /// The next neighbour to ask, or the check is over.
     fn lora_next(&mut self, ctx: &mut MeshCtx) {
         let Some(id) = self.autoupdate.others.pop() else {
@@ -363,6 +372,11 @@ impl Repeater {
         let body = &data[5..];
         let peer = self.peer_name();
         match (self.autoupdate.step, data[4]) {
+            // a neighbour from before the limit offers it anyway: not loaded either
+            (Step::Ask, status::TOO_LARGE) if body.len() >= 4 => self.lora_too_large(ctx, read_u32(body, 0)),
+            (Step::Ask, status::READY) if body.len() >= 13 && read_u32(body, 0) > MAX_LORA_FILE => {
+                self.lora_too_large(ctx, read_u32(body, 0))
+            }
             (Step::Ask, status::READY) if body.len() >= 13 => {
                 let len = read_u32(body, 0);
                 let counter = read_u32(body, 8);

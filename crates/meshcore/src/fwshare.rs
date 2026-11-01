@@ -58,7 +58,14 @@ pub mod status {
     /// FW_GET: the repeater holds another file now; query again.
     pub const CHANGED: u8 = 4;
     pub const BAD_REQUEST: u8 = 5;
+    /// FW_QUERY: there is an update, but its delta (length follows) is larger than LoRa carries
+    /// ([`super::MAX_LORA_FILE`]): it goes in over USB or BLE.
+    pub const TOO_LARGE: u8 = 6;
 }
+
+/// The largest update file handed on over LoRa. 60 KB already keeps the channel busy for ~40
+/// minutes at SF7/62.5 kHz, and is about what a Pro Micro can stage next to the image it rebuilds.
+pub const MAX_LORA_FILE: u32 = 60 * 1024;
 
 /// What a companion asks for: an update for its board and role, from the image it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -313,6 +320,27 @@ pub enum Offer {
     Unavailable,
 }
 
+/// A store's file is in use while someone has read it this recently (a transfer over LoRa reads a
+/// piece every few seconds, and retries a lost one within a minute).
+pub const STORE_IDLE_SECS: u64 = 120;
+
+/// Which of a store's slots a new file may go into: a free one, else the one read least recently
+/// among those nobody has read for [`STORE_IDLE_SECS`]. `slots` holds, per slot, `None` when it is
+/// free, else when its file was last read (or fetched). `None` while every file is in use: the new
+/// one waits rather than cut a transfer short.
+pub fn pick_slot(slots: &[Option<u64>], now: u64) -> Option<usize> {
+    if let Some(free) = slots.iter().position(Option::is_none) {
+        return Some(free);
+    }
+    slots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, used)| used.map(|t| (i, t)))
+        .filter(|&(_, t)| now >= t + STORE_IDLE_SECS)
+        .min_by_key(|&(_, t)| t)
+        .map(|(i, _)| i)
+}
+
 /// The updates a repeater hands on, kept by the firmware (fetched from the release server).
 pub trait FwStore {
     /// The newest release for `q`'s board and role with a delta from `q`'s image, if the store
@@ -339,6 +367,10 @@ pub fn answer(store: &mut dyn FwStore, kind: u8, data: &[u8], reply: &mut Vec<u8
             }
             match store.offer(&q) {
                 Offer::Ready { counter, .. } if counter <= q.counter => reply.push(status::NONE),
+                Offer::Ready { len, .. } if len > MAX_LORA_FILE => {
+                    reply.push(status::TOO_LARGE);
+                    reply.extend_from_slice(&len.to_le_bytes());
+                }
                 Offer::Ready { len, id, counter, version } => {
                     reply.push(status::READY);
                     reply.extend_from_slice(&len.to_le_bytes());
@@ -532,5 +564,40 @@ mod tests {
         let tail = file.len() as u32 - 10;
         assert_eq!(&get(77, tail, 160)[5..], &file[tail as usize..]);
         assert_eq!(get(78, 0, 16), [status::CHANGED]);
+    }
+
+    /// A file being read stays: a new one takes a free slot, else the one idle longest, else waits.
+    #[test]
+    fn a_file_in_use_is_never_evicted() {
+        assert_eq!(pick_slot(&[None, None], 1000), Some(0));
+        assert_eq!(pick_slot(&[Some(990), None], 1000), Some(1), "the other slot while one is read");
+        assert_eq!(pick_slot(&[Some(990), Some(995)], 1000), None, "both in use: wait");
+        let idle = 1000 - STORE_IDLE_SECS;
+        assert_eq!(pick_slot(&[Some(990), Some(idle)], 1000), Some(1), "an idle file goes");
+        assert_eq!(pick_slot(&[Some(idle), Some(idle - 50)], 1000), Some(1), "the one idle longest");
+    }
+
+    /// A delta larger than LoRa carries is not offered: the asker learns its size instead.
+    #[test]
+    fn a_delta_over_the_lora_limit_is_not_handed_on() {
+        let env = release_envelope(5, b"new image");
+        let mut base_sha = [0u8; 32];
+        crate::crypto::sha256(&mut base_sha, &[b"old image".as_slice()]);
+        let file = delta_file(&env, 9, &base_sha, &alloc::vec![0xAB; MAX_LORA_FILE as usize]);
+        let mut store = MemStore::new(file.clone(), 77);
+        let q = FwQuery {
+            board: board::T_ECHO,
+            role: role::COMPANION,
+            counter: 4,
+            base_len: 9,
+            base_sha8: base_sha[..8].try_into().unwrap(),
+            channel: release::channel::STABLE,
+            fresh: false,
+            owner8: FwQuery::NO_OWNER,
+        };
+        let mut r = Vec::new();
+        assert!(answer(&mut store, ANON_REQ_TYPE_FW_QUERY, &q.to_bytes(), &mut r));
+        assert_eq!(r[0], status::TOO_LARGE);
+        assert_eq!(u32::from_le_bytes(r[1..5].try_into().unwrap()), file.len() as u32);
     }
 }

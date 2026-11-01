@@ -1,9 +1,13 @@
 //! The updates a repeater hands on to its neighbours (`set fw.serve on`, see `meshcore::fwshare`):
-//! one delta file at a time, fetched over plain HTTP from the release server (`fw.server`) into
-//! the last [`CACHE_SIZE`] bytes of the running firmware's slot, past its image (an update of this
-//! node writes the other slot), and read from there for the neighbours' FW_GET. What is served is
+//! delta files fetched over plain HTTP from the release server (`fw.server`) into the last
+//! [`CACHE_SIZE`] bytes of the running firmware's slot, past its image (an update of this node
+//! writes the other slot), and read from there for the neighbours' FW_GET. What is served is
 //! signed and checked on the device that installs it, so neither the server nor the link has to
 //! be trusted. Nothing is kept across a reboot.
+//!
+//! The cache holds [`SLOTS`] files, one per part: the node's own update and a neighbour's (or two
+//! neighbours') at once. A file somebody is still reading stays (`meshcore::fwshare::pick_slot`):
+//! a request for yet another one waits rather than cut that transfer short.
 
 use alloc::format;
 use alloc::string::String;
@@ -20,14 +24,18 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, with_timeout};
 use embedded_io_async::Write;
-use meshcore::fwshare::{DeltaHeader, FwQuery, FwStore, Offer};
+use meshcore::fwshare::{DeltaHeader, FwQuery, FwStore, Offer, pick_slot};
 use meshcore::release;
 use meshcore::util::to_hex;
 
 use crate::ota::{SharedStore, Slots};
 
-/// Room for one delta: a repeater's from one release to the next is ~50 KB, a companion's less.
+/// Room for the deltas: a repeater's from one release to the next is ~50 KB (the largest seen,
+/// 143 KB), a companion's less.
 pub const CACHE_SIZE: u32 = 512 * 1024;
+/// Files held at once, each in its own part of the cache.
+const SLOTS: usize = 2;
+const SLOT_SIZE: u32 = CACHE_SIZE / SLOTS as u32;
 const SECTOR: usize = 4096;
 /// The server said it has no update from an image: believed this long (a check by hand asks
 /// again at once, see `refresh`).
@@ -62,12 +70,15 @@ struct File {
     id: u32,
     counter: u32,
     version: String,
+    /// When it was fetched, offered or read last (seconds of uptime).
+    used: u64,
 }
 
 struct State {
     server: String,
-    file: Option<File>,
-    fetching: Option<Key>,
+    files: [Option<File>; SLOTS],
+    /// The file being fetched, and the slot it goes into.
+    fetching: Option<(Key, usize)>,
     /// (image, release asked from, until): the server had nothing newer.
     misses: Vec<(Key, u32, u64)>,
     failed_until: u64,
@@ -77,7 +88,7 @@ struct State {
 
 static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
     server: String::new(),
-    file: None,
+    files: [None, None],
     fetching: None,
     misses: Vec::new(),
     failed_until: 0,
@@ -86,7 +97,8 @@ static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
 }));
 static ONLINE: AtomicBool = AtomicBool::new(false);
 static STATUS_GEN: AtomicU32 = AtomicU32::new(0);
-static FETCH: Channel<CriticalSectionRawMutex, (Key, u32), 1> = Channel::new();
+/// What to fetch: the image's key, the release it runs, the slot.
+static FETCH: Channel<CriticalSectionRawMutex, (Key, u32, usize), 1> = Channel::new();
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     critical_section::with(|cs| f(&mut STATE.borrow_ref_mut(cs)))
@@ -142,10 +154,11 @@ impl FwStore for FlashFwStore {
         let key = Key::from(q);
         let now = secs();
         with(|s| {
-            if let Some(f) = s.file.as_ref().filter(|f| f.key == key) {
+            if let Some(f) = s.files.iter_mut().flatten().find(|f| f.key == key) {
+                f.used = now; // the asker's FW_GETs follow
                 return Offer::Ready { len: f.len, id: f.id, counter: f.counter, version: f.version.clone() };
             }
-            if s.fetching == Some(key) {
+            if s.fetching.is_some_and(|(k, _)| k == key) {
                 return Offer::Fetching { retry_secs: FETCH_RETRY_SECS };
             }
             s.misses.retain(|m| m.2 > now);
@@ -155,9 +168,14 @@ impl FwStore for FlashFwStore {
             if !ONLINE.load(Ordering::Relaxed) || s.server.is_empty() || now < s.failed_until {
                 return Offer::Unavailable;
             }
-            if s.fetching.is_none() && FETCH.try_send((key, q.counter)).is_ok() {
-                s.fetching = Some(key);
-                s.file = None; // its sectors are about to be rewritten
+            // a slot whose file nobody reads now; with every file in use, the asker tries again later
+            let used: [Option<u64>; SLOTS] = core::array::from_fn(|i| s.files[i].as_ref().map(|f| f.used));
+            if s.fetching.is_none()
+                && let Some(slot) = pick_slot(&used, now)
+                && FETCH.try_send((key, q.counter, slot)).is_ok()
+            {
+                s.fetching = Some((key, slot));
+                s.files[slot] = None; // its sectors are about to be rewritten
             }
             Offer::Fetching { retry_secs: FETCH_RETRY_SECS * 2 }
         })
@@ -177,21 +195,29 @@ impl FwStore for FlashFwStore {
     }
 
     fn read(&mut self, id: u32, offset: u32, buf: &mut [u8]) -> Option<usize> {
-        let len = with(|s| s.file.as_ref().filter(|f| f.id == id).map(|f| f.len))?;
+        let now = secs();
+        let (len, slot) = with(|s| {
+            s.files.iter_mut().enumerate().find_map(|(slot, f)| {
+                let f = f.as_mut().filter(|f| f.id == id)?;
+                f.used = now; // in use: it stays
+                Some((f.len, slot))
+            })
+        })?;
         let n = buf.len().min(len.saturating_sub(offset) as usize);
-        self.store.borrow_mut().flash().read(self.region + offset, &mut buf[..n]).ok()?;
+        let at = self.region + slot as u32 * SLOT_SIZE + offset;
+        self.store.borrow_mut().flash().read(at, &mut buf[..n]).ok()?;
         Some(n)
     }
 }
 
-/// Fetch what the neighbours ask for, one file at a time.
+/// Fetch what this node and its neighbours ask for, one file at a time.
 #[embassy_executor::task]
 pub async fn fetch_task(stack: Stack<'static>, store: SharedStore<'static>, region: u32) {
     loop {
-        let (key, counter) = FETCH.receive().await;
+        let (key, counter, slot) = FETCH.receive().await;
         let server = with(|s| s.server.clone());
         let t0 = Instant::now();
-        let got = fetch(stack, &server, key, counter, &store, region).await;
+        let got = fetch(stack, &server, key, counter, &store, region + slot as u32 * SLOT_SIZE).await;
         let now = secs();
         with(|s| {
             s.fetching = None;
@@ -207,7 +233,7 @@ pub async fn fetch_task(stack: Stack<'static>, store: SharedStore<'static>, regi
                     );
                     log::info!("fw: {line}");
                     set_status(s, line);
-                    s.file = Some(f);
+                    s.files[slot] = Some(File { used: now, ..f });
                 }
                 Ok(None) => {
                     s.misses.push((key, counter, now + MISS_SECS));
@@ -223,8 +249,8 @@ pub async fn fetch_task(stack: Stack<'static>, store: SharedStore<'static>, regi
     }
 }
 
-/// GET the newest delta for `key` newer than `counter` into the cache: `None` if the server has
-/// none.
+/// GET the newest delta for `key` newer than `counter` into the cache slot at `region`: `None`
+/// if the server has none.
 async fn fetch(
     stack: Stack<'static>, server: &str, key: Key, counter: u32, store: &SharedStore<'static>, region: u32,
 ) -> Result<Option<File>, &'static str> {
@@ -280,7 +306,7 @@ async fn fetch(
         .find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("content-length")).map(|(_, v)| v.trim()))
         .and_then(|v| v.parse().ok())
         .ok_or("no length")?;
-    if len == 0 || len > CACHE_SIZE {
+    if len == 0 || len > SLOT_SIZE {
         return Err("too large");
     }
 
@@ -330,5 +356,5 @@ async fn fetch(
         return Err("the server sent a release the owner did not sign");
     }
     let id = u32::from_le_bytes(m.image_sha256[..4].try_into().unwrap()) ^ len;
-    Ok(Some(File { key, len, id, counter: m.counter, version: m.version.clone() }))
+    Ok(Some(File { key, len, id, counter: m.counter, version: m.version.clone(), used: secs() }))
 }
