@@ -10,6 +10,11 @@ Both carry the app's flash contents followed by a trailer (crates/meshcore/src/o
 base of delta updates, whether it came over USB or over the air.
 
     python tools/uf2/elf2uf2.py firmware.elf firmware.uf2 [--bin firmware.bin] [--family 0xADA52840]
+                                [--data node.bin@0xDA000]
+
+`--data` puts more flash contents into the UF2 only (not into the update image): e.g. the node's
+data region from tools/provision, so a node moved from upstream keeps its identity. The Adafruit
+bootloader ignores blocks from 0xEA000 on, and a UF2 with any of them never completes.
 """
 import argparse
 import hashlib
@@ -23,6 +28,9 @@ PAYLOAD = 256
 NRF52840_FAMILY = 0xADA52840
 TRAILER_MAGIC = b"MCRS-NRF"
 NRF52840_CHIP = 0x52840
+# The Adafruit nRF52 bootloader's USER_FLASH_END: it drops UF2 blocks from here on (its
+# CURRENT.UF2 ends here too), so the transfer would never count as complete
+UF2_FLASH_END = 0xEA000
 
 
 def load_segments(path):
@@ -52,15 +60,22 @@ def flat_image(segments, chip=NRF52840_CHIP):
     return bytes(app + trailer), start
 
 
-def to_uf2(image, start, family):
-    end = start + len(image)
-    blocks = [image[i:i + PAYLOAD] for i in range(0, len(image), PAYLOAD)]
+def to_uf2(regions, family):
+    """UF2 blocks for `(address, bytes)` regions, numbered across all of them."""
+    blocks = [(addr + i, data[i:i + PAYLOAD]) for addr, data in regions for i in range(0, len(data), PAYLOAD)]
     out = bytearray()
-    for n, chunk in enumerate(blocks):
+    for n, (addr, chunk) in enumerate(blocks):
         header = struct.pack("<IIIIIIII", UF2_MAGIC_START0, UF2_MAGIC_START1, UF2_FLAG_FAMILY,
-                             start + n * PAYLOAD, PAYLOAD, n, len(blocks), family)
+                             addr, PAYLOAD, n, len(blocks), family)
         out += header + bytes(chunk).ljust(476, b"\x00") + struct.pack("<I", UF2_MAGIC_END)
-    return bytes(out), start, end
+    return bytes(out)
+
+
+def data_region(arg):
+    """`FILE@ADDR` -> (address, contents padded to whole UF2 payloads with 0xFF)."""
+    path, _, addr = arg.rpartition("@")
+    data = open(path, "rb").read()
+    return int(addr, 0), data + b"\xff" * (-len(data) % PAYLOAD)
 
 
 def main():
@@ -69,11 +84,19 @@ def main():
     ap.add_argument("uf2")
     ap.add_argument("--bin", help="also write the image for updates over the app link")
     ap.add_argument("--family", type=lambda s: int(s, 0), default=NRF52840_FAMILY)
+    ap.add_argument("--data", action="append", default=[], metavar="FILE@ADDR", help="more flash contents for the UF2")
     args = ap.parse_args()
     image, start = flat_image(load_segments(args.elf))
-    uf2, start, end = to_uf2(image, start, args.family)
+    extra = [data_region(d) for d in args.data]
+    for addr, data in [(start, image)] + extra:
+        if addr + len(data) > UF2_FLASH_END:
+            ap.error(f"0x{addr:05X}..0x{addr + len(data):05X} runs past 0x{UF2_FLASH_END:05X}, where the bootloader stops taking blocks")
+    uf2 = to_uf2([(start, image)] + extra, args.family)
     open(args.uf2, "wb").write(uf2)
+    end = start + len(image)
     print(f"{args.uf2}: 0x{start:05X}..0x{end:05X} ({end - start} bytes), {len(uf2) // 512} blocks")
+    for addr, data in extra:
+        print(f"  + 0x{addr:05X}..0x{addr + len(data):05X} ({len(data)} bytes)")
     if args.bin:
         open(args.bin, "wb").write(image)
         print(f"{args.bin}: update image, sha256 {hashlib.sha256(image).hexdigest()[:16]}...")

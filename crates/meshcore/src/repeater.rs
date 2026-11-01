@@ -236,6 +236,9 @@ pub struct BoardInfo {
     pub powersaving_supported: bool,
     /// The bridge the board can run (`get bridge.type`): `espnow`; none = no bridge.
     pub bridge: Option<&'static str>,
+    /// The board's own battery multiplier (millivolts per ADC step) if `set adc.multiplier`
+    /// calibrates its reading; none = unsupported.
+    pub adc_multiplier: Option<f32>,
     /// How much the board slept, for `powersaving stats`, kept by the firmware.
     pub power_status: String,
     /// Network status lines for `get wifi.status` / `get mqtt.status`, kept by the firmware.
@@ -418,6 +421,13 @@ impl Repeater {
 
     pub fn neighbours(&self) -> &[Neighbour] {
         &self.neighbours
+    }
+
+    /// The battery multiplier in use: the one set with `set adc.multiplier`, else the board's own
+    /// (none if the board takes none).
+    pub fn adc_multiplier(&self) -> Option<f32> {
+        let own = self.board.adc_multiplier?;
+        Some(if self.prefs.adc_multiplier > 0.0 { self.prefs.adc_multiplier } else { own })
     }
 
     pub fn clients(&self) -> &[ClientInfo] {
@@ -1965,8 +1975,13 @@ impl Repeater {
             format!("> {}", p.bridge_channel)
         } else if self.board.bridge.is_some() && cfg.starts_with("bridge.secret") {
             format!("> {}", p.bridge_secret)
-        } else if cfg.starts_with("bootloader.ver") || cfg.starts_with("adc.multiplier") {
+        } else if cfg.starts_with("bootloader.ver") {
             "Error: unsupported".into()
+        } else if cfg.starts_with("adc.multiplier") {
+            match self.adc_multiplier() {
+                Some(m) => format!("> {m:.3}"),
+                None => "Error: unsupported".into(),
+            }
         } else if cfg.starts_with("pwrmgt.support") {
             "> unsupported".into()
         } else if cfg.starts_with("pwrmgt.source") || cfg.starts_with("pwrmgt.bootmv") {
@@ -2211,8 +2226,18 @@ impl Repeater {
             self.prefs.radio.freq_mhz = atof(v) as f32;
             self.save_prefs();
             "OK - reboot to apply".into()
-        } else if cfg.starts_with("adc.multiplier ") {
-            "Error: unsupported".into()
+        } else if let Some(v) = cfg.strip_prefix("adc.multiplier ") {
+            if self.board.adc_multiplier.is_none() {
+                "Error: unsupported".into()
+            } else {
+                self.prefs.adc_multiplier = (atof(v) as f32).clamp(0.0, 10.0);
+                self.save_prefs();
+                if self.prefs.adc_multiplier == 0.0 {
+                    "OK - using default board multiplier".into()
+                } else {
+                    format!("OK - multiplier set to {:.3}", self.prefs.adc_multiplier)
+                }
+            }
         } else {
             format!("unknown config: {cfg}")
         }

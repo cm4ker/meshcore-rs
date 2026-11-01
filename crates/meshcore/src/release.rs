@@ -44,6 +44,8 @@ pub mod board {
     pub const HELTEC_V3: u8 = 2;
     pub const XIAO_C6: u8 = 3;
     pub const T_ECHO: u8 = 4;
+    /// nRF52840 Pro Micro with an SX1262 module ("Faketec", upstream `variants/promicro`).
+    pub const PROMICRO: u8 = 5;
 }
 
 /// What the image runs as.
@@ -119,12 +121,13 @@ pub fn board_name(board: u8) -> &'static str {
         board::HELTEC_V3 => "heltec-v3",
         board::XIAO_C6 => "xiao-c6",
         board::T_ECHO => "t-echo",
+        board::PROMICRO => "promicro",
         _ => "?",
     }
 }
 
 pub fn board_by_name(name: &str) -> Option<u8> {
-    [board::HELTEC_V4, board::HELTEC_V3, board::XIAO_C6, board::T_ECHO].into_iter().find(|&b| board_name(b) == name)
+    [board::HELTEC_V4, board::HELTEC_V3, board::XIAO_C6, board::T_ECHO, board::PROMICRO].into_iter().find(|&b| board_name(b) == name)
 }
 
 pub fn role_name(role: u8) -> &'static str {

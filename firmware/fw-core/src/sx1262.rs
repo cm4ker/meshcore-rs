@@ -87,6 +87,8 @@ pub struct Sx1262<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> {
     tx_power: i8,
     rx_boost: bool,
     use_tcxo: bool,
+    /// Heltec's "improved RX" register patch (`SX126X_REGISTER_PATCH`).
+    rx_patch: bool,
     // "is a packet coming in?" state (upstream `CustomSX1262::isReceiving`)
     activity_at: Option<Instant>,
     header_seen: bool,
@@ -136,11 +138,23 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> Sx1262<SPI, OUT, IN
             tx_power: 10,
             rx_boost: true,
             use_tcxo: true,
+            rx_patch: true,
             activity_at: None,
             header_seen: false,
             preamble_ms: 66,
             max_payload_ms: 3934,
         }
+    }
+
+    /// Leave out Heltec's RX register patch: upstream applies it only to the boards whose
+    /// variants set `SX126X_REGISTER_PATCH`.
+    pub fn without_rx_patch(mut self) -> Self {
+        self.rx_patch = false;
+        self
+    }
+
+    fn apply_rx_patch(&mut self) -> Result<(), Error> {
+        if self.rx_patch { self.modify_register(REG_HELTEC_V4_PATCH, 0x01, 0) } else { Ok(()) }
     }
 
     // ---------------------------------------------------------------- SPI
@@ -278,7 +292,7 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Sx126
         self.set_tx_power(tx_power)?;
         self.set_rx_boosted_gain(rx_boost)?;
         // Heltec V4: improved RX (`SX126X_REGISTER_PATCH`)
-        self.modify_register(REG_HELTEC_V4_PATCH, 0x01, 0)?;
+        self.apply_rx_patch()?;
         self.start_rx()
     }
 
@@ -505,7 +519,7 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Sx126
         self.wait_busy(50)?;
         self.command(CMD_SET_DIO2_AS_RF_SWITCH, &[0x01])?;
         self.set_rx_boosted_gain(self.rx_boost)?;
-        self.modify_register(REG_HELTEC_V4_PATCH, 0x01, 0)?;
+        self.apply_rx_patch()?;
         self.start_rx()
     }
 

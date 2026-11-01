@@ -1,0 +1,46 @@
+[package]
+edition      = "2024"
+name         = "promicro"
+rust-version = "1.88"
+version      = "0.1.0"
+
+[lib]
+test = false
+bench = false
+
+[[bin]]
+name = "repeater"
+path = "./src/bin/repeater.rs"
+test = false
+bench = false
+
+[dependencies]
+cortex-m = { version = "0.7.7", features = ["inline-asm", "critical-section-single-core"] }
+# set-vtor: our vector table takes over from the MBR/SoftDevice forwarding of the bootloader
+cortex-m-rt = { version = "0.7.5", features = ["set-vtor"] }
+embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
+embassy-time = "0.5.1"
+# nfc-pins-as-gpio: the radio's RESET and DIO1 sit on P0.09/P0.10, the NFC antenna pins
+embassy-nrf = { version = "0.11.0", features = ["nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac", "nfc-pins-as-gpio"] }
+embassy-usb = "0.6.0"
+embassy-futures = "0.1.2"
+embassy-sync = "0.8.0"
+embedded-alloc = "0.6"
+static_cell = "2.1.1"
+log = "0.4.27"
+heapless = "0.9"
+meshcore = { version = "0.1.0", path = "../../../crates/meshcore" }
+meshcore-fw-core = { version = "0.1.0", path = "../../fw-core" }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = "fat"
+opt-level     = "s"
+
+[patch.crates-io]
+# the USB fixes, see ../../vendor/README.md
+embassy-nrf = { path = "../../vendor/embassy-nrf-0.11" }

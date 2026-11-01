@@ -122,7 +122,7 @@ jobs:
             *.content
 
   nrf52840:
-    name: LilyGO T-Echo (nRF52840)
+    name: LilyGO T-Echo and Pro Micro (nRF52840)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -138,6 +138,12 @@ jobs:
           python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../t-echo-companion.uf2 --bin ../../../t-echo-companion.bin
           MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --locked --release
           python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../content/t-echo-companion.uf2 --bin ../../../content/t-echo-companion.bin
+      - working-directory: firmware/models/promicro
+        run: |
+          cargo build --locked --release
+          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/repeater ../../../promicro-repeater.uf2 --bin ../../../promicro-repeater.bin
+          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --locked --release
+          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/repeater ../../../content/promicro-repeater.uf2 --bin ../../../content/promicro-repeater.bin
       - name: Content hashes
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

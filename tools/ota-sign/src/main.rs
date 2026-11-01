@@ -246,7 +246,7 @@ fn main() -> ExitCode {
         "fingerprint" => print_key(&key(&args)),
         "bundle" => {
             let image = read(args.file(0));
-            let board = release::board_by_name(args.need("board")).unwrap_or_else(|| fail("--board: heltec-v4, heltec-v3, xiao-c6 or t-echo"));
+            let board = release::board_by_name(args.need("board")).unwrap_or_else(|| fail("--board: heltec-v4, heltec-v3, xiao-c6, t-echo or promicro"));
             let role = release::role_by_name(args.need("role")).unwrap_or_else(|| fail("--role: repeater or companion"));
             let counter = args.need("counter").parse().unwrap_or_else(|_| fail("--counter: a release number"));
             let version = args.need("version");

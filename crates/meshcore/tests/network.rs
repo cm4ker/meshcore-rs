@@ -653,3 +653,23 @@ fn dynamic_coding_rate_per_hop() {
         assert_eq!(f.cr, expected_cr, "next hop {next:02X}");
     }
 }
+
+/// `adc.multiplier` as upstream: only on boards that take one, 0 = the board's own, kept in prefs.
+#[test]
+fn adc_multiplier_calibrates_the_battery_reading() {
+    let mut r = repeater(1);
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get adc.multiplier"), "Error: unsupported");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set adc.multiplier 1.7"), "Error: unsupported");
+    assert_eq!(r.app.prefs.adc_multiplier, 0.0);
+
+    r.app.board.adc_multiplier = Some(1.815);
+    let mut cmd = |c: &str| r.app.handle_command(&mut r.ctx, 0, c);
+    assert_eq!(cmd("get adc.multiplier"), "> 1.815");
+    assert_eq!(cmd("set adc.multiplier 1.764"), "OK - multiplier set to 1.764");
+    assert_eq!(cmd("get adc.multiplier"), "> 1.764");
+    assert!(r.app.take_effects().save_prefs);
+    let saved = NodePrefs::deserialize(&r.app.prefs.serialize());
+    assert_eq!(saved.adc_multiplier, 1.764);
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set adc.multiplier 0"), "OK - using default board multiplier");
+    assert_eq!(r.app.adc_multiplier(), Some(1.815));
+}
