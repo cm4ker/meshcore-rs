@@ -226,7 +226,9 @@ jobs:
       # A delta from each of the last three releases of the board and role, for the devices that
       # run one of them and fetch updates over LoRa from a neighbouring repeater
       # (meshcore::fwshare); each is checked to rebuild the signed image from its base. Releases
-      # that left the board and role out don't count: its devices still run an older one.
+      # that left the board and role out don't count: its devices still run an older one. A stable
+      # release also takes the last two stable ones: after a run of dev releases those are what the
+      # devices that follow stable still run.
       - name: Deltas from the last releases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -246,16 +248,31 @@ jobs:
           }
           printf '| delta | from | size |\n|---|---|---|\n' > deltas.md
           tags=$(gh release list --limit 30 --exclude-drafts --json tagName -q '.[].tagName')
+          stable_tags=" $(gh release list --limit 30 --exclude-drafts --exclude-pre-releases --json tagName -q '.[].tagName' | tr '\n' ' ') "
           declare -A assets
           for tag in $tags; do
             assets[$tag]=$(gh release view "$tag" --json assets -q '.assets[].name')
           done
           for mcfw in out/*.mcfw; do
             name=$(basename "$mcfw" "-$MCFW_VERSION-r$MCFW_COUNTER.mcfw")   # <board>-<role>
-            n=0
+            # the releases to make deltas from: newest first, as said above
+            bases="" n=0 s=0
             for tag in $tags; do
               base=$(printf '%s\n' "${assets[$tag]}" | grep -E "^$name-.*\.mcfw$" | head -1 || true)
               [ -n "$base" ] || continue
+              is_stable=0
+              [[ "$stable_tags" == *" $tag "* ]] && is_stable=1
+              if [ "$n" -lt 3 ] || { [ "$MCFW_CHANNEL" = stable ] && [ "$is_stable" = 1 ] && [ "$s" -lt 2 ]; }; then
+                bases="$bases $tag"
+              fi
+              n=$((n + 1))
+              s=$((s + is_stable))
+              if [ "$n" -ge 3 ] && { [ "$MCFW_CHANNEL" != stable ] || [ "$s" -ge 2 ]; }; then
+                break
+              fi
+            done
+            for tag in $bases; do
+              base=$(printf '%s\n' "${assets[$tag]}" | grep -E "^$name-.*\.mcfw$" | head -1 || true)
               mkdir -p "prev/$tag"
               gh release download "$tag" -p "$base" -D "prev/$tag" --clobber
               delta=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.from-${tag##*-}.mcfd
@@ -270,8 +287,6 @@ jobs:
                 echo "::warning title=Delta over the LoRa limit::$name from $tag is $((size / 1024)) KB, more than $((room / 1024)) KB: nodes on $tag take it over Wi-Fi, USB or BLE only, not from a neighbour over LoRa"
               fi
               echo "| $name | $tag | $((size / 1024)) KB$mark |" >> deltas.md
-              n=$((n + 1))
-              [ "$n" -lt 3 ] || break
             done
           done
           cat deltas.md >> "$GITHUB_STEP_SUMMARY"
