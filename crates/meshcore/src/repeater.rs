@@ -273,6 +273,9 @@ pub struct Repeater {
     anon_limiter: RateLimiter,
     /// FW requests: a companion fetching an update asks for a piece about every second.
     fw_limiter: RateLimiter,
+    /// When (ms) a neighbour last loaded a piece of an update from this node: this node's own
+    /// update waits for its restart meanwhile.
+    fw_served_at: Option<u64>,
     pending_discover_tag: u32,
     pending_discover_until: u64,
     /// Region of the packet being processed: `None` = unknown scope, `Some(0)` = wildcard.
@@ -350,6 +353,7 @@ impl Repeater {
             discover_limiter: RateLimiter::new(4, 120),
             anon_limiter: RateLimiter::new(4, 180),
             fw_limiter: RateLimiter::new(90, 60),
+            fw_served_at: None,
             pending_discover_tag: 0,
             pending_discover_until: 0,
             recv_region: None,
@@ -830,6 +834,9 @@ impl Repeater {
         let answered = fwshare::answer(store, kind, &data[1 + n..], reply);
         if answered {
             self.reply_path = Some((path_len, path));
+            if kind == fwshare::ANON_REQ_TYPE_FW_GET {
+                self.fw_served_at = Some(ctx.now);
+            }
         }
         answered
     }

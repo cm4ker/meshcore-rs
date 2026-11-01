@@ -13,7 +13,7 @@
 use core::cmp::Reverse;
 
 use super::*;
-use crate::fwshare::{FW_PIECE, FwQuery, Loader, MAX_LORA_FILE, Offer, status};
+use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, MAX_LORA_FILE, Offer, status};
 use crate::ota::REQ_TYPE_OTA_COMMIT;
 
 /// The first check, a while after boot (the node has heard its neighbours by then), then twice a
@@ -39,6 +39,9 @@ const PIECE_GAP_MS: u64 = 3_000;
 /// Neighbours heard within this long are asked, the best heard first, at most this many per check.
 const HEARD_RECENTLY_SECS: u32 = 2 * 86_400;
 const MAX_ASKED: usize = 4;
+/// A loaded update waits for its restart while a neighbour is loading one from this node (the
+/// restart would cut that transfer off): looked at again this often.
+const INSTALL_WAIT_MS: u64 = 30_000;
 
 /// [`Repeater::matching_peers`]' entry for the neighbour an update is pulled from (not a client).
 pub(super) const FW_PEER: usize = usize::MAX;
@@ -51,6 +54,8 @@ enum Step {
     /// Over LoRa: waiting for the neighbour's answer to a query, or to the request for a piece.
     Ask,
     Get { offset: u32 },
+    /// Loaded and verified, waiting for the neighbours this node hands an update on to.
+    Install,
 }
 
 pub(super) struct AutoUpdate {
@@ -182,6 +187,7 @@ impl Repeater {
                 self.auto_sleep(ctx, RETRY_LATER_MS, format!("failed: {peer} stopped answering"));
             }
             Step::Get { offset } => self.lora_get(ctx, offset),
+            Step::Install => self.auto_install(ctx),
         }
     }
 
@@ -444,6 +450,15 @@ impl Repeater {
 
     fn auto_install(&mut self, ctx: &mut MeshCtx) {
         let version = self.autoupdate.version.clone();
+        // a neighbour loading an update from this node would lose it to the restart
+        let serving_until = self.fw_served_at.map_or(0, |t| t + fwshare::STORE_IDLE_SECS * 1000);
+        if ctx.now < serving_until {
+            let a = &mut self.autoupdate;
+            a.step = Step::Install;
+            a.at = ctx.now + INSTALL_WAIT_MS;
+            a.status = format!("{version} is ready: it installs once a neighbour has loaded its update from this node");
+            return;
+        }
         let source = match &self.autoupdate.peer {
             Some(_) => format!("neighbour {}", self.peer_name()),
             None => self.prefs.fw_server.clone(),

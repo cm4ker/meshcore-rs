@@ -1584,3 +1584,72 @@ fn a_delta_larger_than_lora_carries_is_not_pulled() {
     assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Failed(why));
     assert!(!slot.borrow().1);
 }
+
+/// A store holding two files, as a repeater's does: its own update and a neighbour's.
+struct TwoFiles(meshcore::fwshare::MemStore, meshcore::fwshare::MemStore);
+
+impl meshcore::fwshare::FwStore for TwoFiles {
+    fn offer(&mut self, q: &meshcore::fwshare::FwQuery) -> meshcore::fwshare::Offer {
+        match self.0.offer(q) {
+            meshcore::fwshare::Offer::NoUpdate => self.1.offer(q),
+            offer => offer,
+        }
+    }
+    fn read(&mut self, id: u32, offset: u32, buf: &mut [u8]) -> Option<usize> {
+        if id == self.0.id { self.0.read(id, offset, buf) } else { self.1.read(id, offset, buf) }
+    }
+}
+
+#[test]
+fn a_repeater_restarts_into_its_update_only_once_a_neighbour_has_loaded_its_own() {
+    use meshcore::release::{board, fingerprint_hex, fingerprint, role};
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    // the repeater's own update
+    let own_data: Vec<u8> = (0..30_000u32).map(|i| (i * 13 % 251) as u8).collect();
+    let own_base = esp_image(&own_data);
+    let mut own_new = own_data.clone();
+    own_new[100..140].fill(7);
+    let own_file = delta_release_for(&root, board::HELTEC_V4, role::REPEATER, 0, 5, &own_base, &esp_image(&own_new));
+    // the neighbour's (a T-Echo): a few kilobytes of new code, some minutes over LoRa
+    let base = esp_image(&[1u8; 3000]);
+    let mut x = 7u32;
+    let code: Vec<u8> = (0..6000)
+        .map(|_| {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (x >> 16) as u8
+        })
+        .collect();
+    let their_file = delta_release(&root, 5, &base, &esp_image(&code));
+
+    let own_slot: Slot = std::rc::Rc::new(std::cell::RefCell::new((vec![0u8; 64 * 1024], false)));
+    let mut r = serving_repeater(their_file.clone());
+    r.app.fw_store = Some(Box::new(TwoFiles(
+        meshcore::fwshare::MemStore::new(own_file, 9),
+        meshcore::fwshare::MemStore::new(their_file, 77),
+    )));
+    r.app.ota.target = Some(Box::new(RamSlots { running: own_base.clone(), slot: own_slot.clone() }));
+    r.app.ota.build.board = board::HELTEC_V4;
+    r.app.ota.build.counter = 4;
+    let fp = fingerprint_hex(&fingerprint(root.pub_key()));
+    r.app.handle_command(&mut r.ctx, 0, &format!("set ota.root {fp}"));
+    r.app.handle_command(&mut r.ctx, 0, "set fw.auto on");
+    let (mut c, _) = pulling_companion(&root, &base);
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000);
+    c.app.fw_check_now(&c.ctx);
+    air.run(&mut [&mut r, &mut c], 30_000);
+    assert!(matches!(c.app.fw_pull_status(), FwPullStatus::Loading { .. }), "{:?}", c.app.fw_pull_status());
+
+    // the repeater's own update is ready meanwhile: it waits for the neighbour
+    assert!(r.app.handle_command(&mut r.ctx, 0, "fw update").starts_with("OK"));
+    air.run(&mut [&mut r, &mut c], 10_000);
+    assert!(!r.app.take_effects().reboot, "no restart while a neighbour loads from it");
+    assert!(r.app.handle_command(&mut r.ctx, 0, "get fw.auto").contains("installs once a neighbour has loaded"));
+
+    // the neighbour gets all of its update, then the repeater restarts into its own
+    air.run(&mut [&mut r, &mut c], 600_000);
+    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Ready { version: "0.5.2".into() });
+    assert!(own_slot.borrow().1, "installed");
+    assert!(r.app.handle_command(&mut r.ctx, 0, "get fw.auto").contains("installing 0.5.2"));
+}
