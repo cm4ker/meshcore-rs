@@ -521,7 +521,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // upstream runs Heltec V4 repeaters at 80 MHz to save power
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
-    let mut p = esp_hal::init(config);
+    let p = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     // Wi-Fi, MQTT over TLS and BLE need a large heap (about 140 KB of it stays free with TLS up),
@@ -529,6 +529,12 @@ async fn main(spawner: Spawner) -> ! {
     // about 30 KB of stack: 150 KB of heap left 28 KB and overflowed it on connecting
     esp_alloc::heap_allocator!(size: 126 * 1024);
 
+    // the main loop's state on the heap: in the main task's static it would grow with every change
+    // to the loop and move the statics after it (see `layout` in build.rs)
+    Box::pin(run(spawner, p)).await
+}
+
+async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
     let timg0 = TimerGroup::new(p.TIMG0);
     esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
 

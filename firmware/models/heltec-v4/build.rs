@@ -6,6 +6,7 @@ fn main() {
     }
     linker_be_nice();
     check_xtensa_linker_available();
+    layout();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
 }
@@ -134,6 +135,25 @@ fn linker_be_nice() {
         "cargo:rustc-link-arg=-Wl,--error-handling-script={}",
         std::env::current_exe().unwrap().display()
     );
+}
+
+/// A fixed RAM layout, so that a delta update is as large as the change, not as the image. Each
+/// static's address sits in literal pools all through the code, so a static that moves changes
+/// them everywhere: 32 bytes more constants in RAM made a 72 KB delta of a small change. The code in
+/// RAM, the switch tables and constants esp-hal puts at the head of `.data`, and the statics each
+/// take a room of fixed size (`firmware/ld/*_hook.x`), per binary: what a part leaves unused is
+/// RAM the main task's stack doesn't get. The link fails when a part outgrows its room; raising one
+/// moves what comes after it, so the next delta is a large one.
+fn layout() {
+    let ld = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../ld");
+    println!("cargo:rerun-if-changed={}", ld.display());
+    println!("cargo:rustc-link-search={}", ld.display());
+    // (binary, code in RAM, switch tables and constants, those and the statics), in bytes
+    for (bin, rwtext, head, data) in [("companion", 0x3E00, 0x3300, 0x6C00), ("heltec-v4", 0x4A00, 0x4000, 0x7A00)] {
+        for (sym, room) in [("MC_RWTEXT_ROOM", rwtext), ("MC_DATA_HEAD", head), ("MC_DATA_ROOM", data)] {
+            println!("cargo:rustc-link-arg-bin={bin}=-Wl,--defsym={sym}={room:#x}");
+        }
+    }
 }
 
 /// Build timestamp: seeds the wall clock (adverts must carry increasing timestamps) and `ver`.
