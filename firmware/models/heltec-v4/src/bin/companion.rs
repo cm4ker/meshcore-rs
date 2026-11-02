@@ -52,7 +52,7 @@ const WATCHDOG_SECS: u64 = 30;
 const MAX_TX_POWER_DBM: i8 = 22;
 /// The on-device interface (no Bluetooth page: the ESP BLE task cannot be switched off yet; no
 /// power-off page: nothing but a reset would wake the board).
-const PAGES: &[Page] = &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Advert];
+const PAGES: &[Page] = &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Pull, Page::Advert];
 
 struct HeltecV4<'d> {
     fem: Fem<'d>,

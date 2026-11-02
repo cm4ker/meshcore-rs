@@ -95,20 +95,20 @@ pub struct NodePrefs {
     /// Fingerprints of the root keys whose signed releases this node installs (see
     /// [`crate::release`]); none = unsigned updates are accepted.
     pub ota_roots: Vec<Fingerprint>,
-    /// Fingerprints of the owner keys one of which must sign a release too (`set ota.owner`);
+    /// Fingerprints of the owner keys one of which must sign a release too (`set fw.owner`);
     /// none = the root's signature is enough.
     pub ota_owners: Vec<Fingerprint>,
-    /// Hand firmware updates on to the companions next to this node (`set fw.serve on`, see
+    /// Hand firmware updates on to the nodes next to this one (`set fw.serve on`, see
     /// [`crate::fwshare`]), fetched from `fw_server` over the Wi-Fi link. Off by default.
     pub fw_serve: bool,
     /// Host of the release server (plain HTTP: what it serves is signed).
     pub fw_server: String,
-    /// Update this node by itself from the release server (`set fw.auto on`): only with a pinned
-    /// root. Off by default.
-    pub fw_auto: bool,
+    /// What this node does about updates by itself (`set fw.auto`, `crate::fwstate::mode`): only
+    /// with a pinned root. Off by default.
+    pub fw_mode: u8,
     /// The release channel followed (`release::channel`): stable by default.
     pub fw_channel: u8,
-    /// Where `fw.auto` takes updates from without a working link to `fw_server`: the start of a
+    /// Where updates come from without a working link to `fw_server`: the start of a
     /// neighbouring repeater's key (`set fw.source`), asked over LoRa; empty = the best neighbour
     /// heard directly that answers.
     pub fw_source: Vec<u8>,
@@ -171,7 +171,7 @@ impl Default for NodePrefs {
             ota_owners: Vec::new(),
             fw_serve: false,
             fw_server: "nw.ommesh.ru".into(),
-            fw_auto: false,
+            fw_mode: crate::fwstate::mode::OFF,
             fw_channel: 0,
             fw_source: Vec::new(),
         }
@@ -293,7 +293,7 @@ impl NodePrefs {
         let _ = writeln!(s, "ota_owner={}", join_fingerprints(&self.ota_owners, ","));
         let _ = writeln!(s, "fw_serve={}", b(self.fw_serve));
         let _ = writeln!(s, "fw_server={}", escape(&self.fw_server));
-        let _ = writeln!(s, "fw_auto={}", b(self.fw_auto));
+        let _ = writeln!(s, "fw_mode={}", self.fw_mode);
         let _ = writeln!(s, "fw_channel={}", self.fw_channel);
         let _ = writeln!(s, "fw_source={}", crate::util::to_hex(&self.fw_source));
         s
@@ -363,7 +363,9 @@ impl NodePrefs {
                 "ota_owner" => p.ota_owners = parse_fingerprints(v).unwrap_or_default(),
                 "fw_serve" => p.fw_serve = flag(),
                 "fw_server" => p.fw_server = unescape(v),
-                "fw_auto" => p.fw_auto = flag(),
+                "fw_mode" => p.fw_mode = u8v().min(crate::fwstate::mode::INSTALL),
+                // before the three modes: on was what `install` is now
+                "fw_auto" => p.fw_mode = if flag() { crate::fwstate::mode::INSTALL } else { crate::fwstate::mode::OFF },
                 "fw_channel" => p.fw_channel = u8v().min(1),
                 "fw_source" => {
                     let n = (v.len() / 2).min(32);
@@ -394,11 +396,17 @@ mod tests {
         p.ota_owners = alloc::vec![[0x3C; 32]];
         p.fw_serve = true;
         p.fw_server = "fw.example:8080".into();
-        p.fw_auto = true;
+        p.fw_mode = crate::fwstate::mode::DOWNLOAD;
         p.fw_channel = 1;
         p.fw_source = alloc::vec![0xCE, 0x5B, 0x93];
         let q = NodePrefs::deserialize(&p.serialize());
         assert_eq!(p, q);
+    }
+
+    #[test]
+    fn an_old_fw_auto_on_installs_by_itself() {
+        assert_eq!(NodePrefs::deserialize("fw_auto=1\n").fw_mode, crate::fwstate::mode::INSTALL);
+        assert_eq!(NodePrefs::deserialize("fw_auto=0\n").fw_mode, crate::fwstate::mode::OFF);
     }
 
     #[test]

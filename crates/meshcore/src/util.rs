@@ -39,6 +39,15 @@ pub fn valid_utf8_prefix_len(text: &[u8], max_bytes: usize) -> usize {
 }
 
 /// Upper-case hex, as upstream `Utils::toHex`.
+/// The start of a public key, as people type it: 8 to 64 hex digits, an even count.
+pub fn parse_key_prefix(s: &str) -> Option<alloc::vec::Vec<u8>> {
+    if !(8..=64).contains(&s.len()) || s.len() % 2 != 0 {
+        return None;
+    }
+    let mut key = alloc::vec![0u8; s.len() / 2];
+    from_hex(&mut key, s).then_some(key)
+}
+
 pub fn to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {

@@ -29,9 +29,11 @@ pub fn urgent(old: &View, new: &View) -> bool {
             (Body::Messages(a), Body::Messages(b)) => {
                 a.len() != b.len() || a.iter().zip(b).any(|(a, b)| a.from != b.from || a.text != b.text)
             }
-            // the update window opening, closing or a phone connecting (not the minutes left)
+            // the update window opening, closing or a phone connecting (not the minutes left), or
+            // the update moving on (not its bytes)
             (Body::Update(a), Body::Update(b)) => {
                 a.window.as_ref().map(|w| (w.pin, w.connected)) != b.window.as_ref().map(|w| (w.pin, w.connected))
+                    || a.state != b.state
             }
             _ => false,
         }

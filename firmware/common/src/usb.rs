@@ -3,7 +3,7 @@
 //!
 //! The port's OUT FIFO holds one 64-byte USB packet, and on the S3 a packet the host sends before
 //! the FIFO has been read is lost. Polled every 20 ms, a console line that came in one write lost
-//! everything after its first 64 bytes (a pasted `set ota.root <fingerprint>`), and the rest of it
+//! everything after its first 64 bytes (a pasted `set fw.root <fingerprint>`), and the rest of it
 //! was glued to the next line. The packet interrupt now drains the FIFO into a ring at once, and
 //! tasks read the ring. (Interrupts masked for long lose packets all the same: the console shows
 //! a pasted line only once it has come, see the repeater's `console_task`.)

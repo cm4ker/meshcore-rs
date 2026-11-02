@@ -3,6 +3,7 @@
 use alloc::format;
 
 use super::*;
+use crate::fwstate::{self, FwState};
 use crate::util::{atof, atoi, atoi_signed, ftoa};
 use crate::ota::{OtaEndpoint, OtaOutcome};
 use crate::{FIRMWARE_VERSION, MAX_GROUP_DATA_LENGTH, SIGNATURE_SIZE};
@@ -642,9 +643,9 @@ impl Companion {
                 }
             }
             CMD_GET_CUSTOM_VARS => {
-                let mut text = self.custom_vars(false);
+                let mut text = self.custom_vars(false, ctx.now);
                 if text.len() + 1 > MAX_FRAME_SIZE {
-                    text = self.custom_vars(true);
+                    text = self.custom_vars(true, ctx.now);
                 }
                 let mut f = alloc::vec![RESP_CODE_CUSTOM_VARS];
                 f.extend_from_slice(text.as_bytes());
@@ -674,66 +675,14 @@ impl Companion {
                         self.set_adc_multiplier(core::str::from_utf8(value).unwrap_or("0"));
                         self.write_ok();
                     }
-                    b"ota_root" => match parse_keys(core::str::from_utf8(value).unwrap_or("?")) {
-                        Some(roots) => {
-                            self.pin_ota_roots(roots);
-                            self.write_ok();
+                    b"fw_root" | b"fw_owner" | b"fw_auto" | b"fw_channel" | b"fw_source" | b"fw_do" => {
+                        let name = core::str::from_utf8(name).unwrap_or("");
+                        let value = core::str::from_utf8(value).unwrap_or("").trim();
+                        match self.fw_setting(ctx, false, name, value) {
+                            Ok(_) => self.write_ok(),
+                            Err(e) => self.write_err(e.code()),
                         }
-                        None => self.write_err(ERR_CODE_ILLEGAL_ARG),
-                    },
-                    b"ota_owner" => match parse_keys(core::str::from_utf8(value).unwrap_or("?")) {
-                        Some(owners) => match self.pin_ota_owners(owners) {
-                            true => self.write_ok(),
-                            false => self.write_err(ERR_CODE_BAD_STATE),
-                        },
-                        None => self.write_err(ERR_CODE_ILLEGAL_ARG),
-                    },
-                    b"fw_pull" => {
-                        let mode = match value {
-                            b"off" | b"0" => Some(FW_PULL_OFF),
-                            b"on" | b"1" => Some(FW_PULL_ON),
-                            b"auto" | b"2" => Some(FW_PULL_AUTO),
-                            b"check" => None,
-                            // one check that installs what it finds (`fw update`)
-                            b"update" => {
-                                return match self.fw_update_now() {
-                                    Ok(_) => self.write_ok(),
-                                    Err(_) => self.write_err(ERR_CODE_BAD_STATE),
-                                };
-                            }
-                            _ => return self.write_err(ERR_CODE_ILLEGAL_ARG),
-                        };
-                        if let Some(mode) = mode {
-                            self.prefs.fw_pull = mode;
-                            self.effects.save_prefs = true;
-                        }
-                        self.fw_check_now(ctx);
-                        self.write_ok();
                     }
-                    b"fw_source" => {
-                        let text = core::str::from_utf8(value).unwrap_or("").trim();
-                        let mut key = alloc::vec![0u8; (text.len() / 2).min(PUB_KEY_SIZE)];
-                        if text == "auto" {
-                            key.clear();
-                        } else if key.len() < 4 || !text.get(..key.len() * 2).is_some_and(|h| crate::util::from_hex(&mut key, h)) {
-                            return self.write_err(ERR_CODE_ILLEGAL_ARG);
-                        }
-                        self.prefs.fw_source = key;
-                        self.effects.save_prefs = true;
-                        self.write_ok();
-                    }
-                    b"fw_channel" => match core::str::from_utf8(value).ok().and_then(release::channel_by_name) {
-                        Some(ch) => {
-                            self.prefs.fw_channel = ch;
-                            self.effects.save_prefs = true;
-                            self.write_ok();
-                        }
-                        None => self.write_err(ERR_CODE_ILLEGAL_ARG),
-                    },
-                    b"fw_install" => match self.fw_install() {
-                        Ok(()) => self.write_ok(),
-                        Err(_) => self.write_err(ERR_CODE_BAD_STATE),
-                    },
                     _ => self.write_err(ERR_CODE_ILLEGAL_ARG),
                 }
             }
@@ -1016,14 +965,14 @@ impl Companion {
 
     /// `MyMesh::handleCommand` (USB rescue CLI, `CMD_RUN_CLI_COMMAND`, `remote` CLI from a
     /// contact). An `xx|` prefix is echoed back.
-    pub fn handle_command(&mut self, _ctx: &mut MeshCtx, remote: bool, command: &str) -> String {
+    pub fn handle_command(&mut self, ctx: &mut MeshCtx, remote: bool, command: &str) -> String {
         let mut command = command.trim_start_matches(' ');
         let mut reply = String::new();
         if command.len() > 4 && command.as_bytes()[2] == b'|' {
             reply.push_str(&command[..3]);
             command = &command[3..];
         }
-        match self.handle_command_inner(remote, command) {
+        match self.handle_command_inner(ctx, remote, command) {
             Some(r) => reply.push_str(&r),
             None => reply.push_str("Unknown command"),
         }
@@ -1035,7 +984,7 @@ impl Companion {
     /// keys that must sign them too (fingerprints separated by spaces; `short`: their first 16
     /// hex digits, when the whole ones do not fit in a frame), and the updates pulled from a
     /// neighbouring repeater.
-    fn custom_vars(&self, short: bool) -> String {
+    fn custom_vars(&self, short: bool, now: u64) -> String {
         let fps = |name: &str, list: &[release::Fingerprint]| match (list.is_empty(), short) {
             (true, _) => alloc::format!("{name}:off"),
             (false, false) => alloc::format!("{name}:{}", release::join_fingerprints(list, " ")),
@@ -1051,15 +1000,18 @@ impl Companion {
         if let Some(m) = self.adc_multiplier() {
             vars.push(alloc::format!("adc_multiplier:{m:.3}"));
         }
-        vars.push(fps("ota_root", &self.prefs.ota_roots));
-        vars.push(fps("ota_owner", &self.prefs.ota_owners));
-        vars.push(alloc::format!("fw_pull:{}", ["off", "on", "auto"][self.prefs.fw_pull.min(2) as usize]));
+        vars.push(fps("fw_root", &self.prefs.ota_roots));
+        vars.push(fps("fw_owner", &self.prefs.ota_owners));
+        vars.push(alloc::format!("fw_auto:{}", fwstate::mode_name(self.prefs.fw_mode)));
         vars.push(match self.prefs.fw_source.is_empty() {
             true => String::from("fw_source:auto"),
             false => alloc::format!("fw_source:{}", crate::util::to_hex(&self.prefs.fw_source)),
         });
         vars.push(alloc::format!("fw_channel:{}", release::channel_name(self.prefs.fw_channel)));
-        vars.push(alloc::format!("fw_status:{}", self.fw_status_text()));
+        // the custom variables are a comma-separated list, and in the app the hints are variables
+        let status = self.fw_line(now).replace(',', ";").replace("set fw.root", "fw_root").replace("fw ", "fw_do ");
+        vars.push(alloc::format!("fw_status:{status}"));
+        vars.push(alloc::format!("fw_do:{}", if self.fw_done.is_empty() { "-" } else { &self.fw_done }));
         vars.join(",")
     }
 
@@ -1095,19 +1047,23 @@ impl Companion {
         true
     }
 
-    /// Updates: the keys a release must be signed by (`set|get ota.root`, `ota.owner`, as on a
-    /// repeater), and those pulled from a neighbouring repeater: `fw update`, `fw status`,
-    /// `set|get fw.pull`, `fw.channel`, `fw.source`. The keys are never set by a `remote`
+    /// Updates, as on a repeater: `fw` (where it all stands), `fw check`, `fw update`,
+    /// `fw install`, `fw rollback`, and `get|set fw.auto`, `fw.channel`, `fw.source`, `fw.root`
+    /// (the keys a release must be signed by), `fw.owner`. The keys are never set by a `remote`
     /// contact: a companion takes no firmware over the mesh until a root is pinned, and pinning
     /// one is what lets a repeater hand it firmware.
-    fn handle_fw_command(&mut self, remote: bool, cmd: &str) -> Option<String> {
-        let save = |c: &mut Self, r: &str| {
-            c.effects.save_prefs = true;
-            String::from(r)
+    fn handle_fw_command(&mut self, ctx: &MeshCtx, remote: bool, cmd: &str) -> Option<String> {
+        let reply = |r: Result<String, FwError>| match r {
+            Ok(r) => format!("OK - {r}"),
+            Err(e) => format!("Error: {}", e.text()),
         };
-        let bad_keys = || format!("Error: up to {} fingerprints of 64 hex digits, or off", release::MAX_ROOTS);
         Some(match cmd {
-            "get ota.root" => {
+            "fw" => self.fw_reply(ctx.now),
+            "fw check" => reply(self.fw_setting(ctx, remote, "fw_do", "check")),
+            "fw update" => reply(self.fw_setting(ctx, remote, "fw_do", "update")),
+            "fw install" => reply(self.fw_setting(ctx, remote, "fw_do", "install")),
+            "fw rollback" => reply(self.fw_setting(ctx, remote, "fw_do", "rollback")),
+            "get fw.root" => {
                 let b = &self.ota.build;
                 let build = format!("{}/{} #{}", release::board_name(b.board), release::role_name(b.role), b.counter);
                 match self.prefs.ota_roots.is_empty() {
@@ -1115,79 +1071,128 @@ impl Companion {
                     false => format!("> {} ({build})", release::join_fingerprints(&self.prefs.ota_roots, ", ")),
                 }
             }
-            "get ota.owner" => match (self.prefs.ota_owners.is_empty(), self.prefs.ota_roots.is_empty()) {
+            "get fw.owner" => match (self.prefs.ota_owners.is_empty(), self.prefs.ota_roots.is_empty()) {
                 (true, _) => "> none, the root's signature is enough".into(),
                 (false, true) => format!("> {} (no root pinned: not checked)", release::join_fingerprints(&self.prefs.ota_owners, ", ")),
                 (false, false) => format!("> {}", release::join_fingerprints(&self.prefs.ota_owners, ", ")),
             },
-            "fw update" => match self.fw_update_now() {
-                Ok(r) => format!("OK - {r}"),
-                Err(e) => format!("Error: {e}"),
-            },
-            "fw status" => format!("> {}", self.fw_status_text()),
-            "get fw.pull" => format!("> {}", ["off", "on", "auto"][self.prefs.fw_pull.min(2) as usize]),
+            "get fw.auto" => format!("> {}", fwstate::mode_name(self.prefs.fw_mode)),
             "get fw.channel" => format!("> {}", release::channel_name(self.prefs.fw_channel)),
             "get fw.source" if self.prefs.fw_source.is_empty() => "> auto".into(),
-            "get fw.source" => format!("> {}", crate::util::to_hex(&self.prefs.fw_source)),
-            _ if remote && (cmd.starts_with("set ota.root ") || cmd.starts_with("set ota.owner ")) => {
-                "Error: release keys are set only in the app or over USB".into()
-            }
+            "get fw.source" => format!("> {}", self.fw_source_label()),
             _ => {
-                if let Some(v) = cmd.strip_prefix("set ota.root ") {
-                    let Some(roots) = parse_keys(v) else {
-                        return Some(bad_keys());
-                    };
-                    self.pin_ota_roots(roots);
-                    match self.prefs.ota_roots.is_empty() {
-                        true => "OK - unsigned updates accepted over BLE and USB, none pulled".into(),
-                        false => format!("OK - only releases signed by {} are installed", release::join_fingerprints(&self.prefs.ota_roots, ", ")),
-                    }
-                } else if let Some(v) = cmd.strip_prefix("set ota.owner ") {
-                    let Some(owners) = parse_keys(v) else {
-                        return Some(bad_keys());
-                    };
-                    if !self.pin_ota_owners(owners) {
-                        return Some("Error: pin the root key first (set ota.root)".into());
-                    }
-                    match self.prefs.ota_owners.is_empty() {
-                        true => "OK - the root's signature is enough".into(),
-                        false => format!("OK - a release must be signed by {} too", release::join_fingerprints(&self.prefs.ota_owners, ", ")),
-                    }
-                } else if let Some(v) = cmd.strip_prefix("set fw.pull ") {
-                    match v.trim() {
-                        "off" => self.prefs.fw_pull = FW_PULL_OFF,
-                        "on" => self.prefs.fw_pull = FW_PULL_ON,
-                        "auto" => self.prefs.fw_pull = FW_PULL_AUTO,
-                        _ => return Some("Error: off, on or auto".into()),
-                    }
-                    save(self, "OK")
-                } else if let Some(v) = cmd.strip_prefix("set fw.channel ") {
-                    let Some(ch) = release::channel_by_name(v.trim()) else {
-                        return Some("Error: stable or dev".into());
-                    };
-                    self.prefs.fw_channel = ch;
-                    save(self, "OK")
-                } else {
-                    let v = cmd.strip_prefix("set fw.source ")?.trim();
-                    let mut key = alloc::vec![0u8; (v.len() / 2).min(PUB_KEY_SIZE)];
-                    if v == "auto" {
-                        key.clear();
-                    } else if key.len() < 4 || !v.get(..key.len() * 2).is_some_and(|h| crate::util::from_hex(&mut key, h)) {
-                        return Some("Error: a key prefix of 8+ hex digits, or auto".into());
-                    }
-                    self.prefs.fw_source = key;
-                    save(self, "OK")
+                let (name, value) = cmd.strip_prefix("set fw.")?.split_once(' ')?;
+                if !["root", "owner", "auto", "channel", "source"].contains(&name) {
+                    return None;
                 }
+                reply(self.fw_setting(ctx, remote, &format!("fw_{name}"), value.trim()))
             }
         })
     }
 
-    fn handle_command_inner(&mut self, remote: bool, cmd: &str) -> Option<String> {
+    /// `fw.source`, for people: `PKIO (CE5B9348)`, or the start of the key alone.
+    fn fw_source_label(&self) -> String {
+        let key = &self.prefs.fw_source;
+        let hex = crate::util::to_hex(&key[..key.len().min(4)]);
+        match self.lookup_contact(key) {
+            Some(idx) => format!("{} ({hex})", self.contacts[idx].name_lossy()),
+            None => hex,
+        }
+    }
+
+    /// An update setting or action, by its custom variable's name (`fw_auto`, `fw_do`, ...): the
+    /// CLI's `set fw.auto` and `fw check` come here too. The reply is what follows "OK - ".
+    fn fw_setting(&mut self, ctx: &MeshCtx, remote: bool, name: &str, value: &str) -> Result<String, FwError> {
+        let keys = || FwError::Value(format!("up to {} fingerprints of 64 hex digits, or off", release::MAX_ROOTS));
+        let save = |c: &mut Self| c.effects.save_prefs = true;
+        if remote && (name == "fw_root" || name == "fw_owner") {
+            return Err(FwError::State("release keys are set only in the app or over USB".into()));
+        }
+        match name {
+            "fw_root" => {
+                let roots = parse_keys(value).ok_or_else(keys)?;
+                self.pin_ota_roots(roots);
+                Ok(match self.prefs.ota_roots.is_empty() {
+                    true => "unsigned updates accepted over BLE and USB, none pulled".into(),
+                    false => format!("only releases signed by {} are installed", release::join_fingerprints(&self.prefs.ota_roots, ", ")),
+                })
+            }
+            "fw_owner" => {
+                let owners = parse_keys(value).ok_or_else(keys)?;
+                if !self.pin_ota_owners(owners) {
+                    return Err(FwError::State("pin the root key first (set fw.root)".into()));
+                }
+                Ok(match self.prefs.ota_owners.is_empty() {
+                    true => "the root's signature is enough".into(),
+                    false => format!("a release must be signed by {} too", release::join_fingerprints(&self.prefs.ota_owners, ", ")),
+                })
+            }
+            "fw_auto" => {
+                let m = fwstate::mode_by_name(value).ok_or_else(|| FwError::Value("off, download or install".into()))?;
+                let was = core::mem::replace(&mut self.prefs.fw_mode, m);
+                save(self);
+                if was == fwstate::mode::OFF && m != fwstate::mode::OFF {
+                    // switched on: the first check now rather than in twelve hours
+                    self.fw_check_soon(ctx);
+                }
+                let ch = release::channel_name(self.prefs.fw_channel);
+                Ok(match (m, self.fw_blocked()) {
+                    (fwstate::mode::OFF, _) => "no updates by itself".into(),
+                    (_, Some(s @ (FwState::NoRoot | FwState::NoSlot))) => format!("but {}", s.line()),
+                    (fwstate::mode::DOWNLOAD, _) => format!("downloads {ch} releases by itself; fw install installs them"),
+                    _ => format!("installs {ch} releases by itself, from a repeater nearby"),
+                })
+            }
+            "fw_channel" => {
+                let ch = release::channel_by_name(value).ok_or_else(|| FwError::Value("stable or dev".into()))?;
+                self.prefs.fw_channel = ch;
+                save(self);
+                Ok(match ch == release::channel::DEV {
+                    true => "following dev releases (and stable ones)".into(),
+                    false => "following stable releases".into(),
+                })
+            }
+            "fw_source" => {
+                let key = if value == "auto" {
+                    Vec::new()
+                } else if let Some(key) = crate::util::parse_key_prefix(value) {
+                    key
+                } else if let Some(c) = self.contacts.iter().find(|c| c.adv_type == ADV_TYPE_REPEATER && c.name_lossy().eq_ignore_ascii_case(value)) {
+                    c.id.pub_key[..8].to_vec()
+                } else {
+                    return Err(FwError::Value(format!("no repeater {value} in the contacts; a name, the start of a key (8+ hex digits) or auto")));
+                };
+                self.prefs.fw_source = key;
+                save(self);
+                Ok(match self.prefs.fw_source.is_empty() {
+                    true => "updates from the best repeater heard directly".into(),
+                    false => format!("updates from {}", self.fw_source_label()),
+                })
+            }
+            "fw_do" => {
+                let r = match value {
+                    "check" => self.fw_check_now(ctx, false),
+                    "update" => self.fw_check_now(ctx, true),
+                    "install" => self.fw_install(),
+                    "rollback" => self.fw_rollback(),
+                    _ => return Err(FwError::Value("check, update, install or rollback".into())),
+                };
+                self.fw_done = match &r {
+                    Ok(_) => format!("{value}: ok"),
+                    Err(_) => format!("{value}: failed"),
+                };
+                r.map_err(FwError::State)
+            }
+            _ => Err(FwError::Value("unknown".into())),
+        }
+    }
+
+    fn handle_command_inner(&mut self, ctx: &MeshCtx, remote: bool, cmd: &str) -> Option<String> {
         if let Some(r) = self.handle_radio_command(cmd) {
             self.effects.save_prefs = true;
             return Some(r);
         }
-        if let Some(r) = self.handle_fw_command(remote, cmd) {
+        if let Some(r) = self.handle_fw_command(ctx, remote, cmd) {
             return Some(r);
         }
         if cmd == "get adc.multiplier" {
@@ -1262,7 +1267,7 @@ impl Companion {
         } else if cmd == "board" {
             self.board.manufacturer.clone()
         } else if cmd == "ver" {
-            format!("{} ({})", FIRMWARE_VERSION, release::build_label(&self.board.build_date))
+            format!("{} ({})", FIRMWARE_VERSION, release::ver_label(&self.board.build_date))
         } else if cmd == "get tz.offset" {
             format!("> {}", p.tz_offset)
         } else {

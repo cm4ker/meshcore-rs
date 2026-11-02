@@ -19,7 +19,8 @@ use embassy_futures::select::{Either3, select3};
 use embassy_time::{Instant, Timer};
 use embedded_storage::nor_flash::NorFlash;
 use log::{error, info, warn};
-use meshcore::companion::{BlobStore, Board as BoardInfo, Companion, CompanionPrefs, FwPullStatus, RecentMessage};
+use meshcore::companion::{BlobStore, Board as BoardInfo, Companion, CompanionPrefs, RecentMessage};
+use meshcore::fwstate::FwState;
 use meshcore::crypto;
 use meshcore::identity::LocalIdentity;
 use meshcore::mesh::{Mesh, MeshCtx};
@@ -145,6 +146,15 @@ pub trait Platform {
         false
     }
     fn confirm_trial(&mut self) {}
+    /// The other firmware slot: whether it holds a firmware to go back to, that firmware's name,
+    /// and the release rolled back from (0 = none).
+    fn other_slot(&mut self) -> (bool, String, u32) {
+        (false, String::new(), 0)
+    }
+    /// Go back to the firmware in the other slot (`fw rollback`); the restart follows.
+    fn rollback(&mut self) -> bool {
+        false
+    }
     /// Start the app links besides USB (BLE, Wi-Fi/TCP) from the stored settings. From here on
     /// the USB port carries companion frames only.
     fn start_links(&mut self, spawner: &Spawner, prefs: &CompanionPrefs, ble: BleSetup) -> Links;
@@ -205,42 +215,22 @@ async fn battery_mv<B: Board>(board: &mut B, set: f32) -> u16 {
     }
 }
 
-/// Why a pulled update failed, in the screen's words (the core says it in English).
-fn pull_failure(why: &str) -> String {
-    String::from(match why {
-        "no answer from the repeater" => "Репитер не ответил",
-        "not signed by the pinned root key" => "Подписано не тем корневым ключом, что закреплён здесь",
-        "made for another board" => "Сделано для другой платы",
-        "older than this firmware" => "Старше этой прошивки",
-        "made for another firmware than this one" => "Сделано не для этой прошивки",
-        "the repeater has no updates now" => "У репитера сейчас нет обновлений",
-        "the repeater could not send the update" => "Репитер не смог отдать обновление",
-        "the repeater is not a contact" => "Репитера нет в контактах",
-        "pieces of the update are missing" => "Обновление пришло не целиком",
-        "the update slot can't be written" => "Не пишется память для обновления",
-        other => other,
-    })
-}
-
-/// The update page: where pulling an update from a neighbouring repeater stands.
-fn pull_info(app: &Companion) -> PullInfo {
-    let version = match app.ota.build.counter {
+/// The update page: where pulling an update from a neighbouring repeater stands, in the same
+/// words as `fw` (in Russian).
+fn pull_info(app: &Companion, now: u64) -> PullInfo {
+    let version = match meshcore::release::RELEASE_COUNTER {
         0 => alloc::format!("локальная сборка {}", app.board.build_date),
-        n => alloc::format!("сборка #{n}"),
+        _ => meshcore::release::running_label(&app.board.build_date),
     };
-    let (state, detail, progress, hold): (String, String, _, _) = match app.fw_pull_status() {
-        FwPullStatus::Off => ("Выключено".into(), "Включите fw_pull в настройках приложения".into(), None, None),
-        FwPullStatus::NotTrusted => ("Нет корневого ключа".into(), "Задайте ota_root в настройках приложения".into(), None, None),
-        FwPullStatus::Idle { up_to_date: true } => ("Обновлений нет".into(), "Проверю снова через 12 часов".into(), None, Some("проверить")),
-        FwPullStatus::Idle { up_to_date: false } => ("Ждёт проверки".into(), "Спрошу репитер рядом".into(), None, Some("проверить")),
-        FwPullStatus::NoRepeater => ("Нет репитера рядом".into(), "Нужен сосед с fw.serve on".into(), None, Some("проверить")),
-        FwPullStatus::Checking => ("Проверяю".into(), "Спрашиваю репитер рядом".into(), None, None),
-        FwPullStatus::RepeaterFetching => ("Репитер загружает".into(), "Спрошу снова через минуту".into(), None, None),
-        FwPullStatus::Loading { version, done, total } => (alloc::format!("Загружается {version}"), String::new(), Some((*done, *total)), None),
-        FwPullStatus::Ready { version } => (alloc::format!("{version} готова"), "Установка займёт около 10 секунд".into(), None, Some("установить")),
-        FwPullStatus::Failed(why) => ("Не удалось".into(), pull_failure(why), None, Some("проверить")),
+    let state = app.fw_state();
+    let trial = app.board.fw_trial_until.filter(|&t| t > now).map(|t| ((t - now) / 1000, app.board.fw_prev.as_str()));
+    let text = crate::fwtext::fw_text(&state, trial, true);
+    let hold = match state {
+        FwState::Ready { .. } => Some("установить"),
+        FwState::NoRoot | FwState::NoSlot | FwState::Asking { .. } | FwState::Downloading { .. } | FwState::Installing { .. } => None,
+        _ => Some("проверить"),
     };
-    PullInfo { state, detail, progress, hold, version }
+    PullInfo { state: text.state, detail: text.detail, progress: text.progress, hold, version }
 }
 
 /// The interface's current page with what it shows; `unread`: messages since the messages page
@@ -305,7 +295,7 @@ fn build_view(
         }
         Page::Advert => Body::Advert { flood: false },
         Page::PowerOff => Body::PowerOff,
-        Page::Pull => Body::Pull(pull_info(app)),
+        Page::Pull => Body::Pull(pull_info(app, now)),
         // repeater pages
         _ => Body::Home { name: app.prefs.node_name.clone(), unread },
     };
@@ -432,6 +422,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         ..Default::default()
     };
     let mut mesh = Mesh::new(ctx, Companion::new(prefs, info));
+    (mesh.app.board.fw_rollback, mesh.app.board.fw_prev, mesh.app.board.fw_skip) = platform.other_slot();
     if let Some(s) = &store {
         mesh.app.blobs = Box::new(FlashBlobs(s.clone()));
         if let Some(contacts) = s.borrow_mut().comp_log_latest() {
@@ -481,6 +472,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     let mut last_contacts_save = 0u64;
     let mut reboot_at: Option<u64> = None;
     let confirm_at = now_ms() + TRIAL_HEALTHY_MS;
+    mesh.app.board.fw_trial_until = in_trial.then_some(confirm_at);
     let mut button_down_at: Option<u64> = None;
     // where replies go: the link of the latest request
     let mut reply_to = Link::Usb;
@@ -625,12 +617,13 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
                     }
                     Some(Action::PowerOff) => mesh.app.effects.power_off = true,
                     Some(Action::Pull) => {
-                        if matches!(mesh.app.fw_pull_status(), FwPullStatus::Ready { .. }) {
-                            if let Err(e) = mesh.app.fw_install() {
-                                warn!("update: {e}");
-                            }
+                        let done = if matches!(mesh.app.fw_state(), FwState::Ready { .. }) {
+                            mesh.app.fw_install()
                         } else {
-                            mesh.app.fw_check_now(&mesh.ctx);
+                            mesh.app.fw_check_now(&mesh.ctx, false)
+                        };
+                        if let Err(e) = done {
+                            warn!("update: {e}");
                         }
                     }
                     Some(Action::ToggleUpdate) | None => {}
@@ -759,6 +752,13 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         if fx.reboot {
             reboot_at = Some(now + 1000);
         }
+        if fx.fw_rollback {
+            if platform.rollback() {
+                reboot_at = Some(now + 1000);
+            } else {
+                warn!("fw rollback: could not select the other slot");
+            }
+        }
         if fx.power_off {
             let _ = radio.sleep();
             if ui.enabled() {
@@ -775,6 +775,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         if in_trial && now >= confirm_at {
             platform.confirm_trial();
             in_trial = false;
+            mesh.app.board.fw_trial_until = None;
         }
         if reboot_at.is_some_and(|t| now >= t) {
             comp_save(&store, CompBlob::Clock, &mesh.ctx.current_time().to_le_bytes());

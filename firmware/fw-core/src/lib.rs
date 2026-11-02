@@ -10,6 +10,7 @@ extern crate alloc;
 
 pub mod companion;
 pub mod frames;
+pub mod fwtext;
 pub mod gps;
 pub mod links;
 pub mod lr2021;

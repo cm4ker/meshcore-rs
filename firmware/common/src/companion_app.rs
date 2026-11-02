@@ -86,6 +86,20 @@ impl Platform for Esp {
         }
     }
 
+    fn other_slot(&mut self) -> (bool, String, u32) {
+        match (&self.store, self.slots) {
+            (Some(s), Some(sl)) => ota::other_slot(&mut s.borrow_mut(), sl),
+            _ => (false, String::new(), 0),
+        }
+    }
+
+    fn rollback(&mut self) -> bool {
+        match (&self.store, self.slots) {
+            (Some(s), Some(sl)) => ota::rollback(&mut s.borrow_mut(), sl),
+            _ => false,
+        }
+    }
+
     fn start_links(&mut self, spawner: &Spawner, prefs: &CompanionPrefs, ble: BleSetup) -> Links {
         // Wi-Fi: the TCP companion interface
         if prefs.wifi_enabled

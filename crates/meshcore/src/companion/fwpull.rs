@@ -1,21 +1,17 @@
-//! Pulling a firmware update from a neighbouring repeater (`fw_pull`, see [`crate::fwshare`]).
+//! Pulling a firmware update from a neighbouring repeater (`fw.auto`, see [`crate::fwshare`]).
 //! Connected to nothing, a companion that pins a root key asks the repeater it hears best directly
 //! for a delta from the image it runs, fetches it a piece at a time into its update slot (through
-//! the same session an app's update uses), and installs it when its user says so (`fw_pull on`,
-//! a button on the device) or by itself (`fw_pull auto`).
+//! the same session an app's update uses), and installs it when its user says so (`fw.auto
+//! download`, then `fw install` or a button on the device) or by itself (`fw.auto install`).
+//! Where it stands: `fw` and `fw_status` ([`crate::fwstate`]).
 
 use alloc::string::ToString;
 
 use super::*;
 use crate::FIRMWARE_VERSION;
 use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, status};
+use crate::fwstate::{self, FwState, mode};
 use crate::ota::{OtaOutcome, REQ_TYPE_OTA_COMMIT};
-
-pub const FW_PULL_OFF: u8 = 0;
-/// Fetch updates, install one when the user says so.
-pub const FW_PULL_ON: u8 = 1;
-/// Fetch and install updates by themselves.
-pub const FW_PULL_AUTO: u8 = 2;
 
 /// The first check, a while after boot (the node has heard its neighbours by then), and the next.
 const FIRST_CHECK_MS: u64 = 10 * 60_000;
@@ -30,27 +26,6 @@ const PIECE_GAP_MS: u64 = 1_200;
 /// Repeaters heard directly within this long are asked.
 const HEARD_RECENTLY_SECS: u32 = 2 * 86_400;
 
-/// Where a pull stands, for the device's screen and `fw_status`.
-#[derive(Clone, Debug, PartialEq)]
-pub enum FwPullStatus {
-    /// `fw_pull off`.
-    Off,
-    /// No root key is pinned, or there is no update slot: nothing is pulled, since anything
-    /// would be installed.
-    NotTrusted,
-    /// Waiting for the next check; `up_to_date` once a repeater said there is nothing newer.
-    Idle { up_to_date: bool },
-    /// No repeater heard directly to ask.
-    NoRepeater,
-    Checking,
-    /// The repeater is fetching the update from its server.
-    RepeaterFetching,
-    Loading { version: String, done: u32, total: u32 },
-    /// Fetched and checked as far as it can be before installing.
-    Ready { version: String },
-    Failed(String),
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Step {
     Sleep,
@@ -59,8 +34,16 @@ enum Step {
     Ready,
 }
 
+/// A check asked for by hand: `fw check` follows the mode once it has the update, `fw update`
+/// installs it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Hand {
+    Check,
+    Update,
+}
+
 pub struct FwPull {
-    pub status: FwPullStatus,
+    pub state: FwState,
     step: Step,
     /// When the step is due: the end of a sleep, or the deadline of an answer.
     at: u64,
@@ -68,11 +51,10 @@ pub struct FwPull {
     tries: u8,
     repeater: [u8; PUB_KEY_SIZE],
     file_id: u32,
-    version: String,
+    release: fwstate::Release,
     /// The update session being fed, while the file comes.
     loader: Option<Loader>,
-    /// `fw update`: one check that installs what it finds, whatever `fw_pull` says.
-    once: bool,
+    by_hand: Option<Hand>,
     /// The next query was asked for by hand: the repeater should not answer from what it knew.
     fresh: bool,
 }
@@ -80,29 +62,53 @@ pub struct FwPull {
 impl Default for FwPull {
     fn default() -> Self {
         Self {
-            status: FwPullStatus::Off,
+            state: FwState::Waiting { at: 0 },
             step: Step::Sleep,
             at: FIRST_CHECK_MS,
             tag: 0,
             tries: 0,
             repeater: [0; PUB_KEY_SIZE],
             file_id: 0,
-            version: String::new(),
+            release: fwstate::Release::default(),
             loader: None,
-            once: false,
+            by_hand: None,
             fresh: false,
         }
     }
 }
 
+/// Why an update setting or action was refused: a value it does not take, or not now.
+pub(super) enum FwError {
+    Value(String),
+    State(String),
+}
+
+impl FwError {
+    /// As a custom variable's error.
+    pub(super) fn code(&self) -> u8 {
+        match self {
+            Self::Value(_) => ERR_CODE_ILLEGAL_ARG,
+            Self::State(_) => ERR_CODE_BAD_STATE,
+        }
+    }
+
+    pub(super) fn text(&self) -> &str {
+        match self {
+            Self::Value(t) | Self::State(t) => t,
+        }
+    }
+}
+
 impl Companion {
-    /// The node may pull: it is asked to, and it pins a root key (what a repeater hands on is only
-    /// trusted for its signature) and has an update slot.
-    fn fw_pull_allowed(&self) -> Option<FwPullStatus> {
-        if self.prefs.fw_pull == FW_PULL_OFF && !self.fwpull.once {
-            Some(FwPullStatus::Off)
-        } else if self.ota.roots.is_empty() || self.ota.target.is_none() {
-            Some(FwPullStatus::NotTrusted)
+    /// Why the node can't check for updates now, if it can't: what a repeater hands on is only
+    /// trusted for its signature, so a root key must be pinned, and an update needs a slot.
+    pub(super) fn fw_blocked(&self) -> Option<FwState> {
+        if self.ota.roots.is_empty() {
+            Some(FwState::NoRoot)
+        } else if self.ota.target.is_none() {
+            Some(FwState::NoSlot)
+        } else if self.prefs.fw_mode == mode::OFF && self.fwpull.by_hand.is_none() {
+            Some(FwState::Off)
         } else {
             None
         }
@@ -110,19 +116,15 @@ impl Companion {
 
     /// When [`Self::fw_pull_loop`] is next due.
     pub(super) fn fw_pull_timer(&self) -> Option<u64> {
-        (self.fw_pull_allowed().is_none() && self.fwpull.step != Step::Ready).then_some(self.fwpull.at)
+        (self.fw_blocked().is_none() && self.fwpull.step != Step::Ready).then_some(self.fwpull.at)
     }
 
     pub(super) fn fw_pull_loop(&mut self, ctx: &mut MeshCtx) {
-        if let Some(status) = self.fw_pull_allowed() {
-            if self.fwpull.step != Step::Sleep {
+        if self.fw_blocked().is_some() {
+            if !matches!(self.fwpull.step, Step::Sleep | Step::Ready) {
                 self.fw_pull_reset();
             }
-            self.fwpull.status = status;
             return;
-        }
-        if matches!(self.fwpull.status, FwPullStatus::Off | FwPullStatus::NotTrusted) {
-            self.fwpull.status = FwPullStatus::Idle { up_to_date: false };
         }
         if ctx.now < self.fwpull.at {
             return;
@@ -133,7 +135,8 @@ impl Companion {
                 self.fw_query(ctx);
             }
             Step::Query | Step::Get { .. } if self.fwpull.tries >= TRIES => {
-                self.fw_pull_fail(ctx, "no answer from the repeater");
+                let name = self.fw_repeater_name();
+                self.fw_pull_fail(ctx, alloc::format!("no answer from {name}"));
             }
             Step::Query => self.fw_query(ctx),
             Step::Get { offset } => self.fw_get(ctx, offset),
@@ -141,90 +144,125 @@ impl Companion {
         }
     }
 
-    /// [`FwPullStatus`] in a few words, for `fw_status` (no commas: the custom variables are a
-    /// comma-separated list).
-    pub fn fw_status_text(&self) -> String {
-        match &self.fwpull.status {
-            FwPullStatus::Off => "off".into(),
-            FwPullStatus::NotTrusted => "needs a pinned root key (set ota.root)".into(),
-            FwPullStatus::Idle { up_to_date: true } => "up to date".into(),
-            FwPullStatus::Idle { up_to_date: false } => "waiting".into(),
-            FwPullStatus::NoRepeater => "no repeater heard directly".into(),
-            FwPullStatus::Checking => "checking".into(),
-            FwPullStatus::RepeaterFetching => "the repeater is fetching it".into(),
-            FwPullStatus::Loading { version, done, total } => alloc::format!("loading {version}: {done} of {total} bytes"),
-            FwPullStatus::Ready { version } => alloc::format!("{version} ready to install"),
-            FwPullStatus::Failed(why) => alloc::format!("failed: {}", why.replace(',', ";")),
+    /// Where the update stands (the trial after an update aside, see [`Self::fw_line`]).
+    pub fn fw_state(&self) -> FwState {
+        match (self.fw_blocked(), &self.fwpull.state) {
+            (Some(s @ (FwState::NoRoot | FwState::NoSlot)), _) => s,
+            // off, and nothing asked by hand yet: what was last found stays in view otherwise
+            (Some(FwState::Off), FwState::Waiting { .. }) => FwState::Off,
+            (_, s) => s.clone(),
         }
     }
 
-    /// `fw update`: ask the repeater now, and install what comes as soon as it is in (the device
-    /// restarts), whatever `fw_pull` says. An update already fetched is installed at once.
-    pub fn fw_update_now(&mut self) -> Result<String, String> {
-        if self.ota.roots.is_empty() {
-            return Err("pin the release root key first (set ota.root)".into());
+    /// The second line of `fw`, and `fw_status`.
+    pub fn fw_line(&self, now: u64) -> String {
+        if let Some(until) = self.board.fw_trial_until.filter(|&t| t > now) {
+            return fwstate::trial_line((until - now) / 1000, &self.board.fw_prev);
         }
-        if self.ota.target.is_none() {
-            return Err("no update slot on this device".into());
-        }
-        if self.fwpull.step == Step::Ready {
-            self.fw_install()?;
-            return Ok("installing, the device restarts".into());
-        }
-        self.fwpull.once = true;
-        self.fwpull.fresh = true;
-        if self.fwpull.step == Step::Sleep {
-            self.fwpull.at = 0;
-        }
-        Ok("asking the repeater; the update installs itself when it is in (fw status)".into())
+        self.fw_state().line()
     }
 
-    /// Check for an update now (the device's button, or the app).
-    pub fn fw_check_now(&mut self, ctx: &MeshCtx) {
-        if self.fwpull.step == Step::Sleep {
-            self.fwpull.at = ctx.now;
-            self.fwpull.fresh = true; // asked by hand
-        }
+    /// `fw`: the release that runs, the channel and mode, and where its update stands.
+    pub fn fw_reply(&self, now: u64) -> String {
+        alloc::format!(
+            "{}\n{}",
+            fwstate::head(&self.board.build_date, self.prefs.fw_channel, self.prefs.fw_mode),
+            self.fw_line(now)
+        )
     }
 
-    /// Install the fetched update: the device reboots into it.
-    pub fn fw_install(&mut self) -> Result<(), String> {
+    /// Check now (`fw check`, `fw update`, the device's button): the reply says whom it asks. An
+    /// update already downloaded is installed at once by `fw update`.
+    pub fn fw_check_now(&mut self, ctx: &MeshCtx, update: bool) -> Result<String, String> {
+        if let Some(s @ (FwState::NoRoot | FwState::NoSlot)) = self.fw_blocked() {
+            return Err(s.line());
+        }
+        match self.fwpull.step {
+            Step::Ready if update => return self.fw_install(),
+            Step::Ready => return Ok(self.fw_line(ctx.now)),
+            Step::Sleep => {}
+            _ => {
+                if update {
+                    self.fwpull.by_hand = Some(Hand::Update);
+                }
+                return Ok(self.fw_line(ctx.now));
+            }
+        }
+        self.fwpull.by_hand = Some(if update { Hand::Update } else { Hand::Check });
+        self.fwpull.at = ctx.now;
+        self.fwpull.fresh = true; // asked by hand
+        let whom = match self.fw_repeater(ctx) {
+            Some(idx) => self.contacts[idx].name_lossy(),
+            None => "the repeaters heard".into(),
+        };
+        Ok(match update {
+            true => alloc::format!("asking {whom}; if there is an update the device installs it and restarts"),
+            false => alloc::format!("asking {whom}, see fw"),
+        })
+    }
+
+    /// Install the downloaded update: the device restarts into it.
+    pub fn fw_install(&mut self) -> Result<String, String> {
         if self.fwpull.step != Step::Ready {
-            return Err("no update fetched".into());
+            return Err(match &self.fwpull.state {
+                FwState::Downloading { .. } => alloc::format!("not downloaded yet: {}", self.fwpull.state.line()),
+                _ => "nothing downloaded: fw check first".into(),
+            });
         }
+        let release = self.fwpull.release.clone();
         let (reply, outcome) = self.ota.handle(&[REQ_TYPE_OTA_COMMIT], FIRMWARE_VERSION);
-        match outcome {
+        let why = match outcome {
             OtaOutcome::Committed => {
                 self.effects.reboot = true;
-                Ok(())
+                self.fwpull.state = FwState::Installing { release: release.clone() };
+                return Ok(alloc::format!("installing {release}: restarting"));
             }
-            OtaOutcome::CommitFailed(line) => {
-                self.fw_pull_reset();
-                self.fwpull.status = FwPullStatus::Failed(line.clone());
-                Err(line)
-            }
-            OtaOutcome::None => {
-                let why = fwshare::refusal(reply.and_then(|r| r.first().copied()).unwrap_or(0)).to_string();
-                self.fw_pull_reset();
-                self.fwpull.status = FwPullStatus::Failed(why.clone());
-                Err(why)
-            }
+            OtaOutcome::CommitFailed(line) => line,
+            OtaOutcome::None => fwshare::refusal(reply.and_then(|r| r.first().copied()).unwrap_or(0)).to_string(),
+        };
+        self.fw_pull_reset();
+        self.fwpull.state = FwState::Failed { why: why.clone(), retry: 0 };
+        Err(why)
+    }
+
+    /// `fw rollback`: the firmware in the other slot, after a restart.
+    pub fn fw_rollback(&mut self) -> Result<String, String> {
+        if !self.board.fw_rollback {
+            return Err("no previous firmware on this device".into());
+        }
+        self.effects.fw_rollback = true;
+        Ok(match self.board.fw_prev.as_str() {
+            "" => "back to the previous firmware: restarting".into(),
+            prev => alloc::format!("back to {prev}: restarting"),
+        })
+    }
+
+    /// Switched on: check now rather than at the next due time.
+    pub(super) fn fw_check_soon(&mut self, ctx: &MeshCtx) {
+        if self.fwpull.step == Step::Sleep {
+            self.fwpull.at = ctx.now;
         }
     }
 
     fn fw_pull_reset(&mut self) {
-        let status = core::mem::replace(&mut self.fwpull.status, FwPullStatus::Off);
-        self.fwpull = FwPull { status, at: 0, ..FwPull::default() };
+        let state = core::mem::replace(&mut self.fwpull.state, FwState::Off);
+        self.fwpull = FwPull { state, at: 0, ..FwPull::default() };
     }
 
-    fn fw_sleep(&mut self, ctx: &MeshCtx, ms: u64, status: FwPullStatus) {
+    fn fw_sleep(&mut self, ctx: &MeshCtx, ms: u64, state: FwState) {
         self.fw_pull_reset();
-        self.fwpull.status = status;
+        self.fwpull.state = state;
         self.fwpull.at = ctx.now + ms;
     }
 
-    fn fw_pull_fail(&mut self, ctx: &MeshCtx, why: &str) {
-        self.fw_sleep(ctx, RETRY_LATER_MS, FwPullStatus::Failed(why.into()));
+    /// When a check `ms` from now happens, by the wall clock; 0 if the node does not check by itself.
+    fn fw_next_check(&self, ctx: &MeshCtx, ms: u64) -> u32 {
+        if self.prefs.fw_mode == mode::OFF { 0 } else { fwstate::wall(ctx.current_time(), ctx.now, ctx.now + ms) }
+    }
+
+    fn fw_pull_fail(&mut self, ctx: &MeshCtx, why: String) {
+        let retry = self.fw_next_check(ctx, RETRY_LATER_MS);
+        self.fw_sleep(ctx, RETRY_LATER_MS, FwState::Failed { why, retry });
     }
 
     /// The update's delta is larger than this node takes over LoRa: until the next check (a later
@@ -232,7 +270,8 @@ impl Companion {
     fn fw_too_large(&mut self, ctx: &MeshCtx, len: u32) {
         let (kb, max) = (len.div_ceil(1024), self.fw_max_file() / 1024);
         let why = alloc::format!("the update is {kb} KB, more than this node takes over LoRa ({max} KB): install it over USB or BLE");
-        self.fw_sleep(ctx, CHECK_EVERY_MS, FwPullStatus::Failed(why));
+        let retry = self.fw_next_check(ctx, CHECK_EVERY_MS);
+        self.fw_sleep(ctx, CHECK_EVERY_MS, FwState::Failed { why, retry });
     }
 
     /// The largest update this node takes over LoRa: what its slot holds, at most the ceiling.
@@ -240,7 +279,7 @@ impl Companion {
         self.ota.delta_room().min(fwshare::MAX_LORA_FILE)
     }
 
-    /// The repeater to ask: the one set (`fw_source`), else the best heard directly lately.
+    /// The repeater to ask: the one set (`fw.source`), else the best heard directly lately.
     fn fw_repeater(&self, ctx: &MeshCtx) -> Option<usize> {
         if !self.prefs.fw_source.is_empty() {
             return self.lookup_contact(&self.prefs.fw_source);
@@ -252,6 +291,14 @@ impl Companion {
             .filter_map(|h| Some((h.snr, self.lookup_contact(&h.key_prefix)?)))
             .max_by_key(|&(snr, _)| snr)
             .map(|(_, idx)| idx)
+    }
+
+    /// The repeater asked, for people.
+    fn fw_repeater_name(&self) -> String {
+        match self.lookup_contact(&self.fwpull.repeater) {
+            Some(idx) => self.contacts[idx].name_lossy(),
+            None => "the repeater".into(),
+        }
     }
 
     /// Send FW request `kind` to the repeater, zero-hop (it is a neighbour), its answer due back
@@ -279,12 +326,16 @@ impl Companion {
     fn fw_query(&mut self, ctx: &mut MeshCtx) {
         if self.fwpull.tries == 0 {
             let Some(idx) = self.fw_repeater(ctx) else {
-                return self.fw_sleep(ctx, RETRY_LATER_MS, FwPullStatus::NoRepeater);
+                let why = match self.prefs.fw_source.is_empty() {
+                    true => "no repeater heard directly; one with fw.serve on is needed".into(),
+                    false => alloc::format!("{} is not a contact", crate::util::to_hex(&self.prefs.fw_source)),
+                };
+                return self.fw_pull_fail(ctx, why);
             };
             self.fwpull.repeater = self.contacts[idx].id.pub_key;
         }
         let Some((base_len, base_sha)) = self.ota.running() else {
-            return self.fw_pull_fail(ctx, "can't read this firmware's image");
+            return self.fw_pull_fail(ctx, "can't read this firmware's image".into());
         };
         let q = FwQuery {
             board: self.ota.build.board,
@@ -298,11 +349,11 @@ impl Companion {
             max_file: self.fw_max_file(),
         };
         self.fwpull.step = Step::Query;
-        if !matches!(self.fwpull.status, FwPullStatus::RepeaterFetching) {
-            self.fwpull.status = FwPullStatus::Checking;
+        if !matches!(self.fwpull.state, FwState::Fetching { .. }) {
+            self.fwpull.state = FwState::Asking { whom: self.fw_repeater_name() };
         }
         if !self.fw_send(ctx, fwshare::ANON_REQ_TYPE_FW_QUERY, &q.to_bytes()) {
-            self.fw_pull_fail(ctx, "the repeater is not a contact");
+            self.fw_pull_fail(ctx, "the repeater is not a contact".into());
         }
     }
 
@@ -313,7 +364,7 @@ impl Companion {
         req.extend_from_slice(&offset.to_le_bytes());
         req.push(len);
         if !self.fw_send(ctx, fwshare::ANON_REQ_TYPE_FW_GET, &req) {
-            self.fw_pull_fail(ctx, "the repeater is not a contact");
+            self.fw_pull_fail(ctx, "the repeater is not a contact".into());
         }
     }
 
@@ -329,6 +380,7 @@ impl Companion {
         self.fwpull.tag = 0;
         self.fwpull.tries = 0;
         let body = &data[5..];
+        let name = self.contacts[idx].name_lossy();
         match (self.fwpull.step, data[4]) {
             // a repeater from before the limit offers it anyway: not loaded either
             (Step::Query, status::TOO_LARGE) if body.len() >= 4 => self.fw_too_large(ctx, read_u32(body, 0)),
@@ -337,33 +389,42 @@ impl Companion {
             }
             (Step::Query, status::READY) if body.len() >= 13 => {
                 let len = read_u32(body, 0);
+                let counter = read_u32(body, 8);
                 let vlen = (body[12] as usize).min(body.len() - 13);
+                let release = fwstate::Release::new(&String::from_utf8_lossy(&body[13..13 + vlen]), counter);
+                // rolled back from before: only a check by hand takes it
+                if counter == self.board.fw_skip && self.fwpull.by_hand.is_none() {
+                    self.fw_sleep(ctx, CHECK_EVERY_MS, FwState::Skipped { release });
+                    return true;
+                }
                 self.fwpull.file_id = read_u32(body, 4);
-                self.fwpull.version = String::from_utf8_lossy(&body[13..13 + vlen]).into_owned();
                 self.fwpull.loader = Some(Loader::new(len, self.prefs.fw_channel));
-                self.fwpull.status = FwPullStatus::Loading { version: self.fwpull.version.clone(), done: 0, total: len };
+                self.fwpull.state = FwState::Downloading { release: release.clone(), from: name, done: 0, total: len };
+                self.fwpull.release = release;
                 self.fw_get(ctx, 0);
             }
             (Step::Query, status::FETCHING) => {
                 let secs = body.get(..2).map_or(60, |b| u16::from_le_bytes([b[0], b[1]])).clamp(10, 900);
                 self.fwpull.step = Step::Sleep;
-                self.fwpull.status = FwPullStatus::RepeaterFetching;
+                self.fwpull.state = FwState::Fetching { whom: name };
                 self.fwpull.at = ctx.now + secs as u64 * 1000;
             }
-            (Step::Query, status::NONE) => self.fw_sleep(ctx, CHECK_EVERY_MS, FwPullStatus::Idle { up_to_date: true }),
-            (Step::Query, _) => self.fw_pull_fail(ctx, "the repeater has no updates now"),
+            (Step::Query, status::NONE) => {
+                let at = ctx.current_time();
+                self.fw_sleep(ctx, CHECK_EVERY_MS, FwState::UpToDate { whom: name, at })
+            }
+            (Step::Query, _) => self.fw_pull_fail(ctx, alloc::format!("{name} has no updates now")),
             (Step::Get { offset }, status::READY) if read_u32(body, 0) == offset && body.len() > 4 => {
                 if let Err(why) = self.fw_piece(ctx, offset, &body[4..]) {
-                    self.fw_pull_fail(ctx, why);
+                    self.fw_pull_fail(ctx, why.into());
                 }
             }
             (Step::Get { .. }, status::CHANGED) => {
                 // the repeater holds another file now: start over
                 self.fwpull.step = Step::Query;
-                self.fwpull.status = FwPullStatus::Checking;
                 self.fw_query(ctx);
             }
-            (Step::Get { .. }, _) => self.fw_pull_fail(ctx, "the repeater could not send the update"),
+            (Step::Get { .. }, _) => self.fw_pull_fail(ctx, alloc::format!("{name} could not send the update")),
             _ => {}
         }
         true
@@ -380,8 +441,9 @@ impl Companion {
             return Ok(());
         }
         let next = loader.feed(&mut self.ota, offset, piece)?;
-        if let FwPullStatus::Loading { done, .. } = &mut self.fwpull.status {
-            *done = next.unwrap_or(loader.file_len());
+        let len = loader.file_len();
+        if let FwState::Downloading { done, .. } = &mut self.fwpull.state {
+            *done = next.unwrap_or(len);
         }
         if let Some(next) = next {
             self.fwpull.step = Step::Get { offset: next };
@@ -389,9 +451,11 @@ impl Companion {
             return Ok(());
         }
         // the whole patch is in the session: wait for the word to install (or install now)
+        let install = self.prefs.fw_mode == mode::INSTALL || self.fwpull.by_hand == Some(Hand::Update);
         self.fwpull.step = Step::Ready;
-        self.fwpull.status = FwPullStatus::Ready { version: self.fwpull.version.clone() };
-        if self.prefs.fw_pull == FW_PULL_AUTO || self.fwpull.once {
+        self.fwpull.by_hand = None;
+        self.fwpull.state = FwState::Ready { release: self.fwpull.release.clone(), len };
+        if install {
             let _ = self.fw_install();
         }
         Ok(())

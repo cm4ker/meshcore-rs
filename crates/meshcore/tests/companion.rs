@@ -3,6 +3,7 @@
 
 use meshcore::advert::{ADV_TYPE_CHAT, ADV_TYPE_REPEATER};
 use meshcore::companion::*;
+use meshcore::fwstate::FwState;
 use meshcore::identity::{Identity, LocalIdentity};
 use meshcore::mesh::{Mesh, MeshApp, MeshCtx};
 use meshcore::packet::*;
@@ -819,15 +820,15 @@ fn ota_over_tcp_needs_a_pinned_root() {
     assert!(!flash.borrow().activated);
 }
 
-/// `start ota ble` on a repeater: a fresh PIN for the admin, then the update over the BLE link
+/// `fw ble` on a repeater (`start ota ble`, as upstream calls it): a fresh PIN for the admin, then the update over the BLE link
 /// with the companion's requests (and its device query, which the update tool asks first).
 #[test]
 fn repeater_ble_update_window() {
     use meshcore::ota::*;
 
     let mut r = repeater(2);
-    let reply = r.app.handle_command(&mut r.ctx, 0, "start ota ble");
-    assert_eq!(reply, "Error", "board without BLE updates");
+    let reply = r.app.handle_command(&mut r.ctx, 0, "fw ble");
+    assert_eq!(reply, "Error: no Bluetooth update window on this board");
 
     r.app.board.ble_ota_name = Some("MeshCore-OTA-R".into());
     let reply = r.app.handle_command(&mut r.ctx, 0, "start ota ble");
@@ -849,15 +850,15 @@ fn repeater_ble_update_window() {
     assert!(r.app.take_effects().reboot);
 }
 
-/// `start ota`: the Wi-Fi upload page wants a fresh one-time code (on a LAN anyone could reach it);
+/// `fw wifi` (`start ota`): the Wi-Fi upload page wants a fresh one-time code (on a LAN anyone could reach it);
 /// the access point has a random passphrase, not the admin password.
 #[test]
 fn repeater_wifi_update_code() {
     let mut r = repeater(3);
-    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "start ota"), "Error", "no update slots");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "fw wifi"), "Error: no Wi-Fi update page on this board");
 
     r.app.board.wifi_ota_ssid = Some("MeshCore-OTA-R".into());
-    let reply = r.app.handle_command(&mut r.ctx, 0, "start ota");
+    let reply = r.app.handle_command(&mut r.ctx, 0, "fw wifi");
     let (code, key) = r.app.take_effects().start_ota.expect("started");
     assert!((100_000..1_000_000).contains(&code));
     assert_eq!(key.len(), 10);
@@ -894,7 +895,7 @@ fn repeater_powersaving_cli() {
     assert_eq!(cli(&mut r, "powersaving"), "off");
 }
 
-/// `ota.root`: an admin may pin the first root (an admin could install any firmware until then);
+/// `fw.root`: an admin may pin the first root (an admin could install any firmware until then);
 /// changing or removing a pinned root takes the serial console.
 #[test]
 fn repeater_ota_root_cli() {
@@ -902,19 +903,19 @@ fn repeater_ota_root_cli() {
     let serial = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
     let remote = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 1_800_000_000, c);
     let (a, b) = ("9a".repeat(32), "0b".repeat(32));
-    assert!(serial(&mut r, "get ota.root").starts_with("> none, unsigned updates accepted over BLE, Wi-Fi and USB, none over LoRa (?/repeater #"));
-    assert_eq!(remote(&mut r, "set ota.root 12ab"), "Error: up to 4 fingerprints of 64 hex digits, or off");
-    assert_eq!(remote(&mut r, &format!("set ota.root {a}")), format!("OK - only releases signed by {a} are installed"));
+    assert!(serial(&mut r, "get fw.root").starts_with("> none, unsigned updates accepted over BLE, Wi-Fi and USB, none over LoRa (?/repeater #"));
+    assert_eq!(remote(&mut r, "set fw.root 12ab"), "Error: up to 4 fingerprints of 64 hex digits, or off");
+    assert_eq!(remote(&mut r, &format!("set fw.root {a}")), format!("OK - only releases signed by {a} are installed"));
     assert_eq!(r.app.ota.roots, vec![[0x9a; 32]]);
     assert!(r.app.prefs.serialize().contains(&format!("ota_root={a}
 ")));
     let refused = "Error: a pinned root can only be changed on the serial console";
-    assert_eq!(remote(&mut r, &format!("set ota.root {b}")), refused);
-    assert_eq!(remote(&mut r, "set ota.root off"), refused);
-    assert_eq!(remote(&mut r, &format!("set ota.root {a}")), "OK", "unchanged");
-    assert_eq!(serial(&mut r, &format!("set ota.root {a},{b}")), format!("OK - only releases signed by {a}, {b} are installed"));
-    assert!(serial(&mut r, "get ota.root").starts_with(&format!("> {a}, {b} (")));
-    assert_eq!(serial(&mut r, "set ota.root off"), "OK - unsigned updates accepted over BLE, Wi-Fi and USB, none over LoRa");
+    assert_eq!(remote(&mut r, &format!("set fw.root {b}")), refused);
+    assert_eq!(remote(&mut r, "set fw.root off"), refused);
+    assert_eq!(remote(&mut r, &format!("set fw.root {a}")), "OK", "unchanged");
+    assert_eq!(serial(&mut r, &format!("set fw.root {a},{b}")), format!("OK - only releases signed by {a}, {b} are installed"));
+    assert!(serial(&mut r, "get fw.root").starts_with(&format!("> {a}, {b} (")));
+    assert_eq!(serial(&mut r, "set fw.root off"), "OK - unsigned updates accepted over BLE, Wi-Fi and USB, none over LoRa");
     assert!(r.app.ota.roots.is_empty());
 }
 
@@ -923,18 +924,20 @@ fn repeater_ota_root_cli() {
 fn companion_ota_root_custom_var() {
     let mut a = companion(1, "Alice");
     let fp = "9a".repeat(32);
-    let set = |m: &mut Mesh<Companion>, v: &str| cmd(m, &[&b")ota_root:"[..], v.as_bytes()].concat())[0][0];
+    let set = |m: &mut Mesh<Companion>, v: &str| cmd(m, &[&b")fw_root:"[..], v.as_bytes()].concat())[0][0];
     assert_eq!(set(&mut a, "12"), RESP_CODE_ERR);
     assert_eq!(set(&mut a, &fp), RESP_CODE_OK);
     assert!(a.app.take_effects().save_prefs);
     assert_eq!(a.app.ota.roots, vec![[0x9a; 32]]);
-    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], format!("ota_root:{fp},ota_owner:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off").as_bytes());
+    // a whole key and the status would not fit in a frame: the key's first 16 hex digits
+    let vars = format!("fw_root:{}..,fw_owner:off,{NO_SLOT_VARS}", &fp[..16]);
+    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], vars.as_bytes());
     assert_eq!(set(&mut a, "off"), RESP_CODE_OK);
     assert!(a.app.ota.roots.is_empty());
 
     // an owner key: only with a root pinned, as it means nothing without one
     let owner = "3c".repeat(32);
-    let set_owner = |m: &mut Mesh<Companion>, v: &str| cmd(m, &[&b")ota_owner:"[..], v.as_bytes()].concat())[0][0];
+    let set_owner = |m: &mut Mesh<Companion>, v: &str| cmd(m, &[&b")fw_owner:"[..], v.as_bytes()].concat())[0][0];
     assert_eq!(set_owner(&mut a, &owner), RESP_CODE_ERR);
     assert_eq!(set(&mut a, &fp), RESP_CODE_OK);
     assert_eq!(set_owner(&mut a, "3c3c"), RESP_CODE_ERR);
@@ -942,9 +945,8 @@ fn companion_ota_root_custom_var() {
     assert_eq!(a.app.ota.owners, vec![[0x3c; 32]]);
     assert!(a.app.prefs.serialize().contains(&format!("ota_owner={owner}
 ")));
-    // both whole would not fit in a frame: their first 16 hex digits
     let short = |fp: &str| format!("{}..", &fp[..16]);
-    let vars = format!("ota_root:{},ota_owner:{},fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off", short(&fp), short(&owner));
+    let vars = format!("fw_root:{},fw_owner:{},{NO_SLOT_VARS}", short(&fp), short(&owner));
     assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], vars.as_bytes());
     assert_eq!(set_owner(&mut a, "off"), RESP_CODE_OK);
     assert!(a.app.ota.owners.is_empty());
@@ -958,32 +960,32 @@ fn companion_ota_root_cli() {
     let local = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
     let remote = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, true, s);
     let (root, a, b) = ("9a".repeat(32), "3c".repeat(32), "0b".repeat(32));
-    assert!(local(&mut c, "get ota.root").starts_with("> none, unsigned updates accepted over BLE and USB, none pulled ("));
-    assert_eq!(local(&mut c, "set ota.root 12ab"), "Error: up to 4 fingerprints of 64 hex digits, or off");
+    assert!(local(&mut c, "get fw.root").starts_with("> none, unsigned updates accepted over BLE and USB, none pulled ("));
+    assert_eq!(local(&mut c, "set fw.root 12ab"), "Error: up to 4 fingerprints of 64 hex digits, or off");
     let refused = "Error: release keys are set only in the app or over USB";
-    assert_eq!(remote(&mut c, &format!("set ota.root {root}")), refused);
+    assert_eq!(remote(&mut c, &format!("set fw.root {root}")), refused);
     assert!(c.app.ota.roots.is_empty());
-    assert_eq!(local(&mut c, &format!("set ota.owner {a}")), "Error: pin the root key first (set ota.root)");
+    assert_eq!(local(&mut c, &format!("set fw.owner {a}")), "Error: pin the root key first (set fw.root)");
 
-    assert_eq!(local(&mut c, &format!("set ota.root {root}")), format!("OK - only releases signed by {root} are installed"));
+    assert_eq!(local(&mut c, &format!("set fw.root {root}")), format!("OK - only releases signed by {root} are installed"));
     assert!(c.app.take_effects().save_prefs);
     assert_eq!(c.app.ota.roots, vec![[0x9a; 32]]);
     assert!(c.app.prefs.serialize().contains(&format!("ota_root={root}\n")));
-    assert!(remote(&mut c, "get ota.root").starts_with(&format!("> {root} (")));
-    assert_eq!(remote(&mut c, "set ota.root off"), refused);
-    assert!(local(&mut c, "fw update").starts_with("Error: no update slot"), "the root is in: only the slot is missing");
+    assert!(remote(&mut c, "get fw.root").starts_with(&format!("> {root} (")));
+    assert_eq!(remote(&mut c, "set fw.root off"), refused);
+    assert_eq!(local(&mut c, "fw update"), "Error: no update slot: update over USB", "the root is in: only the slot is missing");
 
-    assert_eq!(remote(&mut c, &format!("set ota.owner {a}")), refused);
-    assert_eq!(local(&mut c, &format!("set ota.owner {a},{b}")), format!("OK - a release must be signed by {a}, {b} too"));
+    assert_eq!(remote(&mut c, &format!("set fw.owner {a}")), refused);
+    assert_eq!(local(&mut c, &format!("set fw.owner {a},{b}")), format!("OK - a release must be signed by {a}, {b} too"));
     assert_eq!(c.app.ota.owners, vec![[0x3c; 32], [0x0b; 32]]);
-    assert_eq!(local(&mut c, "get ota.owner"), format!("> {a}, {b}"));
-    assert_eq!(local(&mut c, "set ota.owner off"), "OK - the root's signature is enough");
-    assert_eq!(local(&mut c, "get ota.owner"), "> none, the root's signature is enough");
-    assert_eq!(local(&mut c, "set ota.root off"), "OK - unsigned updates accepted over BLE and USB, none pulled");
+    assert_eq!(local(&mut c, "get fw.owner"), format!("> {a}, {b}"));
+    assert_eq!(local(&mut c, "set fw.owner off"), "OK - the root's signature is enough");
+    assert_eq!(local(&mut c, "get fw.owner"), "> none, the root's signature is enough");
+    assert_eq!(local(&mut c, "set fw.root off"), "OK - unsigned updates accepted over BLE and USB, none pulled");
     assert!(c.app.ota.roots.is_empty());
 }
 
-/// `ota.owner`: a release must carry an owner's signature as well as the root's. The same rule as
+/// `fw.owner`: a release must carry an owner's signature as well as the root's. The same rule as
 /// for the root: an admin may pin the first one, a change takes the serial console.
 #[test]
 fn repeater_ota_owner_cli() {
@@ -991,28 +993,33 @@ fn repeater_ota_owner_cli() {
     let serial = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
     let remote = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 1_800_000_000, c);
     let (root, a, b) = ("9a".repeat(32), "3c".repeat(32), "0b".repeat(32));
-    assert_eq!(serial(&mut r, "get ota.owner"), "> none, the root's signature is enough");
-    assert_eq!(remote(&mut r, &format!("set ota.owner {a}")), "Error: pin the root key first (set ota.root)");
-    serial(&mut r, &format!("set ota.root {root}"));
-    assert_eq!(remote(&mut r, "set ota.owner 3c"), "Error: up to 4 fingerprints of 64 hex digits, or off");
-    assert_eq!(remote(&mut r, &format!("set ota.owner {a}")), format!("OK - a release must be signed by {a} too"));
+    assert_eq!(serial(&mut r, "get fw.owner"), "> none, the root's signature is enough");
+    assert_eq!(remote(&mut r, &format!("set fw.owner {a}")), "Error: pin the root key first (set fw.root)");
+    serial(&mut r, &format!("set fw.root {root}"));
+    assert_eq!(remote(&mut r, "set fw.owner 3c"), "Error: up to 4 fingerprints of 64 hex digits, or off");
+    assert_eq!(remote(&mut r, &format!("set fw.owner {a}")), format!("OK - a release must be signed by {a} too"));
     assert_eq!(r.app.ota.owners, vec![[0x3c; 32]]);
     assert!(r.app.prefs.serialize().contains(&format!("ota_owner={a}
 ")));
-    assert_eq!(serial(&mut r, "get ota.owner"), format!("> {a}"));
+    assert_eq!(serial(&mut r, "get fw.owner"), format!("> {a}"));
     let refused = "Error: a pinned owner key can only be changed on the serial console";
-    assert_eq!(remote(&mut r, &format!("set ota.owner {b}")), refused);
-    assert_eq!(remote(&mut r, "set ota.owner off"), refused);
-    assert_eq!(serial(&mut r, &format!("set ota.owner {a},{b}")), format!("OK - a release must be signed by {a}, {b} too"));
-    assert_eq!(serial(&mut r, "set ota.owner off"), "OK - the root's signature is enough");
+    assert_eq!(remote(&mut r, &format!("set fw.owner {b}")), refused);
+    assert_eq!(remote(&mut r, "set fw.owner off"), refused);
+    assert_eq!(serial(&mut r, &format!("set fw.owner {a},{b}")), format!("OK - a release must be signed by {a}, {b} too"));
+    assert_eq!(serial(&mut r, "set fw.owner off"), "OK - the root's signature is enough");
     assert!(r.app.ota.owners.is_empty());
 }
+
+/// The update variables of a companion that pins no root key, after the keys.
+const NO_ROOT_VARS: &str = "fw_auto:off,fw_source:auto,fw_channel:stable,fw_status:needs a release key: fw_root,fw_do:-";
+/// And of one that pins one, but has no slot to update into.
+const NO_SLOT_VARS: &str = "fw_auto:off,fw_source:auto,fw_channel:stable,fw_status:no update slot: update over USB,fw_do:-";
 
 #[test]
 fn gps_setting_position_and_telemetry() {
     // no GPS: no GPS settings to offer
     let mut a = companion(1, "Alice");
-    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:off,ota_owner:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
+    assert_eq!(&cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..], format!("fw_root:off,fw_owner:off,{NO_ROOT_VARS}").as_bytes());
     assert_eq!(cmd(&mut a, b"\x29gps:1")[0][0], RESP_CODE_ERR);
 
     let mut air = Air::new();
@@ -1021,11 +1028,11 @@ fn gps_setting_position_and_telemetry() {
     b.app.board.has_gps = true;
     b.app.prefs.telemetry_mode_base = TELEM_MODE_ALLOW_ALL;
     b.app.prefs.telemetry_mode_loc = TELEM_MODE_ALLOW_ALL;
-    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:0,ota_root:off,ota_owner:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], format!("gps:0,fw_root:off,fw_owner:off,{NO_ROOT_VARS}").as_bytes());
     assert_eq!(cmd(&mut b, b"\x29gps:1")[0][0], RESP_CODE_OK);
     let fx = b.app.take_effects();
     assert!(fx.gps && fx.save_prefs && b.app.prefs.gps_enabled);
-    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], b"gps:1,ota_root:off,ota_owner:off,fw_pull:off,fw_source:auto,fw_channel:stable,fw_status:off");
+    assert_eq!(&cmd(&mut b, &[CMD_GET_CUSTOM_VARS])[0][1..], format!("gps:1,fw_root:off,fw_owner:off,{NO_ROOT_VARS}").as_bytes());
     assert_eq!(cmd(&mut b, b"\x29gps_interval:30")[0][0], RESP_CODE_OK);
     assert_eq!(b.app.prefs.gps_interval, 30);
     assert_eq!(cmd(&mut b, b"\x29alt:1")[0][0], RESP_CODE_ERR);
@@ -1065,7 +1072,7 @@ fn adc_multiplier_on_a_companion() {
 
     a.app.board.adc_multiplier = Some(5.42);
     assert_eq!(cli(&mut a, "get adc.multiplier"), "> 5.420");
-    assert!(cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..].starts_with(b"adc_multiplier:5.420,ota_root:"));
+    assert!(cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..].starts_with(b"adc_multiplier:5.420,fw_root:"));
     assert_eq!(cli(&mut a, "set adc.multiplier 5.6"), "OK - multiplier set to 5.600");
     assert!(a.app.take_effects().save_prefs);
     assert_eq!(cli(&mut a, "get adc.multiplier"), "> 5.600");
@@ -1228,11 +1235,11 @@ fn cosigned(file: &[u8], key: &LocalIdentity) -> Vec<u8> {
     meshcore::fwshare::delta_file(&env.to_bytes(), h.base_len, &h.base_sha256, &file[h.patch_offset()..])
 }
 
-/// A T-Echo-like companion pinning `root`, running `base`, with `fw_pull` on.
+/// A T-Echo-like companion pinning `root`, running `base`, with `fw.auto download`.
 fn pulling_companion(root: &LocalIdentity, base: &[u8]) -> (Mesh<Companion>, Slot) {
     let slot = std::rc::Rc::new(std::cell::RefCell::new((vec![0u8; 64 * 1024], false)));
     let mut c = companion(2, "Echo");
-    c.app.prefs.fw_pull = FW_PULL_ON;
+    c.app.prefs.fw_mode = meshcore::fwstate::mode::DOWNLOAD;
     let fp = meshcore::release::fingerprint(root.pub_key());
     c.app.prefs.ota_roots = vec![fp];
     c.app.ota.roots = vec![fp];
@@ -1243,14 +1250,32 @@ fn pulling_companion(root: &LocalIdentity, base: &[u8]) -> (Mesh<Companion>, Slo
 }
 
 #[test]
-fn fw_status_tells_what_the_store_did_whether_or_not_it_serves_neighbours() {
+fn fw_tells_what_runs_where_the_update_stands_and_what_the_store_holds() {
     let mut r = repeater(1);
-    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get fw.status"), "> no update store on this board");
+    let fw = |r: &mut Mesh<Repeater>| r.app.handle_command(&mut r.ctx, 0, "fw");
+    let head = format!("{} stable, auto off", meshcore::release::running_label(""));
+    assert_eq!(fw(&mut r), format!("{head}\nneeds a release key: set fw.root"));
+    r.app.ota.roots = vec![[1; 32]];
+    assert_eq!(fw(&mut r), format!("{head}\nno update slot: update over USB"));
+    let slot: Slot = std::rc::Rc::new(std::cell::RefCell::new((vec![0u8; 1024], false)));
+    r.app.ota.target = Some(Box::new(RamSlots { running: esp_image(&[1; 100]), slot }));
+    assert_eq!(fw(&mut r), format!("{head}\nauto off; check by hand: fw check"));
+
+    // a node that hands updates on: what its store holds, or why it holds nothing
+    r.app.prefs.fw_serve = true;
     r.app.fw_store = Some(Box::new(meshcore::fwshare::MemStore::new(Vec::new(), 77)));
-    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get fw.status"), "> nothing fetched yet");
-    // `fw.auto` fetched and failed while `fw.serve` is off: the reason still shows
-    r.app.board.fw_status = "fetching from nw.ommesh.ru failed: cut off".into();
-    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get fw.status"), "> fetching from nw.ommesh.ru failed: cut off");
+    assert_eq!(fw(&mut r).lines().nth(2), Some("serves nothing yet"));
+    r.app.board.fw_store = "serve: nw.ommesh.ru not reachable (cut off)".into();
+    assert_eq!(fw(&mut r).lines().nth(2), Some("serve: nw.ommesh.ru not reachable (cut off)"));
+
+    // after an update, on trial
+    r.app.board.fw_trial_until = Some(r.ctx.now + 90_000);
+    r.app.board.fw_prev = "0.8.2 #42".into();
+    assert_eq!(fw(&mut r).lines().nth(1), Some("on trial, kept in 2 min (fw rollback: back to 0.8.2 #42)"));
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "fw rollback"), "Error: no previous firmware on this node");
+    r.app.board.fw_rollback = true;
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "fw rollback"), "OK - back to 0.8.2 #42: restarting");
+    assert!(r.app.take_effects().fw_rollback);
 }
 
 fn serving_repeater(file: Vec<u8>) -> Mesh<Repeater> {
@@ -1277,17 +1302,18 @@ fn companion_pulls_an_update_from_a_neighbouring_repeater() {
     let mut air = Air::new();
     air.link(0, 1);
     air.run(&mut [&mut r, &mut c], 20_000); // the repeater's boot advert: a contact, heard directly
-    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Idle { up_to_date: false });
+    assert_eq!(c.app.fw_state(), FwState::Waiting { at: 0 });
 
-    c.app.fw_check_now(&c.ctx);
+    let _ = c.app.fw_check_now(&c.ctx, false);
     air.run(&mut [&mut r, &mut c], 120_000);
-    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Ready { version: "0.5.2".into() });
-    assert!(!slot.borrow().1, "fw_pull on: nothing installed until the user says so");
-    assert_eq!(&cmd(&mut c, &[CMD_GET_CUSTOM_VARS])[0][1..], b"ota_root:".iter().chain(
-        meshcore::release::fingerprint_hex(&meshcore::release::fingerprint(root.pub_key())).as_bytes()).chain(
-        b",ota_owner:off,fw_pull:on,fw_source:auto,fw_channel:stable,fw_status:0.5.2 ready to install").copied().collect::<Vec<_>>().as_slice());
+    let kb = (file.len() as u32).div_ceil(1024);
+    assert_eq!(c.app.fw_line(c.ctx.now), format!("0.5.2 #5 ready ({kb} KB): fw install"));
+    assert!(!slot.borrow().1, "fw.auto download: nothing installed until the user says so");
+    let fp = meshcore::release::fingerprint_hex(&meshcore::release::fingerprint(root.pub_key()));
+    let vars = format!("fw_root:{}..,fw_owner:off,fw_auto:download,fw_source:auto,fw_channel:stable,fw_status:0.5.2 #5 ready ({kb} KB): fw_do install,fw_do:-", &fp[..16]);
+    assert_eq!(String::from_utf8_lossy(&cmd(&mut c, &[CMD_GET_CUSTOM_VARS])[0][1..]), vars);
 
-    assert_eq!(cmd(&mut c, b"\x29fw_install:1")[0][0], RESP_CODE_OK);
+    assert_eq!(cmd(&mut c, b"\x29fw_do:install")[0][0], RESP_CODE_OK);
     assert!(slot.borrow().1, "activated");
     assert_eq!(&slot.borrow().0[..image.len()], &image[..], "the slot holds the release's image");
     assert!(c.app.take_effects().reboot);
@@ -1306,9 +1332,9 @@ fn a_pulled_update_is_only_what_the_pinned_root_signed() {
     let mut air = Air::new();
     air.link(0, 1);
     air.run(&mut [&mut r, &mut c], 20_000);
-    c.app.fw_check_now(&c.ctx);
+    let _ = c.app.fw_check_now(&c.ctx, false);
     air.run(&mut [&mut r, &mut c], 60_000);
-    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Failed("not signed by the pinned root key".into()));
+    assert!(c.app.fw_line(c.ctx.now).starts_with("failed: not signed by the pinned root key; next try "), "{}", c.app.fw_line(c.ctx.now));
     assert!(!slot.borrow().1);
 
     // with no root pinned the node asks nobody: it would install anything
@@ -1318,9 +1344,9 @@ fn a_pulled_update_is_only_what_the_pinned_root_signed() {
     let mut air = Air::new();
     air.link(0, 1);
     air.run(&mut [&mut r, &mut c], 20_000);
-    c.app.fw_check_now(&c.ctx);
+    let _ = c.app.fw_check_now(&c.ctx, false);
     air.run(&mut [&mut r, &mut c], 60_000);
-    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::NotTrusted);
+    assert_eq!(c.app.fw_state(), FwState::NoRoot);
 }
 
 #[test]
@@ -1343,9 +1369,9 @@ fn an_owner_key_holds_updates_until_the_owner_signs() {
     let mut air = Air::new();
     air.link(0, 1);
     air.run(&mut [&mut r, &mut c], 20_000);
-    c.app.fw_check_now(&c.ctx);
+    let _ = c.app.fw_check_now(&c.ctx, false);
     air.run(&mut [&mut r, &mut c], 60_000);
-    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Idle { up_to_date: true });
+    assert!(matches!(c.app.fw_state(), FwState::UpToDate { .. }), "{:?}", c.app.fw_state());
 
     // a repeater from before owner keys hands it on anyway: the node refuses it
     let mut r = serving_repeater(release.clone());
@@ -1355,9 +1381,9 @@ fn an_owner_key_holds_updates_until_the_owner_signs() {
     let mut air = Air::new();
     air.link(0, 1);
     air.run(&mut [&mut r, &mut c], 20_000);
-    c.app.fw_check_now(&c.ctx);
+    let _ = c.app.fw_check_now(&c.ctx, false);
     air.run(&mut [&mut r, &mut c], 60_000);
-    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Failed("not signed by the owner key".into()));
+    assert!(c.app.fw_line(c.ctx.now).starts_with("failed: not signed by the owner key"), "{}", c.app.fw_line(c.ctx.now));
 
     // signed by the owner too: it comes and installs
     let mut r = serving_repeater(cosigned(&release, &owner));
@@ -1366,10 +1392,10 @@ fn an_owner_key_holds_updates_until_the_owner_signs() {
     let mut air = Air::new();
     air.link(0, 1);
     air.run(&mut [&mut r, &mut c2], 20_000);
-    c2.app.fw_check_now(&c2.ctx);
+    let _ = c2.app.fw_check_now(&c2.ctx, false);
     air.run(&mut [&mut r, &mut c2], 120_000);
-    assert_eq!(c2.app.fw_pull_status(), &FwPullStatus::Ready { version: "0.5.2".into() });
-    assert_eq!(cmd(&mut c2, b")fw_install:1")[0][0], RESP_CODE_OK);
+    assert!(c2.app.fw_line(c2.ctx.now).starts_with("0.5.2 #5 ready"));
+    assert_eq!(cmd(&mut c2, b")fw_do:install")[0][0], RESP_CODE_OK);
     assert!(slot2.borrow().1 && !slot.borrow().1);
 }
 
@@ -1405,10 +1431,11 @@ fn a_repeater_updates_itself_from_its_store() {
     let cli = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
 
     assert_eq!(cli(&mut r, "get fw.auto"), "> off");
-    assert_eq!(cli(&mut r, "fw update"), "Error: needs a pinned root key (set ota.root)", "the server is not trusted");
+    assert_eq!(cli(&mut r, "fw update"), "Error: needs a release key: set fw.root", "the server is not trusted");
     let fp = meshcore::release::fingerprint_hex(&fingerprint(root.pub_key()));
-    cli(&mut r, &format!("set ota.root {fp}"));
-    assert_eq!(cli(&mut r, "set fw.auto on"), "OK - this node updates itself from nw.ommesh.ru (without it, from a neighbour over LoRa), stable releases");
+    cli(&mut r, &format!("set fw.root {fp}"));
+    assert_eq!(cli(&mut r, "set fw.auto on"), "Error: off, download or install");
+    assert_eq!(cli(&mut r, "set fw.auto install"), "OK - installs stable releases by itself, from nw.ommesh.ru or a neighbour");
 
     // `fw update` checks now rather than 10 minutes after boot
     assert!(cli(&mut r, "fw update").starts_with("OK"));
@@ -1417,7 +1444,58 @@ fn a_repeater_updates_itself_from_its_store() {
     assert!(r.app.take_effects().reboot, "installed: restarting into it");
     assert!(slot.borrow().1);
     assert_eq!(&slot.borrow().0[..image.len()], &image[..]);
-    assert!(cli(&mut r, "get fw.auto").contains("installing 0.5.2"));
+    assert_eq!(cli(&mut r, "fw").lines().nth(1), Some("installing 0.5.2 #5: restarting, silent for 1-2 min"));
+    assert_eq!(cli(&mut r, "get fw.auto"), "> install");
+}
+
+#[test]
+fn a_repeater_in_download_mode_waits_for_fw_install_and_skips_what_it_rolled_back() {
+    use meshcore::release::{board, role};
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&(0..30_000u32).map(|i| (i * 13 % 251) as u8).collect::<Vec<_>>());
+    let mut data: Vec<u8> = (0..30_000u32).map(|i| (i * 13 % 251) as u8).collect();
+    data[100..140].fill(7);
+    let image = esp_image(&data);
+    let file = delta_release_for(&root, board::HELTEC_V4, role::REPEATER, 0, 5, &base, &image);
+    let (mut r, slot) = self_updating_repeater(1, &root, &base);
+    r.app.fw_store = Some(Box::new(meshcore::fwshare::MemStore::new(file, 9)));
+    let cli = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
+    let mut air = Air::new();
+
+    // rolled back from #5 before: the check by itself leaves it
+    r.app.board.fw_skip = 5;
+    air.run(&mut [&mut r], 11 * 60_000);
+    assert_eq!(cli(&mut r, "fw").lines().nth(1), Some("0.5.2 #5 was rolled back: waiting for a newer release"));
+    assert!(!slot.borrow().1);
+
+    // asked by hand it comes, and in download mode it waits for `fw install`
+    assert_eq!(cli(&mut r, "set fw.auto download"), "OK - downloads stable releases by itself; fw install installs them");
+    assert_eq!(cli(&mut r, "fw install"), "Error: nothing downloaded: fw check first");
+    assert_eq!(cli(&mut r, "fw check"), "OK - asking nw.ommesh.ru, see fw");
+    air.run(&mut [&mut r], 5_000);
+    assert!(cli(&mut r, "fw").lines().nth(1).unwrap().starts_with("0.5.2 #5 ready ("), "{}", cli(&mut r, "fw"));
+    assert!(!slot.borrow().1 && !r.app.take_effects().reboot);
+    assert_eq!(cli(&mut r, "fw install"), "OK - installing 0.5.2 #5: restarting, silent for 1-2 min");
+    assert!(slot.borrow().1 && r.app.take_effects().reboot);
+}
+
+/// The companion's update variables are its CLI's settings and actions, with the same checks.
+#[test]
+fn companion_update_variables_are_the_cli_settings() {
+    let mut c = companion(1, "Alice");
+    let set = |m: &mut Mesh<Companion>, v: &str| cmd(m, v.as_bytes())[0].clone();
+    let cli = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
+    assert_eq!(set(&mut c, ")fw_auto:on"), vec![RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG]);
+    assert_eq!(set(&mut c, ")fw_auto:install"), vec![RESP_CODE_OK]);
+    assert_eq!(cli(&mut c, "get fw.auto"), "> install");
+    assert_eq!(set(&mut c, ")fw_do:dance"), vec![RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG]);
+    assert_eq!(set(&mut c, ")fw_do:check"), vec![RESP_CODE_ERR, ERR_CODE_BAD_STATE], "no root pinned");
+    assert!(String::from_utf8_lossy(&cmd(&mut c, &[CMD_GET_CUSTOM_VARS])[0][1..]).ends_with(",fw_do:check: failed"));
+    assert_eq!(cli(&mut c, "fw check"), "Error: needs a release key: set fw.root");
+    assert_eq!(cli(&mut c, "fw install"), "Error: nothing downloaded: fw check first");
+    assert_eq!(cli(&mut c, "fw rollback"), "Error: no previous firmware on this device");
+    assert_eq!(cli(&mut c, "set fw.source nobody"), "Error: no repeater nobody in the contacts; a name, the start of a key (8+ hex digits) or auto");
+    assert_eq!(cli(&mut c, "set fw.auto off"), "OK - no updates by itself");
 }
 
 #[test]
@@ -1432,14 +1510,18 @@ fn a_dev_release_reaches_only_the_nodes_that_follow_dev() {
     air.link(0, 1);
     air.run(&mut [&mut r, &mut c], 20_000);
 
-    c.app.fw_check_now(&c.ctx);
+    let _ = c.app.fw_check_now(&c.ctx, false);
     air.run(&mut [&mut r, &mut c], 60_000);
-    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Idle { up_to_date: true }, "stable: a dev release is no update");
+    assert!(matches!(c.app.fw_state(), FwState::UpToDate { .. }), "stable: a dev release is no update");
 
-    // following dev, and with `fw_pull` off: `fw update` fetches it and installs it at once
-    assert_eq!(c.app.handle_command(&mut c.ctx, false, "set fw.channel dev"), "OK");
-    assert_eq!(c.app.handle_command(&mut c.ctx, false, "set fw.pull off"), "OK");
-    assert!(c.app.handle_command(&mut c.ctx, false, "fw update").starts_with("OK - asking the repeater"));
+    // following dev, and with `fw.auto off`: `fw update` fetches it and installs it at once
+    assert_eq!(c.app.handle_command(&mut c.ctx, false, "set fw.channel dev"), "OK - following dev releases (and stable ones)");
+    assert_eq!(c.app.handle_command(&mut c.ctx, false, "set fw.auto off"), "OK - no updates by itself");
+    let name = r.app.prefs.node_name.clone();
+    assert_eq!(
+        c.app.handle_command(&mut c.ctx, false, "fw update"),
+        format!("OK - asking {name}; if there is an update the device installs it and restarts")
+    );
     air.run(&mut [&mut r, &mut c], 60_000);
     assert!(slot.borrow().1, "installed");
     assert!(c.app.take_effects().reboot);
@@ -1481,7 +1563,7 @@ fn fw_update_by_hand_does_not_take_the_repeaters_old_answer() {
 
     // the scheduled check, 10 minutes after boot, believes what the repeater last heard
     air.run(&mut [&mut r, &mut c], 11 * 60_000);
-    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Idle { up_to_date: true });
+    assert!(matches!(c.app.fw_state(), FwState::UpToDate { .. }), "{:?}", c.app.fw_state());
 
     // asked by hand, the repeater asks its server again: the update comes and installs itself
     assert!(c.app.handle_command(&mut c.ctx, false, "fw update").starts_with("OK"));
@@ -1502,7 +1584,7 @@ impl meshcore::fwshare::FwStore for Offline {
     }
 }
 
-/// A Heltec V4 repeater running `base`, pinning `root`, with `fw.auto` on: what the tests below pull into.
+/// A Heltec V4 repeater running `base`, pinning `root`, with `fw.auto install`: what the tests below pull into.
 fn self_updating_repeater(seed: u8, root: &LocalIdentity, base: &[u8]) -> (Mesh<Repeater>, Slot) {
     use meshcore::release::{board, fingerprint, fingerprint_hex};
     let slot: Slot = std::rc::Rc::new(std::cell::RefCell::new((vec![0u8; 64 * 1024], false)));
@@ -1511,8 +1593,8 @@ fn self_updating_repeater(seed: u8, root: &LocalIdentity, base: &[u8]) -> (Mesh<
     r.app.ota.build.board = board::HELTEC_V4;
     r.app.ota.build.counter = 4; // whatever MCFW_COUNTER this test was built with
     let fp = fingerprint_hex(&fingerprint(root.pub_key()));
-    assert!(r.app.handle_command(&mut r.ctx, 0, &format!("set ota.root {fp}")).starts_with("OK"));
-    assert!(r.app.handle_command(&mut r.ctx, 0, "set fw.auto on").starts_with("OK"));
+    assert!(r.app.handle_command(&mut r.ctx, 0, &format!("set fw.root {fp}")).starts_with("OK"));
+    assert!(r.app.handle_command(&mut r.ctx, 0, "set fw.auto install").starts_with("OK"));
     (r, slot)
 }
 
@@ -1540,15 +1622,13 @@ fn a_repeater_without_internet_pulls_its_update_from_a_neighbour() {
 
     assert!(r.app.handle_command(&mut r.ctx, 0, "fw update").starts_with("OK"));
     air.run(&mut [&mut serving, &mut quiet, &mut r], 120_000);
-    assert!(r.app.take_effects().reboot, "installed: restarting into it");
+    let fx = r.app.take_effects();
+    assert!(fx.reboot, "installed: restarting into it");
     assert!(slot.borrow().1);
     assert_eq!(&slot.borrow().0[..image.len()], &image[..], "the slot holds the release's image");
-    let serving_key = meshcore::util::to_hex(&serving.ctx.self_id.pub_key()[..4]);
-    assert!(
-        r.app.handle_command(&mut r.ctx, 0, "get fw.auto").contains(&format!("installing 0.5.2 from neighbour {serving_key}")),
-        "{}",
-        r.app.handle_command(&mut r.ctx, 0, "get fw.auto")
-    );
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "fw").lines().nth(1), Some("installing 0.5.2 #5: restarting, silent for 1-2 min"));
+    let name = serving.app.prefs.node_name.clone();
+    assert!(fx.console.iter().any(|l| l == &format!("fw: installing 0.5.2 #5 from neighbour {name}")), "{:?}", fx.console);
 }
 
 #[test]
@@ -1561,7 +1641,8 @@ fn fw_source_names_the_neighbour_a_repeater_pulls_from() {
     let cli = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
     assert_eq!(cli(&mut r, "get fw.source"), "> auto");
     assert!(cli(&mut r, "set fw.source xyz").starts_with("Error"));
-    let quiet_key = meshcore::util::to_hex(&quiet.ctx.self_id.pub_key()[..3]);
+    let quiet_key = meshcore::util::to_hex(&quiet.ctx.self_id.pub_key()[..4]);
+    assert!(cli(&mut r, &format!("set fw.source {}", &quiet_key[..6])).starts_with("Error"), "8 hex digits at least");
     assert_eq!(cli(&mut r, &format!("set fw.source {quiet_key}")), format!("OK - updates from {quiet_key} over LoRa"));
     assert_eq!(cli(&mut r, "get fw.source"), format!("> {quiet_key}"));
 
@@ -1570,14 +1651,19 @@ fn fw_source_names_the_neighbour_a_repeater_pulls_from() {
     air.link(0, 1);
     assert!(cli(&mut r, "fw update").starts_with("OK"));
     air.run(&mut [&mut quiet, &mut r], 5_000);
-    assert!(cli(&mut r, "get fw.auto").ends_with(&format!("{quiet_key} not heard lately")), "{}", cli(&mut r, "get fw.auto"));
+    assert!(cli(&mut r, "fw").contains(&format!("failed: {quiet_key} not heard lately; next try ")), "{}", cli(&mut r, "fw"));
 
     // heard, but it does not hand updates on: asked twice, no answer
     air.run(&mut [&mut quiet, &mut r], 20_000);
     assert!(cli(&mut r, "fw update").starts_with("OK"));
     air.run(&mut [&mut quiet, &mut r], 30_000);
-    assert!(cli(&mut r, "get fw.auto").ends_with("no neighbour hands updates on (fw.serve)"), "{}", cli(&mut r, "get fw.auto"));
+    assert!(cli(&mut r, "fw").contains("failed: no neighbour hands updates on (fw.serve)"), "{}", cli(&mut r, "fw"));
     assert!(!slot.borrow().1);
+    // heard now: by its name too
+    let name = quiet.app.prefs.node_name.clone();
+    assert_eq!(cli(&mut r, "get fw.source"), format!("> {name} ({quiet_key})"));
+    assert_eq!(cli(&mut r, "set fw.source auto"), "OK - updates from the release server, or from the best neighbour over LoRa without it");
+    assert_eq!(cli(&mut r, &format!("set fw.source {name}")), format!("OK - updates from {name} ({quiet_key}) over LoRa"));
 
     assert_eq!(cli(&mut r, "set fw.source auto"), "OK - updates from the release server, or from the best neighbour over LoRa without it");
     assert_eq!(cli(&mut r, "get fw.source"), "> auto");
@@ -1604,11 +1690,11 @@ fn a_delta_larger_than_the_node_takes_is_not_pulled() {
     let mut air = Air::new();
     air.link(0, 1);
     air.run(&mut [&mut r, &mut c], 20_000);
-    c.app.fw_check_now(&c.ctx);
+    let _ = c.app.fw_check_now(&c.ctx, false);
     air.run(&mut [&mut r, &mut c], 60_000);
     let kb = (file.len() as u32).div_ceil(1024);
     let why = format!("the update is {kb} KB, more than this node takes over LoRa (60 KB): install it over USB or BLE");
-    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Failed(why));
+    assert!(c.app.fw_line(c.ctx.now).starts_with(&format!("failed: {why}; next try ")), "{}", c.app.fw_line(c.ctx.now));
     assert!(!slot.borrow().1);
 }
 
@@ -1658,25 +1744,26 @@ fn a_repeater_restarts_into_its_update_only_once_a_neighbour_has_loaded_its_own(
     r.app.ota.build.board = board::HELTEC_V4;
     r.app.ota.build.counter = 4;
     let fp = fingerprint_hex(&fingerprint(root.pub_key()));
-    r.app.handle_command(&mut r.ctx, 0, &format!("set ota.root {fp}"));
-    r.app.handle_command(&mut r.ctx, 0, "set fw.auto on");
+    r.app.handle_command(&mut r.ctx, 0, &format!("set fw.root {fp}"));
+    // not by `set fw.auto`, which checks at once: the own update comes once the neighbour's has begun
+    r.app.prefs.fw_mode = meshcore::fwstate::mode::INSTALL;
     let (mut c, _) = pulling_companion(&root, &base);
     let mut air = Air::new();
     air.link(0, 1);
     air.run(&mut [&mut r, &mut c], 20_000);
-    c.app.fw_check_now(&c.ctx);
+    let _ = c.app.fw_check_now(&c.ctx, false);
     air.run(&mut [&mut r, &mut c], 30_000);
-    assert!(matches!(c.app.fw_pull_status(), FwPullStatus::Loading { .. }), "{:?}", c.app.fw_pull_status());
+    assert!(matches!(c.app.fw_state(), FwState::Downloading { .. }), "{:?}", c.app.fw_state());
 
     // the repeater's own update is ready meanwhile: it waits for the neighbour
     assert!(r.app.handle_command(&mut r.ctx, 0, "fw update").starts_with("OK"));
     air.run(&mut [&mut r, &mut c], 10_000);
     assert!(!r.app.take_effects().reboot, "no restart while a neighbour loads from it");
-    assert!(r.app.handle_command(&mut r.ctx, 0, "get fw.auto").contains("installs once a neighbour has loaded"));
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "fw").lines().nth(1), Some("0.5.2 #5 ready: installs once a neighbour has its copy"));
 
     // the neighbour gets all of its update, then the repeater restarts into its own
     air.run(&mut [&mut r, &mut c], 600_000);
-    assert_eq!(c.app.fw_pull_status(), &FwPullStatus::Ready { version: "0.5.2".into() });
+    assert!(c.app.fw_line(c.ctx.now).starts_with("0.5.2 #5 ready"));
     assert!(own_slot.borrow().1, "installed");
-    assert!(r.app.handle_command(&mut r.ctx, 0, "get fw.auto").contains("installing 0.5.2"));
+    assert!(r.app.handle_command(&mut r.ctx, 0, "fw").contains("installing 0.5.2 #5"));
 }

@@ -236,8 +236,12 @@ pub struct PullInfo {
 #[derive(Clone, PartialEq, Debug)]
 pub struct UpdateInfo {
     pub window: Option<OtaWindow>,
-    /// Running a new image that has not confirmed itself yet.
-    pub trial: bool,
+    /// Where the node's own update stands, as `fw` says it ("Обновлений нет", "Пробный запуск").
+    pub state: String,
+    /// Why, or what comes next.
+    pub detail: String,
+    /// Bytes downloaded of the update, while it comes.
+    pub progress: Option<(u32, u32)>,
     pub version: String,
 }
 

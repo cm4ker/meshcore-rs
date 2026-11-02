@@ -238,7 +238,6 @@ fn ota_ssid(node_name: &str) -> String {
 
 /// What the screen shows that lives outside the repeater.
 struct ScreenInfo {
-    in_trial: bool,
     /// The update window over BLE: its PIN, and when it closes.
     ble_window: Option<(u32, u64)>,
     /// The Wi-Fi station runs.
@@ -321,16 +320,22 @@ fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64
                 time_synced: up(&net::TIME_SYNCED),
             })
         }
-        Page::Update => Body::Update(UpdateInfo {
-            window: info.ble_window.map(|(pin, until)| OtaWindow {
-                name: ota_ssid(&p.node_name),
-                pin,
-                connected: ble_connected,
-                mins_left: until.saturating_sub(now).div_ceil(60_000) as u32,
-            }),
-            trial: info.in_trial,
-            version: version.clone(),
-        }),
+        Page::Update => {
+            let trial = app.board.fw_trial_until.filter(|&t| t > now).map(|t| ((t - now) / 1000, app.board.fw_prev.as_str()));
+            let text = meshcore_fw::fwtext::fw_text(&app.fw_state(), trial, false);
+            Body::Update(UpdateInfo {
+                window: info.ble_window.map(|(pin, until)| OtaWindow {
+                    name: ota_ssid(&p.node_name),
+                    pin,
+                    connected: ble_connected,
+                    mins_left: until.saturating_sub(now).div_ceil(60_000) as u32,
+                }),
+                state: text.state,
+                detail: text.detail,
+                progress: text.progress,
+                version: meshcore::release::running_label(BUILD_DATE),
+            })
+        }
         Page::Advert => Body::Advert { flood: true },
         Page::Contact => Body::Contact(meshcore::util::contact_link_within(
             &p.node_name,
@@ -672,6 +677,10 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
         ..Default::default()
     };
     let mut mesh = Mesh::new(ctx, Repeater::new(prefs, board));
+    if let (Some(s), Some(sl)) = (&store, slots) {
+        let b = &mut mesh.app.board;
+        (b.fw_rollback, b.fw_prev, b.fw_skip) = ota::other_slot(&mut s.borrow_mut(), sl);
+    }
     if let Some(acl) = load(&store, Blob::Acl) {
         mesh.app.acl_load(&acl, &self_id);
     }
@@ -815,7 +824,7 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
     if let (Some(stack), Some(s), Some(region)) = (station, &store, fw_region) {
         spawner.spawn(fwstore::fetch_task(stack, s.clone(), region).unwrap());
     }
-    let mut fw_status_seen = 0u32;
+    let mut fw_store_seen = 0u32;
     let uplink_pub = net::UPLINK.publisher().unwrap();
     let mut next_status = 0u64;
 
@@ -887,6 +896,7 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
     let mut ble_until: Option<u64> = None;
     let mut in_trial = in_trial;
     let confirm_at = now_ms() + TRIAL_HEALTHY_MS;
+    mesh.app.board.fw_trial_until = in_trial.then_some(confirm_at);
     info!("boot: main loop (last trace: {})", trace::dump());
     let mut prof = Prof::new();
     loop {
@@ -1013,28 +1023,6 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
             Either4::Second(line) => {
                 awake_until = now_ms() + AWAKE_AFTER_ACTIVITY_MS;
                 let cmd = String::from_utf8_lossy(&line);
-                if cmd.trim() == "ota info" || cmd.trim() == "ota rollback" {
-                    let reply = match (slots, &store) {
-                        (None, _) | (_, None) => alloc::string::String::from("single-slot partition table, OTA unavailable"),
-                        (Some(sl), Some(s)) if cmd.trim() == "ota rollback" => {
-                            if ota::rollback(&mut s.borrow_mut(), sl) {
-                                reboot_at = Some(now_ms() + 500);
-                                alloc::format!("OK - switching to slot {}, rebooting", sl.target.0)
-                            } else {
-                                alloc::string::String::from("Error: could not select the other slot")
-                            }
-                        }
-                        (Some(sl), Some(_)) => alloc::format!(
-                            "running slot {}{}, update slot {} ({} KiB)",
-                            sl.booted,
-                            if in_trial { " (trial, not yet confirmed)" } else { "" },
-                            sl.target.0,
-                            sl.target.2 / 1024
-                        ),
-                    };
-                    println!("  -> {reply}");
-                    continue;
-                }
                 if cmd.trim() == "wdt test" {
                     println!("  -> hanging the main loop; the watchdog should reboot in {WATCHDOG_SECS}s");
                     #[allow(clippy::empty_loop)]
@@ -1158,7 +1146,6 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
             } else if now >= next_view && now >= next_oled_try {
                 next_view = now + 250;
                 let info = ScreenInfo {
-                    in_trial,
                     ble_window: ble_pin.zip(ble_until),
                     wifi: station.is_some(),
                     asleep_pct: sleeper.asleep_pct(),
@@ -1209,8 +1196,8 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
         } else {
             mesh.app.board.wifi_status = alloc::string::String::from("off (set wifi.ssid / wifi.pwd)");
         }
-        if let Some(line) = fwstore::status_if_changed(&mut fw_status_seen) {
-            mesh.app.board.fw_status = line;
+        if let Some(line) = fwstore::status_if_changed(&mut fw_store_seen) {
+            mesh.app.board.fw_store = line;
         }
         mesh.app.board.mqtt_status = mqtt_status_line(&mesh.app.prefs, station.is_some());
         if mesh.app.uplink_enabled {
@@ -1409,6 +1396,15 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
             // leave time for a remote CLI reply to go out
             reboot_at = Some(now + 3000);
         }
+        if fx.fw_rollback
+            && let (Some(s), Some(sl)) = (&store, slots)
+        {
+            if ota::rollback(&mut s.borrow_mut(), sl) {
+                reboot_at = Some(now + 3000);
+            } else {
+                warn!("fw rollback: could not select the other slot");
+            }
+        }
         if let Some(r) = room.as_mut() {
             let rfx = r.app.take_effects();
             for line in &rfx.console {
@@ -1463,6 +1459,7 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
                 ota::confirm(&mut s.borrow_mut());
             }
             in_trial = false;
+            mesh.app.board.fw_trial_until = None;
             info!("OTA: new firmware confirmed");
         }
 

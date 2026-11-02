@@ -125,7 +125,7 @@ pub fn sync(online: bool, server: &str) {
     });
 }
 
-/// The status line for `get fw.status`, when it changed since `seen` (updated).
+/// What the store last did, the third line of `fw`, when it changed since `seen` (updated).
 pub fn status_if_changed(seen: &mut u32) -> Option<String> {
     let g = STATUS_GEN.load(Ordering::Relaxed);
     (g != *seen).then(|| {
@@ -227,25 +227,19 @@ pub async fn fetch_task(stack: Stack<'static>, store: SharedStore<'static>, regi
             let what = format!("{}/{}", release::board_name(key.board), release::role_name(key.role));
             match got {
                 Ok(Some(f)) => {
-                    let line = format!(
-                        "holds {what} {} #{}: {} bytes, fetched in {} s from {server}",
-                        f.version,
-                        f.counter,
-                        f.len,
-                        t0.elapsed().as_secs()
-                    );
-                    log::info!("fw: {line}");
-                    set_status(s, line);
+                    log::info!("fw: {what} {} #{}, {} bytes, fetched in {} s from {server}", f.version, f.counter, f.len, t0.elapsed().as_secs());
+                    set_status(s, format!("serves {what} {} #{} ({} KB)", f.version, f.counter, f.len.div_ceil(1024)));
                     s.files[slot] = Some(File { used: now, ..f });
                 }
                 Ok(None) => {
                     s.misses.push((key, counter, now + MISS_SECS));
-                    set_status(s, format!("no update for {what} from image {}", to_hex(&key.base_sha8).to_ascii_lowercase()));
+                    log::info!("fw: no update for {what} from image {}", to_hex(&key.base_sha8).to_ascii_lowercase());
+                    set_status(s, format!("serve: nothing newer for {what} on {server}"));
                 }
                 Err(e) => {
                     log::warn!("fw: fetching from {server} failed: {e}");
                     s.failed_until = now + FAIL_SECS;
-                    set_status(s, format!("fetching from {server} failed: {e}"));
+                    set_status(s, format!("serve: fetching from {server} failed: {e}"));
                 }
             }
         });

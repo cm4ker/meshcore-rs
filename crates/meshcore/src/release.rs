@@ -89,12 +89,36 @@ pub fn default_roots() -> Vec<Fingerprint> {
     option_env!("MCFW_ROOT").and_then(parse_fingerprints).unwrap_or_default()
 }
 
+/// Version of this release, from `MCFW_VERSION` at build time: empty for local builds and for the
+/// builds CI makes to hash the code (which must not change with the version alone).
+pub const RELEASE_VERSION: &str = match option_env!("MCFW_VERSION") {
+    Some(v) => v,
+    None => "",
+};
+
 /// How a build names itself to people (`ver`, the app's device info, logs): a release by its
 /// number, a local build by its date.
 pub fn build_label(build_date: &str) -> String {
     match RELEASE_COUNTER {
         0 => alloc::format!("local build {build_date}"),
         n => alloc::format!("build #{n}"),
+    }
+}
+
+/// The release that runs, as `fw` names it: `0.8.3-dev.1 #45`, or [`build_label`] when the build
+/// has no version.
+pub fn running_label(build_date: &str) -> String {
+    match (RELEASE_VERSION, RELEASE_COUNTER) {
+        ("", _) | (_, 0) => build_label(build_date),
+        (v, n) => alloc::format!("{v} #{n}"),
+    }
+}
+
+/// What `ver` says after the firmware's own version: `0.8.3-dev.1, build #45`, or [`build_label`].
+pub fn ver_label(build_date: &str) -> String {
+    match (RELEASE_VERSION, RELEASE_COUNTER) {
+        ("", _) | (_, 0) => build_label(build_date),
+        (v, n) => alloc::format!("{v}, build #{n}"),
     }
 }
 

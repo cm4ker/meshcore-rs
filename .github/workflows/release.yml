@@ -1,7 +1,7 @@
 # Every push and pull request runs the tests and builds every board's image (kept as the run's
 # artifacts). Started by hand with a version, the run is a release: the images are packed into
 # signed .mcfw files (tools/ota-sign) and published as a GitHub release. Devices that pin the root
-# key's fingerprint (`set ota.root` on a repeater, the `ota_root` custom variable on a companion)
+# key's fingerprint (`set fw.root` on a repeater, the `fw_root` custom variable on a companion)
 # install only images this workflow signed; whoever delivers them, nw.ommesh.ru included, can't
 # make them take anything else.
 #
@@ -12,8 +12,8 @@
 # built. Releases are made from master only.
 #
 # A release carries only the boards and roles whose code changed, so the others don't update for
-# nothing. Each image is built once more with no release number and a fixed date (MCFW_COUNTER=0,
-# SOURCE_DATE_EPOCH=0); the hash of that build (<board>-<role>.content) changes only with the
+# nothing. Each image is built once more with no release number or version and a fixed date
+# (MCFW_COUNTER=0, MCFW_VERSION=, SOURCE_DATE_EPOCH=0); the hash of that build (<board>-<role>.content) changes only with the
 # code. A release lists these hashes for every board and role (content.txt) and leaves out those
 # that match the release it follows: for a stable release the last stable one, for a dev release
 # the last of either channel (devices that follow dev take both).
@@ -75,7 +75,7 @@ jobs:
           cargo build --locked --release
           espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../heltec-v4-repeater.bin
           espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/companion ../../../heltec-v4-companion.bin
-          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --locked --release
+          MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release
           espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../content/heltec-v4-repeater.bin
           espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/companion ../../../content/heltec-v4-companion.bin
       - name: Heltec V3
@@ -84,7 +84,7 @@ jobs:
           cargo build --locked --release --features heltec-v3
           espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../heltec-v3-repeater.bin
           espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/companion ../../../heltec-v3-companion.bin
-          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --locked --release --features heltec-v3
+          MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release --features heltec-v3
           espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../content/heltec-v3-repeater.bin
           espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/companion ../../../content/heltec-v3-companion.bin
       - name: Content hashes
@@ -110,7 +110,7 @@ jobs:
           mkdir -p ../../../content
           cargo build --locked --release
           espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/companion ../../../xiao-c6-companion.bin
-          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --locked --release
+          MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release
           espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/companion ../../../content/xiao-c6-companion.bin
       - name: Content hashes
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
@@ -136,13 +136,13 @@ jobs:
           mkdir -p ../../../content
           cargo build --locked --release
           python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../t-echo-companion.uf2 --bin ../../../t-echo-companion.bin
-          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --locked --release
+          MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release
           python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../content/t-echo-companion.uf2 --bin ../../../content/t-echo-companion.bin
       - working-directory: firmware/models/promicro
         run: |
           cargo build --locked --release
           python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/repeater ../../../promicro-repeater.uf2 --bin ../../../promicro-repeater.bin
-          MCFW_COUNTER=0 SOURCE_DATE_EPOCH=0 cargo build --locked --release
+          MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release
           python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/repeater ../../../content/promicro-repeater.uf2 --bin ../../../content/promicro-repeater.bin
       - name: Content hashes
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
@@ -297,7 +297,7 @@ jobs:
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
           prerelease=$([ "$MCFW_CHANNEL" = dev ] && echo --prerelease || true)
           {
-            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set ota.root $root\` (repeater) or the \`ota_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo image for the USB bootloader. The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them."
+            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo image for the USB bootloader. The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them."
             if [ -s unchanged.txt ]; then
               echo
               echo "Left out, the same code as in $(cat prev-tag.txt): $(paste -sd, unchanged.txt | sed 's/,/, /g'). Those devices keep what they run; content.txt lists the code of every board and role."

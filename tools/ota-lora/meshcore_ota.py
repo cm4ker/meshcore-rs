@@ -17,7 +17,7 @@ Progress lines go to stdout; the transfer can be re-run and resumes missing chun
 repeater was not rebooted in between (sessions live in RAM).
 
 Signed releases: give the release's `.mcfw` file (tools/ota-sign) instead of the `.bin`. Its
-envelope goes first, and a repeater that pins a root key (`set ota.root`) only takes an image
+envelope goes first, and a repeater that pins a root key (`set fw.root`) only takes an image
 that key signed.
 """
 
@@ -54,7 +54,7 @@ ERRORS = {1: "no OTA slot", 2: "image too large", 3: "bad parameters", 4: "no se
           14: "unreadable release envelope",
           15: "the release is not signed by the owner key the device pins (sign it on the release server)",
           16: "over LoRa or TCP the device takes only signed releases, and it pins no root key "
-              "(pin one with `set ota.root`, or update over BLE or USB)",
+              "(pin one with `set fw.root`, or update over BLE or USB)",
           17: "an update is already installed and the device is restarting into it"}
 BOARDS = {1: "heltec-v4", 2: "heltec-v3", 3: "xiao-c6", 4: "t-echo", 5: "promicro"}
 ROLES = {1: "repeater", 2: "companion"}

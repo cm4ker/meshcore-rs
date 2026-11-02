@@ -1,6 +1,6 @@
 //! Firmware passed along the mesh (this firmware's extension, off by default at both ends): a
 //! repeater with an internet link (`set fw.serve on`) hands signed releases on to the companions
-//! next to it, and a companion that pins a root key (`fw_pull`) asks it for an update by itself,
+//! next to it, and a companion that pins a root key (`fw.auto`) asks it for an update by itself,
 //! connected to nothing. Neither end trusts the other or the server the repeater fetched from: a
 //! companion pulls only while it pins a root key, and installs only what that root signed (see
 //! [`crate::release`], [`crate::ota`]), and what its owner signed too when it pins an owner key.

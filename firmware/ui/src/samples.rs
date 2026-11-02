@@ -132,7 +132,7 @@ pub fn repeater_view(page: Page) -> View {
             mqtt_up: 2,
             time_synced: true,
         }),
-        Page::Update => Body::Update(UpdateInfo { window: None, trial: false, version: "v1.18.0-rs (24 Oct 2026)".into() }),
+        Page::Update => Body::Update(UpdateInfo { window: None, state: "Обновлений нет".into(), detail: "nw.ommesh.ru, 16:13".into(), progress: None, version: "0.8.3-dev.1 #45".into() }),
         Page::Advert => Body::Advert { flood: true },
         Page::Contact => Body::Contact(alloc::format!(
             "meshcore://contact/add?name=Omsk-RPT&public_key={}&type=2",
@@ -300,25 +300,25 @@ pub fn all() -> Vec<(String, View)> {
     let window = |connected| OtaWindow { name: "MeshCore-OTA-Wan3-SVOBODA-".into(), pin: 482_913, connected, mins_left: 14 };
     add(
         "update-open",
-        with(r(Page::Update), Body::Update(UpdateInfo { window: Some(window(false)), trial: false, version: "v1.18.0-rs".into() })),
+        with(r(Page::Update), Body::Update(UpdateInfo { window: Some(window(false)), state: "Обновлений нет".into(), detail: "".into(), progress: None, version: "0.8.3-dev.1 #45".into() })),
     );
     add(
         "update-connected",
-        with(r(Page::Update), Body::Update(UpdateInfo { window: Some(window(true)), trial: false, version: "v1.18.0-rs".into() })),
+        with(r(Page::Update), Body::Update(UpdateInfo { window: Some(window(true)), state: "Обновлений нет".into(), detail: "".into(), progress: None, version: "0.8.3-dev.1 #45".into() })),
     );
     let c = |p: Page| companion_view(p);
     add("pull-loading", with(c(Page::Pull), Body::Pull(pull("Загружается 0.5.2", "", Some((40_000, 48_017)), None))));
     add(
         "pull-failed",
-        with(c(Page::Pull), Body::Pull(pull("Не удалось", "Подписано не тем корневым ключом, что закреплён здесь", None, Some("проверить")))),
+        with(c(Page::Pull), Body::Pull(pull("Не удалось", "Подписано не тем ключом, что закреплён здесь", None, Some("проверить")))),
     );
     add(
         "pull-off",
-        with(c(Page::Pull), Body::Pull(pull("Выключено", "Включите fw_pull в настройках приложения", None, None))),
+        with(c(Page::Pull), Body::Pull(pull("Выключено", "Включите fw_auto в настройках приложения", None, None))),
     );
     add(
         "update-trial",
-        with(r(Page::Update), Body::Update(UpdateInfo { window: None, trial: true, version: "v1.18.0-rs (24 Oct 2026)".into() })),
+        with(r(Page::Update), Body::Update(UpdateInfo { window: None, state: "Пробный запуск".into(), detail: "Оставлю через 2 мин, откат: 0.8.2 #42".into(), progress: None, version: "0.8.3-dev.1 #45".into() })),
     );
     out
 }

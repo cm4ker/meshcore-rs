@@ -17,6 +17,7 @@ use crate::advert::{ADV_TYPE_REPEATER, ADV_TYPE_ROOM, AdvertData, is_valid_name}
 use crate::companion::{CMD_DEVICE_QUERY, RESP_CODE_DEVICE_INFO};
 use crate::crypto::{self, Secret};
 use crate::fwshare::{self, FwStore};
+use crate::fwstate::{self, FwState};
 use crate::identity::{Identity, LocalIdentity};
 use crate::mesh::{MeshApp, MeshCtx};
 use crate::ota::{OtaEndpoint, OtaOutcome};
@@ -26,7 +27,7 @@ use crate::prefs::*;
 use crate::radio::RadioParams;
 use crate::region::{REGION_DENY_FLOOD, RegionMap, TransportKey, is_name_char};
 use crate::rtc::DEFAULT_EPOCH;
-use crate::util::{atof, atoi, atoi_signed, epoch_to_datetime, from_hex, ftoa, to_hex, truncate_str};
+use crate::util::{atof, atoi, atoi_signed, epoch_to_datetime, from_hex, ftoa, parse_key_prefix, to_hex, truncate_str};
 use crate::{FIRMWARE_VERSION, MAX_ADVERT_DATA_SIZE, MAX_PACKET_PAYLOAD, MAX_PATH_SIZE, PRV_KEY_SIZE, PUB_KEY_SIZE};
 
 mod autoupdate;
@@ -134,6 +135,8 @@ impl ClientInfo {
 #[derive(Clone, Debug)]
 pub struct Neighbour {
     pub id: Identity,
+    /// The name its last advert gave (empty if none came yet).
+    pub name: String,
     pub advert_timestamp: u32,
     pub heard_timestamp: u32,
     /// SNR x 4.
@@ -185,11 +188,14 @@ pub struct Effects {
     pub tx_power: Option<i8>,
     pub rx_boosted_gain: Option<bool>,
     pub fem_lna: Option<bool>,
-    /// Bring up the Wi-Fi update page (`start ota`): the one-time code uploads must carry, and
+    /// Bring up the Wi-Fi update page (`fw wifi`): the one-time code uploads must carry, and
     /// the passphrase of the access point (one per boot, as the point comes up only once).
     pub start_ota: Option<(u32, String)>,
-    /// Open the BLE update window (`start ota ble`) with this pairing PIN.
+    /// Open the BLE update window (`fw ble`) with this pairing PIN.
     pub start_ble_ota: Option<u32>,
+    /// Go back to the firmware in the other slot and restart (`fw rollback`); the one left is not
+    /// installed by itself again.
+    pub fw_rollback: bool,
     /// Persist the region map.
     pub save_regions: bool,
     /// Wi-Fi or MQTT settings changed: reconnect.
@@ -228,11 +234,11 @@ pub struct BoardInfo {
     pub mcu_temp_c: Option<f32>,
     pub fem_lna_controllable: bool,
     pub build_date: String,
-    /// SSID of the Wi-Fi update access point, if the board supports `start ota`.
+    /// SSID of the Wi-Fi update access point, if the board supports `fw wifi`.
     pub wifi_ota_ssid: Option<String>,
-    /// Advertised name of the BLE update window, if the board supports `start ota ble`.
+    /// Advertised name of the BLE update window, if the board supports `fw ble`.
     pub ble_ota_name: Option<String>,
-    /// LAN address while the Wi-Fi station is connected (`start ota` serves there instead of an AP).
+    /// LAN address while the Wi-Fi station is connected (`fw wifi` serves there instead of an AP).
     pub wifi_ip: Option<String>,
     /// The board can light-sleep between packets (`powersaving on`).
     pub powersaving_supported: bool,
@@ -252,8 +258,16 @@ pub struct BoardInfo {
     /// Network status lines for `get wifi.status` / `get mqtt.status`, kept by the firmware.
     pub wifi_status: String,
     pub mqtt_status: String,
-    /// What the update store holds, for `get fw.status`, kept by the firmware.
-    pub fw_status: String,
+    /// What the update store holds for the neighbours, the third line of `fw`, kept by the firmware.
+    pub fw_store: String,
+    /// While the firmware runs on trial after an update: when it is kept (uptime, ms).
+    pub fw_trial_until: Option<u64>,
+    /// The firmware in the other slot, `fw rollback` goes back to it (empty if not known).
+    pub fw_prev: String,
+    /// The other slot holds a firmware to go back to.
+    pub fw_rollback: bool,
+    /// The release this node was rolled back from: not installed by itself again (0 = none).
+    pub fw_skip: u32,
 }
 
 pub struct Repeater {
@@ -703,10 +717,19 @@ impl Repeater {
 
     // ----------------------------------------------------------- neighbours
 
-    fn put_neighbour(&mut self, ctx: &MeshCtx, id: &Identity, timestamp: u32, snr: f32) {
+    fn put_neighbour(&mut self, ctx: &MeshCtx, id: &Identity, timestamp: u32, snr: f32, name: Option<&str>) {
         let heard = ctx.current_time();
-        let n = Neighbour { id: *id, advert_timestamp: timestamp, heard_timestamp: heard, snr: (snr * 4.0) as i8 };
+        let mut n = Neighbour {
+            id: *id,
+            name: name.unwrap_or_default().into(),
+            advert_timestamp: timestamp,
+            heard_timestamp: heard,
+            snr: (snr * 4.0) as i8,
+        };
         if let Some(e) = self.neighbours.iter_mut().find(|e| e.id == *id) {
+            if name.is_none() {
+                n.name = core::mem::take(&mut e.name);
+            }
             *e = n;
         } else if self.neighbours.len() < MAX_NEIGHBOURS {
             self.neighbours.push(n);
@@ -1085,7 +1108,7 @@ impl MeshApp for Repeater {
             && let Some(adv) = AdvertData::parse(app_data)
             && adv.adv_type == ADV_TYPE_REPEATER
         {
-            self.put_neighbour(ctx, id, timestamp, pkt.snr_db());
+            self.put_neighbour(ctx, id, timestamp, pkt.snr_db(), adv.name.as_deref());
         }
         if self.logging {
             let name = AdvertData::parse(app_data).and_then(|a| a.name).unwrap_or_default();
@@ -1328,7 +1351,7 @@ impl MeshApp for Repeater {
                 return;
             }
             let now = ctx.current_time();
-            self.put_neighbour(ctx, &id, now, pkt.snr_db());
+            self.put_neighbour(ctx, &id, now, pkt.snr_db(), None);
         }
     }
 
@@ -1557,22 +1580,23 @@ impl Repeater {
                 "ERR: clock cannot go backwards".into()
             };
         }
-        if cmd == "fw update" {
-            return self.auto_update_now(ctx);
+        if let Some(r) = self.handle_fw_command(ctx, cmd) {
+            return r;
         }
-        if cmd.starts_with("start ota ble") {
+        // `start ota` and `start ota ble` are what upstream calls `fw wifi` and `fw ble`
+        if cmd == "fw ble" || cmd.starts_with("start ota ble") {
             return match self.board.ble_ota_name.clone() {
                 Some(name) => {
                     let pin = 100_000 + ctx.rng.next_u32() % 900_000;
                     self.effects.start_ble_ota = Some(pin);
                     format!("Started: BLE '{name}' PIN {pin} for {BLE_OTA_WINDOW_MINS} min")
                 }
-                None => "Error".into(),
+                None => "Error: no Bluetooth update window on this board".into(),
             };
         }
-        if cmd.starts_with("start ota") {
+        if cmd == "fw wifi" || cmd.starts_with("start ota") {
             let Some(ssid) = self.board.wifi_ota_ssid.clone() else {
-                return "Error".into();
+                return "Error: no Wi-Fi update page on this board".into();
             };
             // a fresh code each time: on the LAN anyone could reach the page otherwise
             let code = 100_000 + ctx.rng.next_u32() % 900_000;
@@ -1656,7 +1680,7 @@ impl Repeater {
             return "File system erase: OK".into();
         }
         if cmd.starts_with("ver") {
-            return format!("{} ({})", FIRMWARE_VERSION, release::build_label(&self.board.build_date));
+            return format!("{} ({})", FIRMWARE_VERSION, release::ver_label(&self.board.build_date));
         }
         if cmd.starts_with("board") {
             return self.board.manufacturer.clone();
@@ -1912,10 +1936,10 @@ impl Repeater {
         if let Some(r) = self.handle_get_network(cfg) {
             return r;
         }
-        if cfg.starts_with("ota.root") {
+        if cfg.starts_with("fw.root") {
             return self.ota_root_status();
         }
-        if cfg.starts_with("ota.owner") {
+        if cfg.starts_with("fw.owner") {
             return match (self.prefs.ota_owners.is_empty(), self.prefs.ota_roots.is_empty()) {
                 (true, _) => "> none, the root's signature is enough".into(),
                 (false, true) => format!("> {} (no root pinned: not checked)", release::join_fingerprints(&self.prefs.ota_owners, ", ")),
@@ -1923,25 +1947,15 @@ impl Repeater {
             };
         }
         if cfg.starts_with("fw.auto") {
-            self.auto_update_status()
+            format!("> {}", fwstate::mode_name(p.fw_mode))
         } else if cfg.starts_with("fw.channel") {
             format!("> {}", release::channel_name(p.fw_channel))
         } else if cfg.starts_with("fw.source") {
-            if p.fw_source.is_empty() { "> auto".into() } else { format!("> {}", to_hex(&p.fw_source)) }
+            if p.fw_source.is_empty() { "> auto".into() } else { format!("> {}", self.fw_source_label()) }
         } else if cfg.starts_with("fw.server") {
             format!("> {}", p.fw_server)
         } else if cfg.starts_with("fw.serve") {
             format!("> {}", onoff(p.fw_serve))
-        } else if cfg.starts_with("fw.status") {
-            // the store fetches for `fw.auto` and `fw update` too, not only for `fw.serve`: what it
-            // last did (or why it failed) is worth seeing whichever asked
-            if self.fw_store.is_none() {
-                "> no update store on this board".into()
-            } else if self.board.fw_status.is_empty() {
-                "> nothing fetched yet".into()
-            } else {
-                format!("> {}", self.board.fw_status)
-            }
         } else if cfg.starts_with("dyncr") {
             format!("> {}", onoff(p.dynamic_cr))
         } else if cfg.starts_with("room") && self.room.is_none() {
@@ -2020,7 +2034,7 @@ impl Repeater {
         }
     }
 
-    /// `get ota.root`: the pinned root keys and what a release must name to be installed here.
+    /// `get fw.root`: the pinned root keys and what a release must name to be installed here.
     fn ota_root_status(&self) -> String {
         let b = &self.ota.build;
         let build = format!("{}/{} #{}", release::board_name(b.board), release::role_name(b.role), b.counter);
@@ -2031,8 +2045,8 @@ impl Repeater {
         }
     }
 
-    /// `set ota.root <fingerprint>[,<fingerprint>...]` pins the root keys whose signed releases
-    /// are installed; `set ota.root off` unpins them. Over LoRa only such releases are taken:
+    /// `set fw.root <fingerprint>[,<fingerprint>...]` pins the root keys whose signed releases
+    /// are installed; `set fw.root off` unpins them. Over LoRa only such releases are taken:
     /// with no root pinned, updates come over BLE, Wi-Fi or USB alone. The first pin may come
     /// from an admin, as an admin can open the BLE update window until then; once a root is
     /// pinned only the serial console changes it, so a leaked admin password can't swap the root
@@ -2059,9 +2073,9 @@ impl Repeater {
         }
     }
 
-    /// `set ota.owner <fingerprint>[,<fingerprint>...]` pins owner keys: a release is installed
+    /// `set fw.owner <fingerprint>[,<fingerprint>...]` pins owner keys: a release is installed
     /// only once one of them signed it too, so the owner decides which of the root's releases go
-    /// onto this node; `set ota.owner off` unpins them. The same rule as for the root: the first
+    /// onto this node; `set fw.owner off` unpins them. The same rule as for the root: the first
     /// pin may come from an admin, a change only from the serial console.
     fn set_ota_owner(&mut self, serial: bool, value: &str) -> String {
         let value = value.trim();
@@ -2073,7 +2087,7 @@ impl Repeater {
             return "OK".into();
         }
         if !owners.is_empty() && self.prefs.ota_roots.is_empty() {
-            return "Error: pin the root key first (set ota.root)".into();
+            return "Error: pin the root key first (set fw.root)".into();
         }
         if !self.prefs.ota_owners.is_empty() && !serial {
             return "Error: a pinned owner key can only be changed on the serial console".into();
@@ -2092,32 +2106,43 @@ impl Repeater {
         if let Some(r) = self.handle_set_network(cfg) {
             return r;
         }
-        if let Some(v) = cfg.strip_prefix("ota.root ") {
+        if let Some(v) = cfg.strip_prefix("fw.root ") {
             return self.set_ota_root(serial, v);
         }
-        if let Some(v) = cfg.strip_prefix("ota.owner ") {
+        if let Some(v) = cfg.strip_prefix("fw.owner ") {
             return self.set_ota_owner(serial, v);
         }
         if let Some(v) = cfg.strip_prefix("fw.serve ") {
-            self.prefs.fw_serve = v.starts_with("on");
+            let on = match v.trim() {
+                "on" => true,
+                "off" => false,
+                _ => return "Error: on or off".into(),
+            };
+            self.prefs.fw_serve = on;
             self.save_prefs();
-            return match (self.prefs.fw_serve, self.fw_store.is_some()) {
-                (true, false) => "OK - but this board has no update store".into(),
-                (true, true) => format!("OK - updates from {} handed on to neighbours", self.prefs.fw_server),
-                (false, _) => "OK - updates not handed on".into(),
+            return match (on, self.fw_store.is_some(), self.prefs.wifi_ssid.is_empty()) {
+                (true, false, _) => "OK - but this board has no update store".into(),
+                (true, true, true) => "OK - but Wi-Fi is not set up (set wifi.ssid): nothing to hand on yet".into(),
+                (true, true, false) => format!("OK - updates from {} handed on to neighbours", self.prefs.fw_server),
+                (false, _, _) => "OK - updates not handed on".into(),
             };
         }
         if let Some(v) = cfg.strip_prefix("fw.auto ") {
-            self.prefs.fw_auto = v.starts_with("on");
+            let Some(m) = fwstate::mode_by_name(v.trim()) else {
+                return "Error: off, download or install".into();
+            };
+            let was = core::mem::replace(&mut self.prefs.fw_mode, m);
             self.save_prefs();
-            return match (self.prefs.fw_auto, self.prefs.ota_roots.is_empty()) {
-                (true, true) => "OK - but nothing is installed until a root is pinned (set ota.root)".into(),
-                (true, false) => format!(
-                    "OK - this node updates itself from {} (without it, from a neighbour over LoRa), {} releases",
-                    self.prefs.fw_server,
-                    release::channel_name(self.prefs.fw_channel)
-                ),
-                (false, _) => "OK - no updates by itself".into(),
+            if was == fwstate::mode::OFF && m != fwstate::mode::OFF {
+                // switched on: the first check now rather than in twelve hours
+                self.fw_check_soon(ctx);
+            }
+            let ch = release::channel_name(self.prefs.fw_channel);
+            return match (m, self.auto_blocked()) {
+                (fwstate::mode::OFF, _) => "OK - no updates by itself".into(),
+                (_, Some(s @ (FwState::NoRoot | FwState::NoSlot))) => format!("OK - but {}", s.line()),
+                (fwstate::mode::DOWNLOAD, _) => format!("OK - downloads {ch} releases by itself; fw install installs them"),
+                _ => format!("OK - installs {ch} releases by itself, from {} or a neighbour", self.prefs.fw_server),
             };
         }
         if let Some(v) = cfg.strip_prefix("fw.channel ") {
@@ -2126,22 +2151,29 @@ impl Repeater {
             };
             self.prefs.fw_channel = ch;
             self.save_prefs();
-            return format!("OK - following {} releases", release::channel_name(ch));
+            return if ch == release::channel::DEV {
+                "OK - following dev releases (and stable ones)".into()
+            } else {
+                "OK - following stable releases".into()
+            };
         }
         if let Some(v) = cfg.strip_prefix("fw.source ") {
             let v = v.trim();
-            let mut key = alloc::vec![0u8; v.len() / 2];
-            if v == "auto" {
-                key.clear();
-            } else if !(2..=64).contains(&v.len()) || v.len() % 2 != 0 || !from_hex(&mut key, v) {
-                return "Error: the start of a neighbour's key in hex, or auto".into();
-            }
+            let key = if v == "auto" {
+                Vec::new()
+            } else if let Some(key) = parse_key_prefix(v) {
+                key
+            } else if let Some(n) = self.neighbours.iter().find(|n| n.name.eq_ignore_ascii_case(v)) {
+                n.id.pub_key[..8].to_vec()
+            } else {
+                return format!("Error: no neighbour {v} heard; a name, the start of a key (8+ hex digits) or auto");
+            };
             self.prefs.fw_source = key;
             self.save_prefs();
             return if self.prefs.fw_source.is_empty() {
                 "OK - updates from the release server, or from the best neighbour over LoRa without it".into()
             } else {
-                format!("OK - updates from {} over LoRa", to_hex(&self.prefs.fw_source))
+                format!("OK - updates from {} over LoRa", self.fw_source_label())
             };
         }
         if let Some(v) = cfg.strip_prefix("fw.server ") {

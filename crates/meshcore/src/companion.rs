@@ -29,7 +29,7 @@ mod cmd;
 mod fwpull;
 pub mod prefs;
 
-pub use fwpull::{FW_PULL_AUTO, FW_PULL_OFF, FW_PULL_ON, FwPullStatus};
+use fwpull::FwError;
 
 pub use prefs::*;
 
@@ -418,6 +418,9 @@ pub struct Effects {
     pub network_changed: bool,
     /// The GPS was switched on or off (`prefs.gps_enabled`).
     pub gps: bool,
+    /// Go back to the firmware in the other slot and restart (`fw rollback`); the one left is not
+    /// installed by itself again.
+    pub fw_rollback: bool,
 }
 
 /// Live board values the firmware keeps up to date.
@@ -438,6 +441,14 @@ pub struct Board {
     pub adc_multiplier: Option<f32>,
     /// Altitude of the latest GPS position, in metres.
     pub altitude_m: f64,
+    /// While the firmware runs on trial after an update: when it is kept (uptime, ms).
+    pub fw_trial_until: Option<u64>,
+    /// The firmware in the other slot, `fw rollback` goes back to it (empty if not known).
+    pub fw_prev: String,
+    /// The other slot holds a firmware to go back to.
+    pub fw_rollback: bool,
+    /// The release this node was rolled back from: not installed by itself again (0 = none).
+    pub fw_skip: u32,
 }
 
 impl Default for Board {
@@ -453,6 +464,10 @@ impl Default for Board {
             has_gps: false,
             adc_multiplier: None,
             altitude_m: 0.0,
+            fw_trial_until: None,
+            fw_prev: String::new(),
+            fw_rollback: false,
+            fw_skip: 0,
         }
     }
 }
@@ -538,8 +553,10 @@ pub struct Companion {
     pub messages_received: u32,
     /// The latest nodes heard advertising, most recent first.
     pub heard: VecDeque<HeardNode>,
-    /// Firmware updates pulled from a neighbouring repeater (`fw_pull`).
+    /// Firmware updates pulled from a neighbouring repeater (`fw.auto`).
     fwpull: fwpull::FwPull,
+    /// What the last `fw_do` did, for the custom variable's value.
+    fw_done: String,
     /// Transient slots first (`MAX_ANON_CONTACTS`), then the real contacts, like upstream.
     contacts: Vec<ContactInfo>,
     matching_peers: Vec<usize>,
@@ -590,6 +607,7 @@ impl Companion {
             messages_received: 0,
             heard: VecDeque::new(),
             fwpull: fwpull::FwPull::default(),
+            fw_done: String::new(),
             contacts: Vec::new(),
             matching_peers: Vec::new(),
             channels: alloc::vec![Channel::default(); MAX_GROUP_CHANNELS],
@@ -627,11 +645,6 @@ impl Companion {
         if latest != 0 && latest + 1 > ctx.current_time() {
             ctx.set_current_time(latest + 1);
         }
-    }
-
-    /// Where pulling an update from a neighbouring repeater stands (`fw_pull`).
-    pub fn fw_pull_status(&self) -> &FwPullStatus {
-        &self.fwpull.status
     }
 
     pub fn take_effects(&mut self) -> Effects {

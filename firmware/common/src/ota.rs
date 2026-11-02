@@ -6,9 +6,14 @@
 //! - every boot of the new slot increments `boots`; after [`MAX_TRIAL_BOOTS`] boots that never
 //!   reached [`confirm`] (hangs are turned into reboots by the watchdog), `otadata` is switched
 //!   back to the previous slot;
-//! - once the new firmware has run healthy for a while, [`confirm`] clears the record.
+//! - once the new firmware has run healthy for a while, [`confirm`] ends the trial.
+//!
+//! The same record keeps what the other slot holds (`fw rollback` goes back to it) and the release
+//! this node was rolled back from, by hand or after failed trial boots: an update by itself does
+//! not install that one again ([`FwRecord`]).
 
 use alloc::rc::Rc;
+use alloc::string::{String, ToString};
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -63,46 +68,100 @@ fn select_slot(store: &mut EspStore<'_>, slot: u8, state: OtaImageState) -> bool
     data.set_current_app_partition(sub(slot)).is_ok() && data.set_current_ota_state(state).is_ok()
 }
 
-fn trial_record(store: &mut EspStore<'_>) -> Option<[u8; 3]> {
-    store.load(Blob::OtaTrial).and_then(|r| r.get(..3).and_then(|b| b.try_into().ok()))
+/// `Blob::OtaTrial`: `[new slot, previous slot, boots]` while an update runs on trial (the first
+/// byte [`NO_TRIAL`] otherwise), the release this node was rolled back from (u32 LE, 0 = none) and
+/// the name of the firmware in the other slot (UTF-8, to the end). Builds from before kept only
+/// the first three bytes, and only during a trial.
+#[derive(Default)]
+pub struct FwRecord {
+    pub trial: Option<[u8; 3]>,
+    pub skip: u32,
+    pub prev: String,
+}
+
+const NO_TRIAL: u8 = 0xFF;
+
+impl FwRecord {
+    pub fn load(store: &mut EspStore<'_>) -> Self {
+        let Some(r) = store.load(Blob::OtaTrial) else {
+            return Self::default();
+        };
+        Self {
+            trial: r.get(..3).filter(|b| b[0] != NO_TRIAL).map(|b| [b[0], b[1], b[2]]),
+            skip: r.get(3..7).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap())),
+            prev: r.get(7..).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default(),
+        }
+    }
+
+    fn save(&self, store: &mut EspStore<'_>) -> bool {
+        let mut r = alloc::vec::Vec::from(self.trial.unwrap_or([NO_TRIAL, 0, 0]));
+        r.extend_from_slice(&self.skip.to_le_bytes());
+        r.extend_from_slice(self.prev.as_bytes());
+        store.save(Blob::OtaTrial, &r)
+    }
+}
+
+/// This firmware, as the record names it for after it is left: `0.8.3-dev.1 #45`.
+fn own_label() -> String {
+    match meshcore::release::RELEASE_COUNTER {
+        0 => "a local build".into(),
+        n => meshcore::fwstate::Release::new(meshcore::release::RELEASE_VERSION, n).to_string(),
+    }
 }
 
 /// Run at boot, before anything that could hang. Returns `true` while on a trial boot.
 /// Never returns if the trial budget is exhausted (switches back and resets).
 pub fn check_trial(store: &mut EspStore<'_>, booted: u8) -> bool {
-    let Some([slot, prev, boots]) = trial_record(store) else {
+    let mut record = FwRecord::load(store);
+    let Some([slot, prev, boots]) = record.trial else {
         return false;
     };
     if slot != booted {
         // the bootloader refused the new image and fell back
         log::warn!("OTA: update in slot {slot} did not boot, staying on slot {booted}");
-        store.save(Blob::OtaTrial, &[]);
+        record.trial = None;
+        record.save(store);
         return false;
     }
     if boots >= MAX_TRIAL_BOOTS {
         log::error!("OTA: slot {slot} failed {boots} trial boots, rolling back to slot {prev}");
-        store.save(Blob::OtaTrial, &[]);
+        // the firmware that runs is the one left: not installed by itself again
+        let left = FwRecord { trial: None, skip: meshcore::release::RELEASE_COUNTER, prev: own_label() };
+        left.save(store);
         select_slot(store, prev, OtaImageState::Valid);
         crate::reset::hard_reset();
     }
-    store.save(Blob::OtaTrial, &[slot, prev, boots + 1]);
+    record.trial = Some([slot, prev, boots + 1]);
+    record.save(store);
     log::info!("OTA: trial boot {} of {MAX_TRIAL_BOOTS} for slot {slot}", boots + 1);
     true
 }
 
+/// What `fw` and `fw rollback` know of the other slot: whether it holds a firmware (an ESP image
+/// starts with 0xE9), its name, and the release rolled back from.
+pub fn other_slot(store: &mut EspStore<'_>, slots: Slots) -> (bool, String, u32) {
+    let mut magic = [0u8; 1];
+    let bootable = store.flash().read(slots.target.1, &mut magic).is_ok() && magic[0] == 0xE9;
+    let record = FwRecord::load(store);
+    (bootable, record.prev, record.skip)
+}
+
 /// The new firmware is healthy: keep it.
 pub fn confirm(store: &mut EspStore<'_>) {
-    store.save(Blob::OtaTrial, &[]);
+    let mut record = FwRecord::load(store);
+    record.trial = None;
+    record.save(store);
     let mut buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
     if let Ok(mut updater) = OtaUpdater::new(store.flash(), &mut buf) {
         let _ = updater.set_current_ota_state(OtaImageState::Valid);
     }
 }
 
-/// Switch back to the other slot (CLI `ota rollback`), keeping it on trial too.
+/// Switch back to the other slot (`fw rollback`); the restart is the caller's. The firmware that
+/// runs now is the one left: not installed by itself again.
 pub fn rollback(store: &mut EspStore<'_>, slots: Slots) -> bool {
-    store.save(Blob::OtaTrial, &[]);
-    select_slot(store, slots.target.0, OtaImageState::Valid)
+    let left = FwRecord { trial: None, skip: meshcore::release::RELEASE_COUNTER, prev: own_label() };
+    left.save(store) && select_slot(store, slots.target.0, OtaImageState::Valid)
 }
 
 /// An update was selected for the next boot. Its slot then holds a verified image, which no
@@ -167,7 +226,10 @@ impl FirmwareTarget for FlashTarget<'_> {
     fn activate(&mut self, _size: u32) -> bool {
         let mut store = self.store.borrow_mut();
         let (slot, booted) = (self.slots.target.0, self.slots.booted);
-        let ok = store.save(Blob::OtaTrial, &[slot, booted, 0]) && select_slot(&mut store, slot, OtaImageState::New);
+        // this firmware is what the update goes back to, should it fail
+        let skip = FwRecord::load(&mut store).skip;
+        let record = FwRecord { trial: Some([slot, booted, 0]), skip, prev: own_label() };
+        let ok = record.save(&mut store) && select_slot(&mut store, slot, OtaImageState::New);
         ACTIVATED.fetch_or(ok, Ordering::Relaxed);
         ok
     }

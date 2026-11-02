@@ -283,14 +283,16 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
         }
         Body::Update(u) => match &u.window {
             None => {
-                c.text(&TEXT_BOLD, "Окно закрыто", MARGIN, BODY_TOP + 2);
-                let text = wrap(&TEXT, "Откройте его и загрузите прошивку по Bluetooth.", full, 3);
+                c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, &clean(&u.state), full), MARGIN, BODY_TOP + 2);
+                let detail = match u.progress {
+                    Some((done, total)) => format!("{} из {} КБ", done / 1024, total.div_ceil(1024)),
+                    None => clean(&u.detail),
+                };
+                let text = wrap(&TEXT, &detail, full, 3);
                 let y = c.lines(&TEXT, &text, MARGIN, BODY_TOP + 24);
-                let mut version = format!("Версия {}", clean(&u.version));
-                if u.trial {
-                    version.push_str(", пробная");
-                }
+                let version = format!("Версия {}", clean(&u.version));
                 c.text(&SMALL, &fit(&SMALL, &version, full), MARGIN, y + 4);
+                // the window for an update over Bluetooth
                 hint(c, "открыть");
             }
             Some(o) => {

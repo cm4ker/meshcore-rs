@@ -1,19 +1,23 @@
-//! A repeater that updates itself (`set fw.auto on`, this firmware's extension, off by default).
-//! With a working link to `fw.server` it asks its update store (see [`crate::fwshare`]) for a
-//! release newer than the build it runs, for its board, role and channel. Without one (no Wi-Fi, or
-//! the server out of reach), or when `fw.source` names a neighbour, it asks a neighbouring repeater
-//! over LoRa instead, as a companion does (`fw_pull`): one that hands updates on (`fw.serve on`)
-//! and so has the link this one lacks. That delta comes a piece at a time with pauses between, which
-//! leave the channel to the others, and the node keeps repeating meanwhile. Either way the delta is
-//! fed into its update session as an update over LoRa or BLE would be, and the node restarts into
-//! it, on trial: an image that does not come up healthy is rolled back. Only with a pinned root,
-//! since neither the server nor the neighbour is trusted. `fw update` does one such check now,
-//! whatever `fw.auto` says.
+//! A repeater that updates itself (`set fw.auto download|install`, this firmware's extension, off
+//! by default). With a working link to `fw.server` it asks its update store (see
+//! [`crate::fwshare`]) for a release newer than the build it runs, for its board, role and channel.
+//! Without one (no Wi-Fi, or the server out of reach), or when `fw.source` names a neighbour, it
+//! asks a neighbouring repeater over LoRa instead, as a companion does: one that hands updates on
+//! (`fw.serve on`) and so has the link this one lacks. That delta comes a piece at a time with
+//! pauses between, which leave the channel to the others, and the node keeps repeating meanwhile.
+//! Either way the delta is fed into its update session as an update over LoRa or BLE would be. In
+//! `install` mode the node then restarts into it, on trial: an image that does not come up healthy
+//! is rolled back. In `download` mode it waits for `fw install`. Only with a pinned root, since
+//! neither the server nor the neighbour is trusted. `fw check` and `fw update` do one check now,
+//! whatever the mode; `fw update` installs what it finds. Where it all stands: `fw`
+//! ([`crate::fwstate`]).
 
+use alloc::string::ToString;
 use core::cmp::Reverse;
 
 use super::*;
 use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, MAX_LORA_FILE, Offer, status};
+use crate::fwstate::{self, FwState, mode};
 use crate::ota::REQ_TYPE_OTA_COMMIT;
 
 /// The first check, a while after boot (the node has heard its neighbours by then), then twice a
@@ -54,18 +58,27 @@ enum Step {
     /// Over LoRa: waiting for the neighbour's answer to a query, or to the request for a piece.
     Ask,
     Get { offset: u32 },
+    /// Loaded and verified, waiting for `fw install`.
+    Ready,
     /// Loaded and verified, waiting for the neighbours this node hands an update on to.
     Install,
 }
 
+/// A check asked for by hand: `fw check` follows the mode once it has the update, `fw update`
+/// installs it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Hand {
+    Check,
+    Update,
+}
+
 pub(super) struct AutoUpdate {
-    status: String,
+    state: FwState,
     step: Step,
     at: u64,
     loader: Option<Loader>,
-    version: String,
-    /// `fw update`: one check that installs what it finds, whatever `fw.auto` says.
-    once: bool,
+    release: fwstate::Release,
+    by_hand: Option<Hand>,
     /// The neighbour asked over LoRa and the secret shared with it; the ones to ask if it does not
     /// answer (the best last); how many were asked this check.
     peer: Option<(Identity, Secret)>,
@@ -83,12 +96,12 @@ pub(super) struct AutoUpdate {
 impl AutoUpdate {
     pub(super) fn new() -> Self {
         Self {
-            status: String::new(),
+            state: FwState::Waiting { at: 0 },
             step: Step::Sleep,
             at: FIRST_CHECK_MS,
             loader: None,
-            version: String::new(),
-            once: false,
+            release: fwstate::Release::default(),
+            by_hand: None,
             peer: None,
             others: Vec::new(),
             asked: 0,
@@ -113,64 +126,147 @@ impl Repeater {
         u32::from_le_bytes([k[0], k[1], k[2], k[3]]) as u64 % 3_600_000
     }
 
-    /// Why it can't update itself, if it can't.
-    fn auto_blocked(&self) -> Option<&'static str> {
-        if !self.prefs.fw_auto && !self.autoupdate.once {
-            Some("off")
-        } else if self.ota.roots.is_empty() {
-            Some("needs a pinned root key (set ota.root)")
+    /// Why it can't check for updates now, if it can't.
+    pub(super) fn auto_blocked(&self) -> Option<FwState> {
+        if self.ota.roots.is_empty() {
+            Some(FwState::NoRoot)
         } else if self.ota.target.is_none() {
-            Some("no update slot")
+            Some(FwState::NoSlot)
+        } else if self.prefs.fw_mode == mode::OFF && self.autoupdate.by_hand.is_none() {
+            Some(FwState::Off)
         } else {
             None
         }
     }
 
     pub(super) fn auto_update_timer(&self) -> Option<u64> {
-        self.auto_blocked().is_none().then_some(self.autoupdate.at)
+        let waiting = matches!(self.autoupdate.step, Step::Ready);
+        (self.auto_blocked().is_none() && !waiting).then_some(self.autoupdate.at)
     }
 
-    /// `get fw.auto`.
-    pub(super) fn auto_update_status(&self) -> String {
-        let mode = if self.prefs.fw_auto { "on" } else { "off" };
-        match (self.auto_blocked(), self.autoupdate.status.as_str()) {
-            (Some(why), _) if self.prefs.fw_auto => format!("> on, but {why}"),
-            (Some(_), _) => "> off".into(),
-            (None, "") => format!("> {mode}, channel {}, waiting for the first check", release::channel_name(self.prefs.fw_channel)),
-            (None, s) => format!("> {mode}, channel {}: {s}", release::channel_name(self.prefs.fw_channel)),
+    /// `fw`: the release that runs, the channel and mode; where its update stands; on a node that
+    /// hands updates on, what its store holds.
+    pub(super) fn fw_reply(&self, ctx: &MeshCtx) -> String {
+        let mut s = fwstate::head(&self.board.build_date, self.prefs.fw_channel, self.prefs.fw_mode);
+        s.push('\n');
+        s.push_str(&self.fw_line(ctx));
+        if self.prefs.fw_serve && self.fw_store.is_some() {
+            s.push('\n');
+            s.push_str(if self.board.fw_store.is_empty() { "serves nothing yet" } else { &self.board.fw_store });
+        }
+        s
+    }
+
+    /// Where the node's own update stands (the trial after an update aside, see `fw_line`).
+    pub fn fw_state(&self) -> FwState {
+        match (self.auto_blocked(), &self.autoupdate.state) {
+            (Some(s @ (FwState::NoRoot | FwState::NoSlot)), _) => s,
+            // off, and nothing asked by hand yet: what was last found stays in view otherwise
+            (Some(FwState::Off), FwState::Waiting { .. }) => FwState::Off,
+            (_, s) => s.clone(),
         }
     }
 
-    /// `fw update`.
-    pub(super) fn auto_update_now(&mut self, ctx: &MeshCtx) -> String {
-        self.autoupdate.once = true;
-        if let Some(why) = self.auto_blocked() {
-            self.autoupdate.once = false;
-            return format!("Error: {why}");
+    /// The second line of `fw`.
+    fn fw_line(&self, ctx: &MeshCtx) -> String {
+        if let Some(until) = self.board.fw_trial_until.filter(|&t| t > ctx.now) {
+            return fwstate::trial_line((until - ctx.now) / 1000, &self.board.fw_prev);
         }
-        if self.autoupdate.step == Step::Sleep {
-            self.autoupdate.at = ctx.now;
-            // asked by hand: not what the store (or the neighbour's) last heard from the server
-            self.autoupdate.fresh = true;
-            if let Some(q) = self.own_query()
-                && let Some(store) = self.fw_store.as_deref_mut()
-            {
-                store.refresh(&q);
+        self.fw_state().line()
+    }
+
+    /// Start a check now (`fw check`, `fw update`): the reply says where it asks.
+    pub(super) fn fw_check_now(&mut self, ctx: &mut MeshCtx, update: bool) -> String {
+        if let Some(s @ (FwState::NoRoot | FwState::NoSlot)) = self.auto_blocked() {
+            return format!("Error: {}", s.line());
+        }
+        match self.autoupdate.step {
+            Step::Ready | Step::Install if update => return self.fw_install_now(ctx),
+            Step::Ready | Step::Install => return format!("OK - {}", self.fw_line(ctx)),
+            Step::Sleep => {}
+            // a check under way: from now on it installs what it finds
+            _ => {
+                if update {
+                    self.autoupdate.by_hand = Some(Hand::Update);
+                }
+                return format!("OK - {}", self.fw_line(ctx));
             }
         }
-        "OK - checking for an update; it installs itself and restarts (get fw.auto)".into()
+        self.autoupdate.by_hand = Some(if update { Hand::Update } else { Hand::Check });
+        self.autoupdate.at = ctx.now;
+        // asked by hand: not what the store (or the neighbour's) last heard from the server
+        self.autoupdate.fresh = true;
+        if let Some(q) = self.own_query()
+            && let Some(store) = self.fw_store.as_deref_mut()
+        {
+            store.refresh(&q);
+        }
+        let whom = if self.prefs.fw_source.is_empty() && self.fw_store.is_some() {
+            self.prefs.fw_server.clone()
+        } else if self.prefs.fw_source.is_empty() {
+            "the neighbours".into()
+        } else {
+            self.source_name()
+        };
+        if update {
+            format!("OK - asking {whom}; if there is an update the node installs it and is silent for 1-2 min")
+        } else {
+            format!("OK - asking {whom}, see fw")
+        }
     }
 
-    fn auto_sleep(&mut self, ctx: &MeshCtx, ms: u64, status: String) {
+    /// Switched on: check now rather than at the next due time.
+    pub(super) fn fw_check_soon(&mut self, ctx: &MeshCtx) {
+        if self.autoupdate.step == Step::Sleep {
+            self.autoupdate.at = ctx.now;
+        }
+    }
+
+    /// `fw install`: the update downloaded, now.
+    pub(super) fn fw_install_now(&mut self, ctx: &mut MeshCtx) -> String {
+        match self.autoupdate.step {
+            Step::Ready | Step::Install => {
+                let release = self.autoupdate.release.to_string();
+                self.auto_install(ctx, true);
+                match &self.autoupdate.state {
+                    FwState::Installing { .. } => format!("OK - installing {release}: restarting, silent for 1-2 min"),
+                    s => format!("Error: {}", s.line()),
+                }
+            }
+            Step::Load { .. } | Step::Get { .. } => format!("Error: not downloaded yet: {}", self.fw_line(ctx)),
+            _ => "Error: nothing downloaded: fw check first".into(),
+        }
+    }
+
+    /// The check is over until `ms` from now (nothing to do, or it failed), saying `state`.
+    fn auto_sleep(&mut self, ctx: &MeshCtx, ms: u64, state: FwState) {
         let a = &mut self.autoupdate;
         a.step = Step::Sleep;
         a.loader = None;
-        a.once = false;
+        a.by_hand = None;
         a.peer = None;
         a.others.clear();
         a.tag = 0;
-        a.status = status;
         a.at = ctx.now + ms;
+        a.state = state;
+    }
+
+    /// Not now: tried again in an hour, if the node checks by itself.
+    fn auto_fail(&mut self, ctx: &MeshCtx, why: String) {
+        let retry = self.next_check(ctx, RETRY_LATER_MS);
+        self.auto_sleep(ctx, RETRY_LATER_MS, FwState::Failed { why, retry });
+    }
+
+    /// Nothing newer: the next check in twelve hours or so.
+    fn auto_done(&mut self, ctx: &MeshCtx, state: FwState) {
+        let next = CHECK_EVERY_MS + Self::auto_jitter(ctx);
+        self.autoupdate.fresh = false;
+        self.auto_sleep(ctx, next, state);
+    }
+
+    /// When a check `ms` from now happens, by the wall clock; 0 if the node does not check by itself.
+    fn next_check(&self, ctx: &MeshCtx, ms: u64) -> u32 {
+        if self.prefs.fw_mode == mode::OFF { 0 } else { fwstate::wall(ctx.current_time(), ctx.now, ctx.now + ms) }
     }
 
     pub(super) fn auto_update_loop(&mut self, ctx: &mut MeshCtx) {
@@ -184,11 +280,17 @@ impl Repeater {
             Step::Ask => self.lora_query(ctx),
             Step::Get { .. } if self.autoupdate.tries >= PIECE_TRIES => {
                 let peer = self.peer_name();
-                self.auto_sleep(ctx, RETRY_LATER_MS, format!("failed: {peer} stopped answering"));
+                self.auto_fail(ctx, format!("{peer} stopped answering"));
             }
             Step::Get { offset } => self.lora_get(ctx, offset),
-            Step::Install => self.auto_install(ctx),
+            Step::Ready => {}
+            Step::Install => self.auto_install(ctx, false),
         }
+    }
+
+    /// The release a check found was rolled back on this node before: only a check by hand takes it.
+    fn skipped(&self, counter: u32) -> bool {
+        counter == self.board.fw_skip && self.autoupdate.by_hand.is_none()
     }
 
     fn auto_check(&mut self, ctx: &mut MeshCtx) {
@@ -197,31 +299,35 @@ impl Repeater {
             return;
         }
         let Some(q) = self.own_query() else {
-            return self.auto_sleep(ctx, RETRY_LATER_MS, "can't read this firmware's image".into());
+            return self.auto_fail(ctx, "can't read this firmware's image".into());
         };
         self.autoupdate.server_down = false;
         if self.prefs.fw_source.is_empty()
             && let Some(store) = self.fw_store.as_deref_mut()
         {
+            let server = self.prefs.fw_server.clone();
             match store.offer(&q) {
+                Offer::Ready { counter, version, .. } if counter > q.counter && self.skipped(counter) => {
+                    let release = fwstate::Release::new(&version, counter);
+                    return self.auto_done(ctx, FwState::Skipped { release });
+                }
                 Offer::Ready { len, id, counter, version } if counter > q.counter => {
-                    self.autoupdate.loader = Some(Loader::new(len, self.prefs.fw_channel));
-                    self.autoupdate.step = Step::Load { id, offset: 0 };
-                    self.autoupdate.status = format!("loading {version} #{counter}");
-                    self.autoupdate.version = version;
-                    self.autoupdate.at = ctx.now;
-                    self.autoupdate.fresh = false;
+                    let a = &mut self.autoupdate;
+                    a.loader = Some(Loader::new(len, self.prefs.fw_channel));
+                    a.step = Step::Load { id, offset: 0 };
+                    a.release = fwstate::Release::new(&version, counter);
+                    a.state = FwState::Downloading { release: a.release.clone(), from: server, done: 0, total: len };
+                    a.at = ctx.now;
+                    a.fresh = false;
                     return;
                 }
                 Offer::Fetching { retry_secs } => {
-                    self.autoupdate.status = "the update is being fetched".into();
+                    self.autoupdate.state = FwState::Asking { whom: server };
                     self.autoupdate.at = ctx.now + retry_secs as u64 * 1000;
                     return;
                 }
                 Offer::Ready { .. } | Offer::NoUpdate => {
-                    self.autoupdate.fresh = false;
-                    let next = CHECK_EVERY_MS + Self::auto_jitter(ctx);
-                    return self.auto_sleep(ctx, next, format!("up to date (checked {})", fmt_time(ctx.current_time())));
+                    return self.auto_done(ctx, FwState::UpToDate { whom: server, at: ctx.current_time() });
                 }
                 // no link to the server: a neighbour may have one
                 Offer::Unavailable => self.autoupdate.server_down = true,
@@ -267,12 +373,28 @@ impl Repeater {
             };
             match loader.feed(&mut self.ota, offset, &buf[..n]) {
                 Ok(Some(next)) => offset = next,
-                Ok(None) => return self.auto_install(ctx),
-                Err(why) => return self.auto_sleep(ctx, RETRY_LATER_MS, format!("failed: {why}")),
+                Ok(None) => return self.auto_loaded(ctx),
+                Err(why) => return self.auto_fail(ctx, why.into()),
             }
         }
         self.autoupdate.step = Step::Load { id, offset };
         self.autoupdate.at = ctx.now;
+        if let FwState::Downloading { done, .. } = &mut self.autoupdate.state {
+            *done = offset;
+        }
+    }
+
+    /// The whole update is in the session and checked: installed now, or when told.
+    fn auto_loaded(&mut self, ctx: &mut MeshCtx) {
+        if self.prefs.fw_mode == mode::INSTALL || self.autoupdate.by_hand == Some(Hand::Update) {
+            return self.auto_install(ctx, false);
+        }
+        let len = self.autoupdate.loader.as_ref().map_or(0, |l| l.file_len());
+        let a = &mut self.autoupdate;
+        a.step = Step::Ready;
+        a.by_hand = None;
+        a.peer = None;
+        a.state = FwState::Ready { release: a.release.clone(), len };
     }
 
     // ---------------------------------------------------- from a neighbour, over LoRa
@@ -298,22 +420,24 @@ impl Repeater {
     /// so the check is over until the next one (a later release may have a small delta from this
     /// image).
     fn lora_too_large(&mut self, ctx: &mut MeshCtx, len: u32) {
-        self.autoupdate.fresh = false;
-        let next = CHECK_EVERY_MS + Self::auto_jitter(ctx);
         let (kb, max) = (len.div_ceil(1024), self.lora_max_file() / 1024);
-        self.auto_sleep(ctx, next, format!("the update is {kb} KB, more than this node takes over LoRa ({max} KB): install it over USB"));
+        let how = if self.board.ble_ota_name.is_some() { "fw ble or USB" } else { "USB" };
+        let retry = self.next_check(ctx, CHECK_EVERY_MS);
+        let why = format!("the update is {kb} KB, more than this node takes over LoRa ({max} KB): install it with {how}");
+        self.auto_done(ctx, FwState::Failed { why, retry });
     }
 
     /// The next neighbour to ask, or the check is over.
     fn lora_next(&mut self, ctx: &mut MeshCtx) {
         let Some(id) = self.autoupdate.others.pop() else {
-            let server = if self.autoupdate.server_down { "the release server can't be reached, and " } else { "" };
+            let server =
+                if self.autoupdate.server_down { format!("{} not reachable, ", self.prefs.fw_server) } else { String::new() };
             let why = match (self.autoupdate.asked, self.prefs.fw_source.is_empty()) {
                 (0, true) => format!("{server}no repeater heard directly to ask"),
-                (0, false) => format!("{server}{} not heard lately", to_hex(&self.prefs.fw_source)),
+                (0, false) => format!("{server}{} not heard lately", self.source_name()),
                 _ => format!("{server}no neighbour hands updates on (fw.serve)"),
             };
-            return self.auto_sleep(ctx, RETRY_LATER_MS, why);
+            return self.auto_fail(ctx, why);
         };
         let Some(secret) = ctx.self_id.calc_shared_secret(&id.pub_key) else {
             return self.lora_next(ctx);
@@ -325,9 +449,50 @@ impl Repeater {
         self.lora_query(ctx);
     }
 
-    /// The neighbour asked, for people: the start of its key.
+    /// The name a neighbour whose key starts with `key` advertised, if it is heard.
+    fn neighbour_named(&self, key: &[u8]) -> Option<String> {
+        self.neighbours.iter().find(|n| n.id.pub_key.starts_with(key) && !n.name.is_empty()).map(|n| n.name.clone())
+    }
+
+    /// A neighbour, for people: its name if it advertised one, else the start of its key.
+    fn neighbour_name(&self, key: &[u8]) -> String {
+        self.neighbour_named(key).unwrap_or_else(|| to_hex(&key[..key.len().min(4)]))
+    }
+
+    /// `fw.source`, for people: `PKIO (CE5B9348)`, or the start of the key alone.
+    pub(super) fn fw_source_label(&self) -> String {
+        let key = &self.prefs.fw_source;
+        let hex = to_hex(&key[..key.len().min(4)]);
+        self.neighbour_named(key).map_or_else(|| hex.clone(), |n| format!("{n} ({hex})"))
+    }
+
+    /// `fw`, `fw check`, `fw update`, `fw install`, `fw rollback`.
+    pub(super) fn handle_fw_command(&mut self, ctx: &mut MeshCtx, cmd: &str) -> Option<String> {
+        Some(match cmd {
+            "fw" => self.fw_reply(ctx),
+            "fw check" => self.fw_check_now(ctx, false),
+            "fw update" => self.fw_check_now(ctx, true),
+            "fw install" => self.fw_install_now(ctx),
+            "fw rollback" if !self.board.fw_rollback => "Error: no previous firmware on this node".into(),
+            "fw rollback" => {
+                self.effects.fw_rollback = true;
+                match self.board.fw_prev.as_str() {
+                    "" => "OK - back to the previous firmware: restarting".into(),
+                    prev => format!("OK - back to {prev}: restarting"),
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    /// The neighbour asked.
     fn peer_name(&self) -> String {
-        self.autoupdate.peer.as_ref().map_or_else(|| "the neighbour".into(), |(id, _)| to_hex(&id.pub_key[..4]))
+        self.autoupdate.peer.as_ref().map_or_else(|| "the neighbour".into(), |(id, _)| self.neighbour_name(&id.pub_key))
+    }
+
+    /// The neighbour `fw.source` names.
+    fn source_name(&self) -> String {
+        self.neighbour_name(&self.prefs.fw_source)
     }
 
     /// Send FW request `kind` to the neighbour, zero-hop, its answer due back the same way.
@@ -352,12 +517,12 @@ impl Repeater {
 
     fn lora_query(&mut self, ctx: &mut MeshCtx) {
         let Some(mut q) = self.own_query() else {
-            return self.auto_sleep(ctx, RETRY_LATER_MS, "can't read this firmware's image".into());
+            return self.auto_fail(ctx, "can't read this firmware's image".into());
         };
         q.fresh = self.autoupdate.fresh;
         self.autoupdate.step = Step::Ask;
-        if self.autoupdate.tries == 0 {
-            self.autoupdate.status = format!("asking {}", self.peer_name());
+        if self.autoupdate.tries == 0 && !matches!(self.autoupdate.state, FwState::Fetching { .. }) {
+            self.autoupdate.state = FwState::Asking { whom: self.peer_name() };
         }
         if !self.lora_send(ctx, crate::fwshare::ANON_REQ_TYPE_FW_QUERY, &q.to_bytes()) {
             self.lora_next(ctx);
@@ -371,7 +536,7 @@ impl Repeater {
         req.extend_from_slice(&offset.to_le_bytes());
         req.push(len);
         if !self.lora_send(ctx, crate::fwshare::ANON_REQ_TYPE_FW_GET, &req) {
-            self.auto_sleep(ctx, RETRY_LATER_MS, "failed: can't reach the neighbour".into());
+            self.auto_fail(ctx, "can't reach the neighbour".into());
         }
     }
 
@@ -394,25 +559,26 @@ impl Repeater {
                 let len = read_u32(body, 0);
                 let counter = read_u32(body, 8);
                 let vlen = (body[12] as usize).min(body.len() - 13);
+                let release = fwstate::Release::new(&String::from_utf8_lossy(&body[13..13 + vlen]), counter);
+                if self.skipped(counter) {
+                    self.auto_done(ctx, FwState::Skipped { release });
+                    return true;
+                }
                 let a = &mut self.autoupdate;
                 a.fresh = false;
                 a.file_id = read_u32(body, 4);
-                a.version = String::from_utf8_lossy(&body[13..13 + vlen]).into_owned();
                 a.loader = Some(Loader::new(len, self.prefs.fw_channel));
-                a.status = format!("loading {} #{counter} from {peer}: 0 of {len} bytes", a.version);
+                a.state = FwState::Downloading { release: release.clone(), from: peer, done: 0, total: len };
+                a.release = release;
                 self.lora_get(ctx, 0);
             }
             (Step::Ask, status::FETCHING) => {
                 // asked again when it should have it
                 let secs = body.get(..2).map_or(60, |b| u16::from_le_bytes([b[0], b[1]])).clamp(10, 900);
-                self.autoupdate.status = format!("{peer} is fetching the update");
+                self.autoupdate.state = FwState::Fetching { whom: peer };
                 self.autoupdate.at = ctx.now + secs as u64 * 1000;
             }
-            (Step::Ask, status::NONE) => {
-                self.autoupdate.fresh = false;
-                let next = CHECK_EVERY_MS + Self::auto_jitter(ctx);
-                self.auto_sleep(ctx, next, format!("up to date (checked {} with {peer})", fmt_time(ctx.current_time())));
-            }
+            (Step::Ask, status::NONE) => self.auto_done(ctx, FwState::UpToDate { whom: peer, at: ctx.current_time() }),
             // it can't get updates now: the next neighbour
             (Step::Ask, _) => self.lora_next(ctx),
             (Step::Get { offset }, status::READY) if body.len() > 4 && read_u32(body, 0) == offset => {
@@ -423,14 +589,14 @@ impl Repeater {
                 self.autoupdate.loader = None;
                 self.lora_query(ctx);
             }
-            (Step::Get { .. }, _) => self.auto_sleep(ctx, RETRY_LATER_MS, format!("failed: {peer} could not send the update")),
+            (Step::Get { .. }, _) => self.auto_fail(ctx, format!("{peer} could not send the update")),
             _ => {}
         }
         true
     }
 
     /// A piece of the file at `offset`, fed to the update session; the next one is asked for after
-    /// a pause, or the update is installed.
+    /// a pause, or the update is in.
     fn lora_piece(&mut self, ctx: &mut MeshCtx, offset: u32, piece: &[u8]) {
         let Some(loader) = self.autoupdate.loader.as_mut() else {
             return;
@@ -439,31 +605,31 @@ impl Repeater {
             self.autoupdate.at = ctx.now + PIECE_GAP_MS; // cut short: asked for again
             return;
         }
-        let total = loader.file_len();
         match loader.feed(&mut self.ota, offset, piece) {
             Ok(Some(next)) => {
                 let a = &mut self.autoupdate;
                 a.step = Step::Get { offset: next };
                 a.at = ctx.now + PIECE_GAP_MS;
-                if let Some(at) = a.status.rfind(": ") {
-                    a.status.truncate(at);
+                if let FwState::Downloading { done, .. } = &mut a.state {
+                    *done = next;
                 }
-                a.status = format!("{}: {next} of {total} bytes", a.status);
             }
-            Ok(None) => self.auto_install(ctx),
-            Err(why) => self.auto_sleep(ctx, RETRY_LATER_MS, format!("failed: {why}")),
+            Ok(None) => self.auto_loaded(ctx),
+            Err(why) => self.auto_fail(ctx, why.into()),
         }
     }
 
-    fn auto_install(&mut self, ctx: &mut MeshCtx) {
-        let version = self.autoupdate.version.clone();
+    /// Restart into the update, unless a neighbour is loading one from this node (`now`: asked by
+    /// hand, it does not wait for that).
+    fn auto_install(&mut self, ctx: &mut MeshCtx, now: bool) {
+        let release = self.autoupdate.release.clone();
         // a neighbour loading an update from this node would lose it to the restart
         let serving_until = self.fw_served_at.map_or(0, |t| t + fwshare::STORE_IDLE_SECS * 1000);
-        if ctx.now < serving_until {
+        if ctx.now < serving_until && !now {
             let a = &mut self.autoupdate;
             a.step = Step::Install;
             a.at = ctx.now + INSTALL_WAIT_MS;
-            a.status = format!("{version} is ready: it installs once a neighbour has loaded its update from this node");
+            a.state = FwState::Held { release };
             return;
         }
         let source = match &self.autoupdate.peer {
@@ -478,8 +644,8 @@ impl Repeater {
             a.loader = None;
             a.peer = None;
             a.at = u64::MAX;
-            a.status = format!("installing {version} from {source}");
-            self.console(format!("fw: installing {version} from {source}"));
+            self.console(format!("fw: installing {release} from {source}"));
+            self.autoupdate.state = FwState::Installing { release };
             self.ota_outcome(outcome);
             return;
         }
@@ -487,6 +653,6 @@ impl Repeater {
             OtaOutcome::CommitFailed(line) => line,
             _ => String::from(crate::fwshare::refusal(reply.and_then(|r| r.first().copied()).unwrap_or(0))),
         };
-        self.auto_sleep(ctx, RETRY_LATER_MS, format!("failed: {why}"));
+        self.auto_fail(ctx, why);
     }
 }

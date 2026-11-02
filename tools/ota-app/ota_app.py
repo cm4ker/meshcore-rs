@@ -18,8 +18,8 @@ image is in the image store (--images, by default the board's firmware/models/<b
 bsdiff patch is sent (tools/ota-delta). Every image sent is added to the store.
 
 Signed releases: give the release's `.mcfw` file (tools/ota-sign) instead of the `.bin`; its
-envelope goes first. A device that pins a root key (`ota_root` custom variable on a companion,
-`set ota.root` on a repeater) only takes an image that key signed.
+envelope goes first. A device that pins a root key (`fw_root` custom variable on a companion,
+`set fw.root` on a repeater) only takes an image that key signed.
 """
 
 import argparse
@@ -327,12 +327,12 @@ async def main():
             link = None
             if args.ble and repeater:
                 sys.exit("a repeater's BLE window closes when it reboots, so this link cannot tell whether the "
-                         "image took: check `ver` and `ota info` on its console or over LoRa")
+                         "image took: check `ver` and `fw` on its console or over LoRa")
             log("asking again after the reboot")
             got = await running_sha8(args)
             if got is None:
                 sys.exit("the device did not come back on this link (a repeater's BLE window closes when it "
-                         "reboots): check `ver` and `ota info` on its console or over LoRa")
+                         "reboots): check `ver` and `fw` on its console or over LoRa")
             if got != sha[:8]:
                 sys.exit(f"the device runs {got.hex()}..., not the new image: the update did not take")
             store_image(images, image)

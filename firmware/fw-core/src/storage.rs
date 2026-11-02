@@ -30,7 +30,8 @@ pub enum Blob {
     Acl = 2,
     /// Last known wall-clock time (u32 LE), so adverts keep increasing across power cycles.
     Clock = 3,
-    /// Pending firmware trial `[slot, previous slot, boots]` (see `ota.rs`).
+    /// Firmware slots: a pending trial `[slot, previous slot, boots]`, the release rolled back
+    /// from, the name of the other slot's firmware (see the ESP crate's `ota.rs`).
     OtaTrial = 4,
     /// Region map (text form, see `meshcore::region`).
     Regions = 5,
