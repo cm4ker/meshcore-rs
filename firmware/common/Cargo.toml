@@ -24,6 +24,10 @@ embedded-hal = "1.0"
 embedded-io-async = "0.7.0"
 critical-section = "1.2.0"
 static_cell = "2.1.1"
+# the Wi-Fi OTA access point's DHCP server (wifi_ota)
+edge-dhcp = "0.8"
+edge-nal = "0.7"
+edge-nal-embassy = "0.9"
 libm = "0.2.16"
 heapless = "0.9"
 # patched copy in ../vendor/trouble-host (fixed passkey), see the board crates' [patch.crates-io]

@@ -7,6 +7,7 @@
 extern crate alloc;
 
 pub mod ble;
+pub mod broker;
 pub mod clock_cell;
 pub mod espnow;
 pub mod fwstore;
@@ -19,5 +20,6 @@ pub mod radio;
 pub mod reset;
 pub mod storage;
 pub mod usb;
+pub mod wifi_ota;
 
 pub use meshcore_fw_core::{fwtext, lr2021, noise, sx1262};

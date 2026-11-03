@@ -2027,6 +2027,9 @@ name = "meshcore-fw"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "edge-dhcp",
+ "edge-nal",
+ "edge-nal-embassy",
  "embassy-executor",
  "embassy-futures",
  "embassy-net",
