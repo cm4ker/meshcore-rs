@@ -61,7 +61,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
+      # espup asks the GitHub API for the newest Xtensa Rust: with the token, not the runners'
+      # shared anonymous limit, which runs out ("rate limit exceeded")
       - uses: esp-rs/xtensa-toolchain@67649b28a0139171102259d9982f93106aa2b54a # v1.6.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           default: true
           buildtargets: esp32s3
