@@ -1400,7 +1400,9 @@ mod tests {
 
         let mut patch = Vec::new();
         bsdiff::diff(&old, &new, &mut patch).unwrap();
-        let packed = miniz_oxide::deflate::compress_to_vec_zlib(&patch, 9);
+        // deflated by zopfli, as ota-sign does
+        let mut packed = Vec::new();
+        zopfli::compress(zopfli::Options::default(), zopfli::Format::Zlib, patch.as_slice(), &mut packed).unwrap();
         assert!(packed.len() < new.len() / 10, "delta {} vs image {}", packed.len(), new.len());
         let sha: [u8; 32] = Sha256::digest(&new).into();
 

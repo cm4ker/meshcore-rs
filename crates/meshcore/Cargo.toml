@@ -18,3 +18,4 @@ sha2 = { version = "0.11.1", default-features = false }
 bsdiff = "0.2.1"
 hex = "0.4.3"
 miniz_oxide = { version = "0.9.1", features = ["with-alloc"] }
+zopfli = { version = "0.8.4", default-features = false, features = ["std", "zlib"] }

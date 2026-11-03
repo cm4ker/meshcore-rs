@@ -1,5 +1,5 @@
 # Every push and pull request runs the tests and builds every board's image (kept as the run's
-# artifacts). Started by hand with a version, the run is a release: the images are packed into
+# artifacts), and reports the deltas a release of them would have (tools/delta-report). Started by hand with a version, the run is a release: the images are packed into
 # signed .mcfw files (tools/ota-sign) and published as a GitHub release. Devices that pin the root
 # key's fingerprint (`set fw.root` on a repeater, the `fw_root` custom variable on a companion)
 # install only images this workflow signed; whoever delivers them, nw.ommesh.ru included, can't
@@ -154,6 +154,26 @@ jobs:
             *.uf2
             *.content
 
+  # The deltas a release of this build would have, from the newest release and the newest stable
+  # one, in the run's summary; a warning for each over the budget or the LoRa limit. A delta grows
+  # with every change until the next release: one over the budget is worth a release before more
+  # goes in. A release lists its own deltas (below).
+  deltas:
+    name: Deltas from the last release
+    if: github.event_name != 'workflow_dispatch'
+    needs: [esp32s3, esp32c6, nrf52840]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: images
+          merge-multiple: true
+      - run: cargo build --locked --release -p ota-sign
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/delta-report/delta_report.py images/*.bin
+
   release:
     name: Sign and publish
     if: github.event_name == 'workflow_dispatch'
@@ -236,7 +256,7 @@ jobs:
           set -euo pipefail
           sign=target/release/ota-sign
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
-          # What a node takes over LoRa: at most meshcore::fwshare::MAX_LORA_FILE, and on a Pro Micro
+          # What a node takes over LoRa by itself: at most meshcore::fwshare::MAX_LORA_FILE, and on a Pro Micro
           # what its staging area (0x7B000..0xD9000, firmware/models/promicro/src/ota.rs) holds next
           # to the image the delta rebuilds
           lora_max=163840
@@ -284,7 +304,7 @@ jobs:
               mark=""
               if [ "$size" -gt "$room" ]; then
                 mark=" (over the LoRa limit, $((room / 1024)) KB)"
-                echo "::warning title=Delta over the LoRa limit::$name from $tag is $((size / 1024)) KB, more than $((room / 1024)) KB: nodes on $tag take it over Wi-Fi, USB or BLE only, not from a neighbour over LoRa"
+                echo "::warning title=Delta over the LoRa limit::$name from $tag is $((size / 1024)) KB, more than $((room / 1024)) KB: nodes on $tag don't take it from a neighbour over LoRa by themselves, only over Wi-Fi, USB or BLE, or by hand (fw update) where $tag has that"
               fi
               echo "| $name | $tag | $((size / 1024)) KB$mark |" >> deltas.md
             done
