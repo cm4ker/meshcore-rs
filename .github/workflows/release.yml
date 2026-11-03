@@ -9,7 +9,7 @@
 # Its fingerprint is published with every release (root.txt).
 #
 # The actions are pinned by commit: the toolchain action's code runs where the signed images are
-# built. Releases are made from master only.
+# built. Releases are made from master only (and on this branch, bridge-0.8.2, from it).
 #
 # A release carries only the boards and roles whose code changed, so the others don't update for
 # nothing. Each image is built once more with no release number and a fixed date (MCFW_COUNTER=0,
@@ -175,7 +175,8 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$MCFW_ROOT_KEY" || { echo "the MCFW_ROOT_KEY secret is not set"; exit 1; }
-          test "$GITHUB_REF" = refs/heads/master || { echo "releases are made from master only, not $GITHUB_REF"; exit 1; }
+          # and from bridge-0.8.2, 0.8.2.1 (0.8.2 and the fix that lets 0.8.3 in)
+          [[ "$GITHUB_REF" = refs/heads/master || "$GITHUB_REF" = refs/heads/bridge-0.8.2 ]] || { echo "releases are made from master only, not $GITHUB_REF"; exit 1; }
           [[ "$MCFW_VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]] || { echo "version '$MCFW_VERSION': letters, digits, '.', '+' and '-' only"; exit 1; }
           # devices never install a lower counter than they run: one far ahead (a typo such as
           # 4294967295) would leave them refusing every later release, until a USB update
