@@ -22,7 +22,7 @@ name: build and release
 
 on:
   push:
-    branches: [master]
+    branches: [master, bridge-0.8.2]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -247,7 +247,9 @@ jobs:
             esac
           }
           printf '| delta | from | size |\n|---|---|---|\n' > deltas.md
-          tags=$(gh release list --limit 30 --exclude-drafts --json tagName -q '.[].tagName')
+          # bridge-0.8.2: 0.8.2 and a fix, for the devices that run a stable release; none from a dev
+          # one (0.8.3-dev.*), whose devices would go back to 0.8.2 with it
+          tags=$(gh release list --limit 30 --exclude-drafts --exclude-pre-releases --json tagName -q '.[].tagName')
           stable_tags=" $(gh release list --limit 30 --exclude-drafts --exclude-pre-releases --json tagName -q '.[].tagName' | tr '\n' ' ') "
           declare -A assets
           for tag in $tags; do
@@ -303,6 +305,6 @@ jobs:
               echo "Left out, the same code as in $(cat prev-tag.txt): $(paste -sd, unchanged.txt | sed 's/,/, /g'). Those devices keep what they run; content.txt lists the code of every board and role."
             fi
           } > notes.md
-          gh release create "v$MCFW_VERSION-r$MCFW_COUNTER" out/* $prerelease \
+          gh release create "v$MCFW_VERSION-r$MCFW_COUNTER" out/* $prerelease --target "$GITHUB_SHA" \
             --title "$MCFW_VERSION (release #$MCFW_COUNTER, $MCFW_CHANNEL)" \
             --notes-file notes.md

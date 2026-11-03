@@ -246,9 +246,11 @@ impl Repeater {
         })
     }
 
-    /// The largest update this node takes over LoRa: what its slot holds, at most the ceiling.
+    /// The largest update this node takes over LoRa: what its slot holds, by itself at most the
+    /// ceiling (`fw update` takes more, and holds the channel longer).
     fn lora_max_file(&mut self) -> u32 {
-        self.ota.delta_room().min(MAX_LORA_FILE)
+        let room = self.ota.delta_room();
+        if self.autoupdate.once { room } else { room.min(MAX_LORA_FILE) }
     }
 
     fn auto_load(&mut self, ctx: &mut MeshCtx, id: u32, mut offset: u32) {
@@ -296,12 +298,20 @@ impl Repeater {
 
     /// The update's delta is larger than this node takes over LoRa: no neighbour can hand it on,
     /// so the check is over until the next one (a later release may have a small delta from this
-    /// image).
+    /// image). One over the ceiling only comes with `fw update`.
     fn lora_too_large(&mut self, ctx: &mut MeshCtx, len: u32) {
         self.autoupdate.fresh = false;
         let next = CHECK_EVERY_MS + Self::auto_jitter(ctx);
-        let (kb, max) = (len.div_ceil(1024), self.lora_max_file() / 1024);
-        self.auto_sleep(ctx, next, format!("the update is {kb} KB, more than this node takes over LoRa ({max} KB): install it over USB"));
+        let (kb, room) = (len.div_ceil(1024), self.ota.delta_room());
+        let why = if len > room {
+            format!("the update is {kb} KB, more than this node takes over LoRa ({} KB): install it over USB", room / 1024)
+        } else if !self.autoupdate.once {
+            format!("the update is {kb} KB, over the {} KB a node takes over LoRa by itself: fw update takes it", MAX_LORA_FILE / 1024)
+        } else {
+            // asked by hand: the neighbour runs firmware that hands on no more than the ceiling
+            format!("the update is {kb} KB, more than {} hands on over LoRa: install it over USB", self.peer_name())
+        };
+        self.auto_sleep(ctx, next, why);
     }
 
     /// The next neighbour to ask, or the check is over.

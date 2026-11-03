@@ -63,9 +63,10 @@ pub mod status {
     pub const TOO_LARGE: u8 = 6;
 }
 
-/// The largest update file any node takes over LoRa: 160 KB keeps the shared channel busy for
-/// some 1.5 hours near the two nodes at SF7/62.5 kHz. A node with less room for an update asks for
-/// less ([`FwQuery::max_file`]; a Pro Micro about 60 KB).
+/// The largest update file a node takes over LoRa by itself: 160 KB keeps the shared channel busy
+/// for some 1.5 hours near the two nodes at SF7/62.5 kHz. Asked by hand (`fw update`), it takes
+/// what its update slot holds; a node with less room asks for less ([`FwQuery::max_file`]; a Pro
+/// Micro about 60 KB). A query from older firmware, which doesn't say, gets this much.
 pub const MAX_LORA_FILE: u32 = 160 * 1024;
 
 /// What a companion asks for: an update for its board and role, from the image it runs.
@@ -85,7 +86,8 @@ pub struct FwQuery {
     /// zeroes for none.
     pub owner8: [u8; 8],
     /// The largest update file the node takes: what its update slot holds next to the image it
-    /// rebuilds, at most [`MAX_LORA_FILE`] (a query without it, from older firmware, gets that).
+    /// rebuilds, by itself at most [`MAX_LORA_FILE`] (a query without it, from older firmware,
+    /// gets that).
     pub max_file: u32,
 }
 
@@ -115,8 +117,8 @@ impl FwQuery {
     }
 
     /// A query; without the channel byte (the first version of the request), stable, without the
-    /// owner (older companions), none, and without the largest file (older firmware), the
-    /// ceiling. The datagram's zero padding reads the same.
+    /// owner (older companions), none, and without the largest file (older firmware),
+    /// [`MAX_LORA_FILE`]. The datagram's zero padding reads the same.
     pub fn parse(b: &[u8]) -> Option<Self> {
         let f = b.get(..18)?;
         Some(Self {
@@ -132,7 +134,7 @@ impl FwQuery {
                 .get(27..31)
                 .map(|m| u32::from_le_bytes(m.try_into().unwrap()))
                 .filter(|&m| m != 0)
-                .map_or(MAX_LORA_FILE, |m| m.min(MAX_LORA_FILE)),
+                .unwrap_or(MAX_LORA_FILE),
         })
     }
 }
@@ -378,7 +380,7 @@ pub fn answer(store: &mut dyn FwStore, kind: u8, data: &[u8], reply: &mut Vec<u8
             }
             match store.offer(&q) {
                 Offer::Ready { counter, .. } if counter <= q.counter => reply.push(status::NONE),
-                Offer::Ready { len, .. } if len > q.max_file.min(MAX_LORA_FILE) => {
+                Offer::Ready { len, .. } if len > q.max_file => {
                     reply.push(status::TOO_LARGE);
                     reply.extend_from_slice(&len.to_le_bytes());
                 }
@@ -595,9 +597,9 @@ mod tests {
         assert_eq!(pick_slot(&[Some(idle), Some(idle - 50)], 1000), Some(1), "the one idle longest");
     }
 
-    /// A delta larger than LoRa carries is not offered: the asker learns its size instead.
+    /// A delta larger than the asker takes is not offered: it learns the size instead.
     #[test]
-    fn a_delta_over_the_lora_limit_is_not_handed_on() {
+    fn a_delta_larger_than_the_asker_takes_is_not_handed_on() {
         let env = release_envelope(5, b"new image");
         let mut base_sha = [0u8; 32];
         crate::crypto::sha256(&mut base_sha, &[b"old image".as_slice()]);
@@ -618,6 +620,14 @@ mod tests {
         assert!(answer(&mut store, ANON_REQ_TYPE_FW_QUERY, &q.to_bytes(), &mut r));
         assert_eq!(r[0], status::TOO_LARGE);
         assert_eq!(u32::from_le_bytes(r[1..5].try_into().unwrap()), file.len() as u32);
+        // nor to older firmware, which doesn't say what it takes
+        let mut r = Vec::new();
+        answer(&mut store, ANON_REQ_TYPE_FW_QUERY, &q.to_bytes()[..27], &mut r);
+        assert_eq!(r[0], status::TOO_LARGE);
+        // asked by hand, with room for it: offered
+        let mut r = Vec::new();
+        answer(&mut store, ANON_REQ_TYPE_FW_QUERY, &FwQuery { max_file: 1024 * 1024, ..q }.to_bytes(), &mut r);
+        assert_eq!(r[0], status::READY);
 
         // a 70 KB delta: fine for a node with room, too large for one that asks for 60 KB at most
         let file = delta_file(&env, 9, &base_sha, &alloc::vec![0xAB; 70 * 1024]);

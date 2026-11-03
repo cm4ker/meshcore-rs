@@ -1586,6 +1586,42 @@ fn a_delta_larger_than_the_node_takes_is_not_pulled() {
     assert!(!slot.borrow().1);
 }
 
+/// A delta over the ceiling, with room for it: a check by itself leaves it, `fw update` takes it.
+#[test]
+fn a_repeater_takes_a_delta_over_the_ceiling_only_by_hand() {
+    use meshcore::release::{board, role};
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&[1u8; 3000]);
+    let mut x = 1u32;
+    let noise: Vec<u8> = (0..170_000)
+        .map(|_| {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (x >> 16) as u8
+        })
+        .collect();
+    let image = esp_image(&noise);
+    let file = delta_release_for(&root, board::HELTEC_V4, role::REPEATER, 0, 5, &base, &image);
+    assert!(file.len() as u32 > meshcore::fwshare::MAX_LORA_FILE, "{} bytes", file.len());
+
+    let mut serving = serving_repeater(file.clone());
+    let (mut r, slot) = self_updating_repeater(3, &root, &base);
+    slot.borrow_mut().0 = vec![0u8; 512 * 1024];
+    r.app.fw_store = Some(Box::new(Offline));
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut serving, &mut r], 15 * 60_000); // the first check by itself, 10 minutes after boot
+    let kb = (file.len() as u32).div_ceil(1024);
+    let status = r.app.handle_command(&mut r.ctx, 0, "get fw.auto");
+    let why = format!("the update is {kb} KB, over the 160 KB a node takes over LoRa by itself: fw update takes it");
+    assert!(status.ends_with(&why), "{status}");
+    assert!(!slot.borrow().1);
+
+    assert!(r.app.handle_command(&mut r.ctx, 0, "fw update").starts_with("OK"));
+    air.run(&mut [&mut serving, &mut r], 4 * 3_600_000);
+    assert!(r.app.take_effects().reboot, "installed: restarting into it");
+    assert_eq!(&slot.borrow().0[..image.len()], &image[..], "the slot holds the release's image");
+}
+
 /// A store holding two files, as a repeater's does: its own update and a neighbour's.
 struct TwoFiles(meshcore::fwshare::MemStore, meshcore::fwshare::MemStore);
 
