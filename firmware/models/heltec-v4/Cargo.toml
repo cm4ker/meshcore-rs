@@ -1,3 +1,5 @@
+cargo-features = ["panic-immediate-abort"]
+
 [package]
 edition      = "2024"
 name         = "heltec-v4"
@@ -73,7 +75,11 @@ opt-level = "s"
 codegen-units = 1     # LLVM can perform better optimizations using a single thread
 debug         = 2     # prefer slower builds but better debugging experience
 lto           = 'fat'
-opt-level     = 's'
+opt-level     = 'z'
+# strips panic fmt/unwind glue across the generic code (~136 KB flash, ~64 KB RAM); panics become a
+# bare abort/reset with no esp-backtrace dump. [profile.dev] keeps the default so dev builds still
+# print backtraces. Needs the nightly `cargo-features` opt-in above.
+panic         = 'immediate-abort'
 
 [patch.crates-io]
 # fixed BLE passkey support, see ../../vendor/README.md
