@@ -61,8 +61,6 @@ edge-nal = "0.7"
 edge-nal-embassy = "0.9"
 ssd1306 = "0.10"
 embedded-graphics = "0.8"
-embedded-tls = { version = "0.19", default-features = false, features = ["log", "rsa", "p384"] }
-rand_core = { version = "0.6", default-features = false }
 
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html

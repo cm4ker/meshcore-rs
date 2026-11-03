@@ -227,7 +227,9 @@ pub const BLE_OTA_WINDOW_MINS: u32 = 15;
 /// Frames waiting for the bridge's medium; more are dropped (the firmware drains it every pass).
 const BRIDGE_QUEUE_MAX: usize = 16;
 
-pub const MQTT_BROKERS: [(&str, u8); 4] = [("meshcoretel", 0x01), ("letsmesh-eu", 0x02), ("letsmesh-us", 0x04), ("ommesh", 0x08)];
+// letsmesh-eu/us (bits 0x02/0x04) were wss-only and dropped when TLS was removed; the bit values
+// stay as in the C++ firmware so saved prefs keep their meaning.
+pub const MQTT_BROKERS: [(&str, u8); 2] = [("meshcoretel", 0x01), ("ommesh", 0x08)];
 
 /// Live board values the firmware keeps up to date.
 #[derive(Clone, Debug, Default)]

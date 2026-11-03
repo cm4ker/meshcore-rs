@@ -74,7 +74,8 @@ pub struct NodePrefs {
     pub wifi_pwd: String,
     /// MQTT observer: region code in topics; `UNSET` disables publishing.
     pub mqtt_iata: String,
-    /// Enabled brokers, bits as in the C++ firmware: 1 meshcoretel, 2/4 letsmesh eu/us, 8 ommesh.
+    /// Enabled brokers, bits as in the C++ firmware: 1 meshcoretel, 8 ommesh (2/4 letsmesh eu/us
+    /// were wss-only and dropped with TLS; the bits stay reserved).
     pub mqtt_brokers: u8,
     pub mqtt_packets: bool,
     pub mqtt_tx: bool,

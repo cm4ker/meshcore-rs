@@ -41,7 +41,7 @@ pub static TIME_SYNCED: AtomicBool = AtomicBool::new(false);
 /// SNTP time minus uptime, in seconds (0 until the first sync).
 static EPOCH_AT_BOOT: AtomicU32 = AtomicU32::new(0);
 /// Per broker (index into `meshcore::repeater::MQTT_BROKERS`): see [`BrokerState`].
-pub static BROKER_STATE: [AtomicU8; 4] = [const { AtomicU8::new(0) }; 4];
+pub static BROKER_STATE: [AtomicU8; 2] = [const { AtomicU8::new(0) }; 2];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]

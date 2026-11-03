@@ -779,7 +779,6 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
                 index: 0,
                 host: "meshcoretel.ru",
                 port: 1883,
-                transport: broker::Transport::Tcp,
                 user: "meshcore".into(),
                 password: broker::Credential::Fixed("meshcore"),
                 client_id: alloc::format!("mqtt_meshcoretel-{}", &device_id[..6]),
@@ -787,30 +786,22 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
                 will: will.clone(),
             });
         }
-        // the WSS brokers share the JWT scheme: user `v1_<KEY>`, token minted per connection
-        let wss: [(usize, &'static str, &'static [&'static [u8]]); 3] = [
-            (1, "mqtt-eu-v1.letsmesh.net", broker::GTS_ROOTS),
-            (2, "mqtt-us-v1.letsmesh.net", broker::GTS_ROOTS),
-            (3, "agent.ommesh.ru", broker::ISRG_ROOTS),
-        ];
-        let non_empty = |s: &str| (!s.is_empty()).then(|| alloc::string::String::from(s));
-        for (index, host, roots) in wss {
-            let (name, bit) = meshcore::repeater::MQTT_BROKERS[index];
-            if mesh.app.prefs.mqtt_brokers & bit == 0 {
-                continue;
-            }
+        // ommesh over plain TCP, JWT scheme: user `v1_<KEY>`, token minted per connection
+        // index 1 is ommesh (see meshcore::repeater::MQTT_BROKERS)
+        let ommesh_bit = meshcore::repeater::MQTT_BROKERS[1].1;
+        if mesh.app.prefs.mqtt_brokers & ommesh_bit != 0 {
+            let non_empty = |s: &str| (!s.is_empty()).then(|| alloc::string::String::from(s));
             brokers.push(broker::BrokerConfig {
-                index,
-                host,
-                port: 443,
-                transport: broker::Transport::Wss("/mqtt", roots),
+                index: 1,
+                host: "nw.ommesh.ru",
+                port: 1883,
                 user: alloc::format!("v1_{device_id}"),
                 password: broker::Credential::Jwt {
                     id: self_id.clone(),
                     owner: non_empty(&mesh.app.prefs.mqtt_owner),
                     email: non_empty(&mesh.app.prefs.mqtt_email),
                 },
-                client_id: alloc::format!("mqtt_{name}-{}", &device_id[..6]),
+                client_id: alloc::format!("mqtt_ommesh-{}", &device_id[..6]),
                 topic_prefix: prefix.clone(),
                 will: will.clone(),
             });

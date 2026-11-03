@@ -4,7 +4,7 @@
 //!
 //! This module holds the transport-independent parts: topic and JSON formats (byte-exact with
 //! the C++ implementation), the Ed25519 JWT used as the MQTT password, and a minimal MQTT 3.1.1
-//! codec. The firmware provides Wi-Fi, TCP and TLS.
+//! codec. The firmware provides Wi-Fi and plain TCP.
 
 use alloc::format;
 use alloc::string::String;
