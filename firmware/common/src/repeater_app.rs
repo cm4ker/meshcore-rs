@@ -642,7 +642,10 @@ where
         let params = net::StationParams {
             ssid: mesh.app.prefs.wifi_ssid.clone(),
             password: mesh.app.prefs.wifi_pwd.clone(),
-            power_save: !bridge_on,
+            // modem sleep would miss bridge frames between beacons; on the ESP32-C6 it also drops
+            // plain station traffic (DNS/TCP time out while associated, see net.rs), so keep the
+            // radio awake there regardless of the bridge
+            power_save: !bridge_on && cfg!(feature = "esp32s3"),
             esp_now: bridge_on,
         };
         info!("boot: Wi-Fi station");
