@@ -266,17 +266,29 @@ impl Companion {
     }
 
     /// The update's delta is larger than this node takes over LoRa: until the next check (a later
-    /// release may have a small delta from this image), it goes in over USB or BLE.
+    /// release may have a small delta from this image), it goes in over USB or BLE. One over the
+    /// ceiling only comes with `fw update`.
     fn fw_too_large(&mut self, ctx: &MeshCtx, len: u32) {
-        let (kb, max) = (len.div_ceil(1024), self.fw_max_file() / 1024);
-        let why = alloc::format!("the update is {kb} KB, more than this node takes over LoRa ({max} KB): install it over USB or BLE");
+        let (kb, room) = (len.div_ceil(1024), self.ota.delta_room());
+        let why = if len > room {
+            alloc::format!("the update is {kb} KB, more than this node takes over LoRa ({} KB): install it over USB or BLE", room / 1024)
+        } else if self.fwpull.by_hand != Some(Hand::Update) {
+            let max = fwshare::MAX_LORA_FILE / 1024;
+            alloc::format!("the update is {kb} KB, over the {max} KB a node takes over LoRa by itself: fw update takes it")
+        } else {
+            // asked by hand: the repeater runs firmware that hands on no more than the ceiling
+            let name = self.fw_repeater_name();
+            alloc::format!("the update is {kb} KB, more than {name} hands on over LoRa: install it over USB or BLE")
+        };
         let retry = self.fw_next_check(ctx, CHECK_EVERY_MS);
         self.fw_sleep(ctx, CHECK_EVERY_MS, FwState::Failed { why, retry });
     }
 
-    /// The largest update this node takes over LoRa: what its slot holds, at most the ceiling.
+    /// The largest update this node takes over LoRa: what its slot holds, by itself at most the
+    /// ceiling (`fw update` takes more, and holds the channel longer).
     fn fw_max_file(&mut self) -> u32 {
-        self.ota.delta_room().min(fwshare::MAX_LORA_FILE)
+        let room = self.ota.delta_room();
+        if self.fwpull.by_hand == Some(Hand::Update) { room } else { room.min(fwshare::MAX_LORA_FILE) }
     }
 
     /// The repeater to ask: the one set (`fw.source`), else the best heard directly lately.

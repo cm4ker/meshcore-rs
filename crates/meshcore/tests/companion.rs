@@ -1713,19 +1713,22 @@ fn fw_source_names_the_neighbour_a_repeater_pulls_from() {
     assert_eq!(cli(&mut r, "get fw.source"), "> auto");
 }
 
-#[test]
-fn a_delta_larger_than_the_node_takes_is_not_pulled() {
-    let root = LocalIdentity::from_seed(&[42; 32]);
-    let base = esp_image(&[1u8; 3000]);
-    // new code that does not compress: its delta is about as large as itself
+/// New code that does not compress: its delta is about as large as itself.
+fn noise(len: usize) -> Vec<u8> {
     let mut x = 1u32;
-    let noise: Vec<u8> = (0..70_000)
+    (0..len)
         .map(|_| {
             x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
             (x >> 16) as u8
         })
-        .collect();
-    let file = delta_release(&root, 5, &base, &esp_image(&noise));
+        .collect()
+}
+
+#[test]
+fn a_delta_larger_than_the_node_takes_is_not_pulled() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&[1u8; 3000]);
+    let file = delta_release(&root, 5, &base, &esp_image(&noise(70_000)));
     // under the ceiling, over what this node's 64 KB slot holds next to its image
     assert!((60 * 1024..meshcore::fwshare::MAX_LORA_FILE).contains(&(file.len() as u32)), "{} bytes", file.len());
 
@@ -1740,6 +1743,63 @@ fn a_delta_larger_than_the_node_takes_is_not_pulled() {
     let why = format!("the update is {kb} KB, more than this node takes over LoRa (60 KB): install it over USB or BLE");
     assert!(c.app.fw_line(c.ctx.now).starts_with(&format!("failed: {why}; next try ")), "{}", c.app.fw_line(c.ctx.now));
     assert!(!slot.borrow().1);
+}
+
+/// A delta over the ceiling, with room for it: a check leaves it, `fw update` takes it.
+#[test]
+fn a_companion_takes_a_delta_over_the_ceiling_only_by_hand() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&[1u8; 3000]);
+    let image = esp_image(&noise(170_000));
+    let file = delta_release(&root, 5, &base, &image);
+    assert!(file.len() as u32 > meshcore::fwshare::MAX_LORA_FILE, "{} bytes", file.len());
+
+    let mut r = serving_repeater(file.clone());
+    let (mut c, slot) = pulling_companion(&root, &base);
+    slot.borrow_mut().0 = vec![0u8; 512 * 1024];
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000);
+    let _ = c.app.fw_check_now(&c.ctx, false);
+    air.run(&mut [&mut r, &mut c], 60_000);
+    let kb = (file.len() as u32).div_ceil(1024);
+    let why = format!("the update is {kb} KB, over the 160 KB a node takes over LoRa by itself: fw update takes it");
+    assert!(c.app.fw_line(c.ctx.now).starts_with(&format!("failed: {why}; next try ")), "{}", c.app.fw_line(c.ctx.now));
+
+    assert!(c.app.fw_check_now(&c.ctx, true).is_ok());
+    air.run(&mut [&mut r, &mut c], 4 * 3_600_000);
+    assert!(slot.borrow().1, "installed: {}", c.app.fw_line(c.ctx.now));
+    assert_eq!(&slot.borrow().0[..image.len()], &image[..]);
+}
+
+/// The same for a repeater that pulls its update from a neighbour.
+#[test]
+fn a_repeater_takes_a_delta_over_the_ceiling_only_by_hand() {
+    use meshcore::release::{board, role};
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&[1u8; 3000]);
+    let image = esp_image(&noise(170_000));
+    let file = delta_release_for(&root, board::HELTEC_V4, role::REPEATER, 0, 5, &base, &image);
+    assert!(file.len() as u32 > meshcore::fwshare::MAX_LORA_FILE, "{} bytes", file.len());
+
+    let mut serving = serving_repeater(file.clone());
+    let (mut r, slot) = self_updating_repeater(3, &root, &base);
+    slot.borrow_mut().0 = vec![0u8; 512 * 1024];
+    r.app.fw_store = Some(Box::new(Offline));
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut serving, &mut r], 20_000);
+    assert!(r.app.handle_command(&mut r.ctx, 0, "fw check").starts_with("OK"));
+    air.run(&mut [&mut serving, &mut r], 60_000);
+    let kb = (file.len() as u32).div_ceil(1024);
+    let line = r.app.handle_command(&mut r.ctx, 0, "fw").lines().nth(1).unwrap_or_default().to_string();
+    let why = format!("the update is {kb} KB, over the 160 KB a node takes over LoRa by itself: fw update takes it");
+    assert!(line.starts_with(&format!("failed: {why}; next try ")), "{line}");
+
+    assert!(r.app.handle_command(&mut r.ctx, 0, "fw update").starts_with("OK"));
+    air.run(&mut [&mut serving, &mut r], 4 * 3_600_000);
+    assert!(r.app.take_effects().reboot, "installed: restarting into it");
+    assert_eq!(&slot.borrow().0[..image.len()], &image[..]);
 }
 
 /// A store holding two files, as a repeater's does: its own update and a neighbour's.

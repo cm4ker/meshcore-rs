@@ -95,10 +95,18 @@ pub fn reason(why: &str) -> String {
         return format!("{n} не ответил");
     }
     if let Some(rest) = why.strip_prefix("the update is ")
-        && let Some((kb, rest)) = rest.split_once(" KB, more than this node takes over LoRa (")
-        && let Some((max, _)) = rest.split_once(" KB)")
+        && let Some((kb, rest)) = rest.split_once(" KB, ")
     {
-        return format!("Обновление {kb} КБ, по LoRa не больше {max} КБ: только USB или Bluetooth");
+        let between = |r: &'_ str, from: &str, to: &str| r.strip_prefix(from)?.split_once(to).map(|(s, _)| s.to_string());
+        if let Some(max) = between(rest, "more than this node takes over LoRa (", " KB)") {
+            return format!("Обновление {kb} КБ, по LoRa не больше {max} КБ: только USB или Bluetooth");
+        }
+        if let Some(max) = between(rest, "over the ", " KB a node takes over LoRa by itself") {
+            return format!("Обновление {kb} КБ, сам по LoRa беру до {max} КБ: обновите вручную");
+        }
+        if let Some(name) = between(rest, "more than ", " hands on over LoRa") {
+            return format!("Обновление {kb} КБ, {name} по LoRa столько не отдаёт: только USB или Bluetooth");
+        }
     }
     named
         .iter()
@@ -130,6 +138,14 @@ mod tests {
         assert_eq!(
             reason("the update is 180 KB, more than this node takes over LoRa (160 KB): install it over USB or BLE"),
             "Обновление 180 КБ, по LoRa не больше 160 КБ: только USB или Bluetooth"
+        );
+        assert_eq!(
+            reason("the update is 180 KB, over the 160 KB a node takes over LoRa by itself: fw update takes it"),
+            "Обновление 180 КБ, сам по LoRa беру до 160 КБ: обновите вручную"
+        );
+        assert_eq!(
+            reason("the update is 180 KB, more than PKIO hands on over LoRa: install it with fw ble or USB"),
+            "Обновление 180 КБ, PKIO по LoRa столько не отдаёт: только USB или Bluetooth"
         );
         assert_eq!(reason("OTA: commit failed: Flash"), "OTA: commit failed: Flash");
     }
