@@ -17,6 +17,7 @@ pub mod companion;
 pub mod crypto;
 pub mod fwshare;
 pub mod fwstate;
+pub mod gps;
 pub mod identity;
 pub mod lpp;
 pub mod mesh;

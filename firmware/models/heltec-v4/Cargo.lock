@@ -1892,6 +1892,7 @@ dependencies = [
  "log",
  "meshcore",
  "meshcore-fw",
+ "meshcore-fw-core",
  "meshcore-ui",
  "rand_core 0.6.4",
  "ssd1306",

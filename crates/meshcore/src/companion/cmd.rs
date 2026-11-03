@@ -1187,7 +1187,75 @@ impl Companion {
         }
     }
 
-    fn handle_command_inner(&mut self, ctx: &MeshCtx, remote: bool, cmd: &str) -> Option<String> {
+    /// `gps …` CLI (upstream `CommonCLI`, `#if ENV_INCLUDE_GPS`). `gps advert` is a bare preference
+    /// and answers without a receiver; the rest need one (`board.has_gps`). The firmware already
+    /// tracks the node's position and clock from the GPS when it is on, so `setloc`/`sync` just
+    /// force the latest fix in.
+    fn gps_command(&mut self, ctx: &mut MeshCtx, arg: &str) -> String {
+        use crate::prefs::{ADVERT_LOC_NONE, ADVERT_LOC_PREFS, ADVERT_LOC_SHARE};
+        if let Some(rest) = arg.strip_prefix("advert") {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return match self.prefs.advert_loc_policy {
+                    ADVERT_LOC_NONE => "> none".into(),
+                    ADVERT_LOC_SHARE => "> share".into(),
+                    _ => "> prefs".into(),
+                };
+            }
+            self.prefs.advert_loc_policy = match rest {
+                "none" => ADVERT_LOC_NONE,
+                "share" => ADVERT_LOC_SHARE,
+                "prefs" => ADVERT_LOC_PREFS,
+                _ => return "error".into(),
+            };
+            self.effects.save_prefs = true;
+            return "ok".into();
+        }
+        if !self.board.has_gps {
+            return "Can't find GPS".into();
+        }
+        match arg {
+            "on" | "off" => {
+                self.prefs.gps_enabled = arg == "on";
+                self.effects.gps = true;
+                self.effects.save_prefs = true;
+                "ok".into()
+            }
+            "sync" => match self.board.gps.and_then(|g| g.time) {
+                Some(t) if t > ctx.current_time() => {
+                    ctx.set_current_time(t);
+                    "ok".into()
+                }
+                Some(_) => "ERR: clock cannot go backwards".into(),
+                None => "no fix".into(),
+            },
+            "setloc" => match self.board.gps.filter(|g| g.valid) {
+                Some(g) => {
+                    self.set_gps_position(g.lat, g.lon, g.alt_mm);
+                    self.effects.save_prefs = true;
+                    "ok".into()
+                }
+                None => "no fix".into(),
+            },
+            "diag" => {
+                let req = self.prefs.gps_enabled as u8;
+                match self.board.gps {
+                    Some(g) => format!("req:{req} fix:{} sats:{} inview:{}", g.valid as u8, g.satellites, g.in_view),
+                    None => format!("req:{req} no reading"),
+                }
+            }
+            "" => {
+                if !self.prefs.gps_enabled {
+                    return "off".into();
+                }
+                let (fix, sats) = self.board.gps.map_or((false, 0), |g| (g.valid, g.satellites));
+                format!("on, active, {}, {} sats", if fix { "fix" } else { "no fix" }, sats)
+            }
+            _ => "error".into(),
+        }
+    }
+
+    fn handle_command_inner(&mut self, ctx: &mut MeshCtx, remote: bool, cmd: &str) -> Option<String> {
         if let Some(r) = self.handle_radio_command(cmd) {
             self.effects.save_prefs = true;
             return Some(r);
@@ -1200,6 +1268,9 @@ impl Companion {
         }
         if let Some(v) = cmd.strip_prefix("set adc.multiplier ") {
             return Some(self.set_adc_multiplier(v).unwrap_or_else(|| "Error: unsupported".into()));
+        }
+        if cmd == "gps" || cmd.starts_with("gps ") {
+            return Some(self.gps_command(ctx, cmd[3..].trim()));
         }
         let p = &mut self.prefs;
         let r: String = if cmd == "reboot" {

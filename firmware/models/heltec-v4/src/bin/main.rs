@@ -674,6 +674,7 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
         wifi_ota_ssid: slots.map(|_| ota_ssid(&prefs.node_name)),
         ble_ota_name: slots.map(|_| ota_ssid(&prefs.node_name)),
         adc_multiplier: heltec_v4::board::ADC_MULTIPLIER,
+        has_gps: true,
         ..Default::default()
     };
     let mut mesh = Mesh::new(ctx, Repeater::new(prefs, board));
@@ -884,6 +885,24 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
     spawner.spawn(console_task(console_rx).unwrap());
     println!("Ready. Type CLI commands (e.g. 'get name', 'set name X', 'get radio', 'neighbors').");
 
+    // ---- optional external GPS on the V4's UART1 header (RX 38, TX 39, EN 34, RESET 42)
+    let gps_uart = esp_hal::uart::Uart::new(p.UART1, esp_hal::uart::Config::default().with_baudrate(9600))
+        .unwrap()
+        .with_rx(p.GPIO38)
+        .with_tx(p.GPIO39)
+        .into_async();
+    let (gps_rx, gps_tx) = gps_uart.split();
+    spawner.spawn(
+        heltec_v4::gps::task(heltec_v4::gps::Gps {
+            rx: gps_rx,
+            tx: gps_tx,
+            enable: Output::new(p.GPIO34, Level::High, OutputConfig::default()),
+            reset: Output::new(p.GPIO42, Level::Low, OutputConfig::default()),
+        })
+        .unwrap(),
+    );
+    heltec_v4::gps::GPS_ON.signal(mesh.app.prefs.gps_enabled);
+
     // ---- main loop
     let mut noise = NoiseFloor::new();
     let mut next_noise = 0u64;
@@ -1085,6 +1104,13 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
             if let Some(r) = room.as_mut() {
                 r.app.board.batt_mv = mesh.app.board.batt_mv;
             }
+        }
+
+        // the latest GPS reading for the `gps` CLI (fix or not; none when the receiver is silent)
+        let gps_reading = heltec_v4::gps::latest();
+        mesh.app.board.gps = gps_reading;
+        if let Some(r) = room.as_mut() {
+            r.app.board.gps = gps_reading;
         }
 
         prof.mark("agc");
@@ -1304,6 +1330,9 @@ async fn run(spawner: Spawner, mut p: esp_hal::peripherals::Peripherals) -> ! {
         }
         if let Some(on) = fx.fem_lna {
             fem.set_lna(on);
+        }
+        if fx.gps {
+            heltec_v4::gps::GPS_ON.signal(mesh.app.prefs.gps_enabled);
         }
         if let Some((code, key)) = fx.start_ota {
             if let (Some(stack), Some(s), Some(sl)) = (station, &store, slots) {

@@ -1059,6 +1059,50 @@ fn gps_setting_position_and_telemetry() {
     assert_eq!(&t[0][8..], &[1, 116, 0x01, 0x86]);
 }
 
+/// The `gps …` text CLI (upstream `CommonCLI`), gated on a receiver; `gps advert` is a bare
+/// preference and answers without one.
+#[test]
+fn gps_cli_on_a_companion() {
+    use meshcore::gps::GpsReading;
+    use meshcore::prefs::{ADVERT_LOC_NONE, ADVERT_LOC_SHARE};
+    let mut a = companion(1, "Alice");
+    let cli = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
+
+    // advert policy answers without a receiver
+    assert_eq!(cli(&mut a, "gps advert share"), "ok");
+    assert_eq!(a.app.prefs.advert_loc_policy, ADVERT_LOC_SHARE);
+    assert_eq!(cli(&mut a, "gps advert"), "> share");
+    assert_eq!(cli(&mut a, "gps advert none"), "ok");
+    assert_eq!(a.app.prefs.advert_loc_policy, ADVERT_LOC_NONE);
+
+    // no receiver: the hardware commands report absence
+    assert_eq!(cli(&mut a, "gps"), "Can't find GPS");
+    assert_eq!(cli(&mut a, "gps on"), "Can't find GPS");
+
+    // a board with a receiver, before and after a fix
+    a.app.board.has_gps = true;
+    assert_eq!(cli(&mut a, "gps"), "off");
+    assert_eq!(cli(&mut a, "gps on"), "ok");
+    assert!(a.app.prefs.gps_enabled);
+    let fx = a.app.take_effects();
+    assert!(fx.gps && fx.save_prefs);
+    assert_eq!(cli(&mut a, "gps"), "on, active, no fix, 0 sats");
+    assert_eq!(cli(&mut a, "gps setloc"), "no fix");
+
+    a.app.board.gps =
+        Some(GpsReading { valid: true, lat: 55_000_000, lon: -33_500_000, alt_mm: 120_500, satellites: 8, in_view: 11, time: Some(2_000_000_000) });
+    assert_eq!(cli(&mut a, "gps"), "on, active, fix, 8 sats");
+    assert_eq!(cli(&mut a, "gps setloc"), "ok");
+    assert!((a.app.prefs.node_lat - 55.0).abs() < 1e-6);
+    assert!((a.app.prefs.node_lon + 33.5).abs() < 1e-6);
+    assert_eq!(cli(&mut a, "gps sync"), "ok");
+    assert_eq!(a.ctx.current_time(), 2_000_000_000);
+
+    assert_eq!(cli(&mut a, "gps bogus"), "error");
+    assert_eq!(cli(&mut a, "gps off"), "ok");
+    assert!(!a.app.prefs.gps_enabled);
+}
+
 /// `adc.multiplier` as on a repeater: only on boards that take one, over the CLI and as a custom
 /// variable, 0 = the board's own, kept in prefs.
 #[test]

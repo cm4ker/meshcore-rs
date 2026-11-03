@@ -52,7 +52,7 @@ const WATCHDOG_SECS: u64 = 30;
 const MAX_TX_POWER_DBM: i8 = 22;
 /// The on-device interface (no Bluetooth page: the ESP BLE task cannot be switched off yet; no
 /// power-off page: nothing but a reset would wake the board).
-const PAGES: &[Page] = &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Pull, Page::Advert];
+const PAGES: &[Page] = &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Gps, Page::Pull, Page::Advert];
 
 struct HeltecV4<'d> {
     fem: Fem<'d>,
@@ -93,6 +93,7 @@ impl Board for HeltecV4<'_> {
     }
 
     fn power_off(&mut self) {
+        heltec_v4::gps::GPS_ON.signal(false);
         self.fem.shutdown();
         self.led.set_low();
         if let Some(o) = self.oled.as_mut() {
@@ -106,6 +107,14 @@ impl Board for HeltecV4<'_> {
 
     fn adc_multiplier(&self) -> Option<f32> {
         heltec_v4::board::ADC_MULTIPLIER
+    }
+
+    fn has_gps(&self) -> bool {
+        true
+    }
+
+    fn set_gps(&mut self, on: bool) {
+        heltec_v4::gps::GPS_ON.signal(on);
     }
 
     fn button_down(&mut self) -> bool {
@@ -208,6 +217,23 @@ async fn main(spawner: Spawner) -> ! {
         .ok()
         .map(|i2c| i2c.with_sda(p.GPIO17).with_scl(p.GPIO18))
         .and_then(|i2c| Oled::new(i2c, oled_rst));
+
+    // optional external GPS on the V4's UART1 header (RX 38, TX 39, EN 34, RESET 42)
+    let gps_uart = esp_hal::uart::Uart::new(p.UART1, esp_hal::uart::Config::default().with_baudrate(9600))
+        .unwrap()
+        .with_rx(p.GPIO38)
+        .with_tx(p.GPIO39)
+        .into_async();
+    let (gps_rx, gps_tx) = gps_uart.split();
+    spawner.spawn(
+        heltec_v4::gps::task(heltec_v4::gps::Gps {
+            rx: gps_rx,
+            tx: gps_tx,
+            enable: Output::new(p.GPIO34, Level::High, OutputConfig::default()),
+            reset: Output::new(p.GPIO42, Level::Low, OutputConfig::default()),
+        })
+        .unwrap(),
+    );
 
     let board = HeltecV4 {
         fem,

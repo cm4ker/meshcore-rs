@@ -6,6 +6,7 @@ pub mod board;
 pub mod broker;
 pub mod common;
 pub mod display;
+pub mod gps;
 pub mod wifi_ota;
 
 /// The board a signed release for this build must name (`meshcore::release::board`).

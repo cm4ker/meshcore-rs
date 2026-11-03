@@ -61,6 +61,9 @@ pub struct NodePrefs {
     pub advert_loc_policy: u8,
     pub discovery_mod_timestamp: u32,
     pub powersaving_enabled: bool,
+    /// A GPS receiver (`gps on`/`off`) is powered; `advert_loc_policy` decides if adverts carry the
+    /// position. Only boards with a receiver (`BoardInfo::has_gps`) act on it.
+    pub gps_enabled: bool,
     /// Battery reading calibration (`set adc.multiplier`, upstream `adc_mult`) on boards that take
     /// one; 0 = the board's own.
     pub adc_multiplier: f32,
@@ -148,6 +151,7 @@ impl Default for NodePrefs {
             advert_loc_policy: ADVERT_LOC_PREFS,
             discovery_mod_timestamp: 0,
             powersaving_enabled: false,
+            gps_enabled: false,
             adc_multiplier: 0.0,
             dynamic_cr: false,
             wifi_ssid: String::new(),
@@ -271,6 +275,7 @@ impl NodePrefs {
         let _ = writeln!(s, "advert_loc_policy={}", self.advert_loc_policy);
         let _ = writeln!(s, "discovery_mod_ts={}", self.discovery_mod_timestamp);
         let _ = writeln!(s, "powersaving={}", b(self.powersaving_enabled));
+        let _ = writeln!(s, "gps={}", b(self.gps_enabled));
         let _ = writeln!(s, "adc_mult={}", self.adc_multiplier);
         let _ = writeln!(s, "dyn_cr={}", b(self.dynamic_cr));
         let _ = writeln!(s, "wifi_ssid={}", escape(&self.wifi_ssid));
@@ -341,6 +346,7 @@ impl NodePrefs {
                 "advert_loc_policy" => p.advert_loc_policy = u8v(),
                 "discovery_mod_ts" => p.discovery_mod_timestamp = atoi(v),
                 "powersaving" => p.powersaving_enabled = flag(),
+                "gps" => p.gps_enabled = flag(),
                 "adc_mult" => p.adc_multiplier = (atof(v) as f32).clamp(0.0, 10.0),
                 "dyn_cr" => p.dynamic_cr = flag(),
                 "wifi_ssid" => p.wifi_ssid = unescape(v),
@@ -399,6 +405,7 @@ mod tests {
         p.fw_mode = crate::fwstate::mode::DOWNLOAD;
         p.fw_channel = 1;
         p.fw_source = alloc::vec![0xCE, 0x5B, 0x93];
+        p.gps_enabled = true;
         let q = NodePrefs::deserialize(&p.serialize());
         assert_eq!(p, q);
     }

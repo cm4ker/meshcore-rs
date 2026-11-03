@@ -38,6 +38,19 @@ use crate::radio::{LoraRadio, RxEvent};
 use crate::storage::{Blob, CompBlob, SharedStore};
 use meshcore_ui::{self as ui, Action, Alert, Bar, BleState, Body, Button, GpsInfo, Node, Page, PullInfo, RadioInfo, Ui, View};
 
+/// The firmware's GPS fix as the core's board-level reading (`gps` CLI).
+fn gps_reading(f: gps::Fix) -> meshcore::gps::GpsReading {
+    meshcore::gps::GpsReading {
+        valid: f.valid,
+        lat: f.lat,
+        lon: f.lon,
+        alt_mm: f.alt_mm,
+        satellites: f.satellites,
+        in_view: f.in_view,
+        time: f.time,
+    }
+}
+
 const SCREEN_ON_MS: u64 = 60_000;
 const TRIAL_HEALTHY_MS: u64 = 120_000;
 const CLOCK_SAVE_INTERVAL_MS: u64 = 30 * 60 * 1000;
@@ -675,6 +688,8 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         // seconds (upstream `EnvironmentSensorManager`, `MicroNMEALocationProvider`)
         if mesh.app.gps_active() && now >= next_gps {
             next_gps = now + 1000;
+            // the `gps` CLI reads the latest reading (fix or not) back off the board
+            mesh.app.board.gps = gps::latest().map(gps_reading);
             match gps::latest().filter(|f| f.valid) {
                 Some(fix) => {
                     gps_fix_secs += 1;
@@ -742,6 +757,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         if fx.gps {
             board.set_gps(mesh.app.gps_active());
             gps::clear();
+            mesh.app.board.gps = None;
             gps_fix_secs = 0;
         }
         if fx.factory_reset

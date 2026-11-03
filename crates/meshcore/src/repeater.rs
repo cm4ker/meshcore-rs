@@ -18,6 +18,7 @@ use crate::companion::{CMD_DEVICE_QUERY, RESP_CODE_DEVICE_INFO};
 use crate::crypto::{self, Secret};
 use crate::fwshare::{self, FwStore};
 use crate::fwstate::{self, FwState};
+use crate::gps::GpsReading;
 use crate::identity::{Identity, LocalIdentity};
 use crate::mesh::{MeshApp, MeshCtx};
 use crate::ota::{OtaEndpoint, OtaOutcome};
@@ -202,6 +203,8 @@ pub struct Effects {
     pub network_changed: bool,
     /// The bridge was switched on or off, or moved to another channel: restart its medium.
     pub bridge_changed: bool,
+    /// The GPS was switched on or off (`prefs.gps_enabled`): the firmware powers the receiver.
+    pub gps: bool,
     /// Publish a status message now (`send mqtt.status`).
     pub send_mqtt_status: bool,
     /// Lines for the serial console (packet log, ACL dumps).
@@ -268,6 +271,11 @@ pub struct BoardInfo {
     pub fw_rollback: bool,
     /// The release this node was rolled back from: not installed by itself again (0 = none).
     pub fw_skip: u32,
+    /// A GPS receiver is wired to the board (`gps` CLI); false = this board has none.
+    pub has_gps: bool,
+    /// The receiver's latest reading, kept by the firmware for the `gps` CLI; none while the
+    /// receiver is off or silent.
+    pub gps: Option<GpsReading>,
 }
 
 pub struct Repeater {
@@ -1726,6 +1734,9 @@ impl Repeater {
         if cmd.starts_with("powersaving") {
             return if self.prefs.powersaving_enabled { "on" } else { "off" }.into();
         }
+        if cmd == "gps" || cmd.starts_with("gps ") {
+            return self.gps_command(ctx, cmd[3..].trim());
+        }
         if cmd.starts_with("log start") {
             self.logging = true;
             return "   logging on".into();
@@ -1768,6 +1779,74 @@ impl Repeater {
             );
         }
         "Unknown command".into()
+    }
+
+    /// `gps …` CLI (upstream `CommonCLI`, `#if ENV_INCLUDE_GPS`). `gps advert` is a bare preference
+    /// and answers without a receiver; the rest need one (`board.has_gps`). Snapshot-only: a
+    /// repeater is a fixed node, so `setloc` and `sync` act once on the latest fix rather than
+    /// tracking the GPS continuously.
+    fn gps_command(&mut self, ctx: &mut MeshCtx, arg: &str) -> String {
+        if let Some(rest) = arg.strip_prefix("advert") {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return match self.prefs.advert_loc_policy {
+                    ADVERT_LOC_NONE => "> none".into(),
+                    ADVERT_LOC_SHARE => "> share".into(),
+                    _ => "> prefs".into(),
+                };
+            }
+            self.prefs.advert_loc_policy = match rest {
+                "none" => ADVERT_LOC_NONE,
+                "share" => ADVERT_LOC_SHARE,
+                "prefs" => ADVERT_LOC_PREFS,
+                _ => return "error".into(),
+            };
+            self.save_prefs();
+            return "ok".into();
+        }
+        if !self.board.has_gps {
+            return "Can't find GPS".into();
+        }
+        match arg {
+            "on" | "off" => {
+                self.prefs.gps_enabled = arg == "on";
+                self.effects.gps = true;
+                self.save_prefs();
+                "ok".into()
+            }
+            "sync" => match self.board.gps.and_then(|g| g.time) {
+                Some(t) if t > ctx.current_time() => {
+                    ctx.set_current_time(t);
+                    "ok".into()
+                }
+                Some(_) => "ERR: clock cannot go backwards".into(),
+                None => "no fix".into(),
+            },
+            "setloc" => match self.board.gps.filter(|g| g.valid) {
+                Some(g) => {
+                    self.prefs.node_lat = g.lat as f64 / 1e6;
+                    self.prefs.node_lon = g.lon as f64 / 1e6;
+                    self.save_prefs();
+                    "ok".into()
+                }
+                None => "no fix".into(),
+            },
+            "diag" => {
+                let req = self.prefs.gps_enabled as u8;
+                match self.board.gps {
+                    Some(g) => format!("req:{req} fix:{} sats:{} inview:{}", g.valid as u8, g.satellites, g.in_view),
+                    None => format!("req:{req} no reading"),
+                }
+            }
+            "" => {
+                if !self.prefs.gps_enabled {
+                    return "off".into();
+                }
+                let (fix, sats) = self.board.gps.map_or((false, 0), |g| (g.valid, g.satellites));
+                format!("on, active, {}, {} sats", if fix { "fix" } else { "no fix" }, sats)
+            }
+            _ => "error".into(),
+        }
     }
 
     /// `CommonRadioPrefs::handleCommand`.

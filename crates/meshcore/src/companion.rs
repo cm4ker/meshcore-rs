@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 
 use crate::advert::*;
 use crate::crypto::{self, Secret};
+use crate::gps::GpsReading;
 use crate::identity::Identity;
 use crate::mesh::{GroupChannel, MeshApp, MeshCtx};
 use crate::ota::OtaEndpoint;
@@ -436,6 +437,9 @@ pub struct Board {
     pub wifi_ip: Option<String>,
     /// A GPS receiver: its `gps` setting is offered to the app.
     pub has_gps: bool,
+    /// The receiver's latest reading (`gps::publish` on the firmware), for the `gps` CLI; none
+    /// while it is off or silent.
+    pub gps: Option<GpsReading>,
     /// The board's own battery multiplier if `set adc.multiplier` calibrates its reading; none =
     /// unsupported.
     pub adc_multiplier: Option<f32>,
@@ -462,6 +466,7 @@ impl Default for Board {
             wifi_status: String::new(),
             wifi_ip: None,
             has_gps: false,
+            gps: None,
             adc_multiplier: None,
             altitude_m: 0.0,
             fw_trial_until: None,

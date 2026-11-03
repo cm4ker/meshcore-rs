@@ -193,6 +193,48 @@ fn repeat_off_and_hop_limits() {
     assert!(drain_tx(&mut r, 2 * LATER).is_empty(), "repeat off");
 }
 
+/// The `gps …` CLI on a repeater: `advert` is a bare preference, the rest need a receiver
+/// (`board.has_gps`) and act on the latest reading the firmware left on the board.
+#[test]
+fn gps_cli_on_a_repeater() {
+    use meshcore::gps::GpsReading;
+    use meshcore::prefs::{ADVERT_LOC_NONE, ADVERT_LOC_SHARE};
+    let mut m = repeater(1);
+    let cli = |m: &mut Mesh<Repeater>, s: &str| m.app.handle_command(&mut m.ctx, 0, s);
+
+    // advert policy works without a receiver
+    assert_eq!(cli(&mut m, "gps advert share"), "ok");
+    assert_eq!(m.app.prefs.advert_loc_policy, ADVERT_LOC_SHARE);
+    assert_eq!(cli(&mut m, "gps advert"), "> share");
+    assert_eq!(cli(&mut m, "gps advert none"), "ok");
+    assert_eq!(m.app.prefs.advert_loc_policy, ADVERT_LOC_NONE);
+    assert_eq!(cli(&mut m, "gps advert bogus"), "error");
+
+    // no receiver on this board
+    assert_eq!(cli(&mut m, "gps"), "Can't find GPS");
+    assert_eq!(cli(&mut m, "gps sync"), "Can't find GPS");
+
+    // a receiver, before and after a fix
+    m.app.board.has_gps = true;
+    assert_eq!(cli(&mut m, "gps"), "off");
+    assert_eq!(cli(&mut m, "gps on"), "ok");
+    assert!(m.app.prefs.gps_enabled && m.app.effects.gps);
+    assert_eq!(cli(&mut m, "gps"), "on, active, no fix, 0 sats");
+    assert_eq!(cli(&mut m, "gps setloc"), "no fix");
+
+    m.app.board.gps =
+        Some(GpsReading { valid: true, lat: 55_000_000, lon: 37_000_000, alt_mm: 100_000, satellites: 7, in_view: 9, time: Some(2_000_000_000) });
+    assert_eq!(cli(&mut m, "gps"), "on, active, fix, 7 sats");
+    assert_eq!(cli(&mut m, "gps setloc"), "ok");
+    assert!((m.app.prefs.node_lat - 55.0).abs() < 1e-6);
+    assert!((m.app.prefs.node_lon - 37.0).abs() < 1e-6);
+    assert_eq!(cli(&mut m, "gps sync"), "ok");
+    assert_eq!(m.ctx.current_time(), 2_000_000_000);
+
+    assert_eq!(cli(&mut m, "gps off"), "ok");
+    assert!(!m.app.prefs.gps_enabled);
+}
+
 #[test]
 fn neighbour_table_from_zero_hop_repeater_advert() {
     let mut r = repeater(1);
