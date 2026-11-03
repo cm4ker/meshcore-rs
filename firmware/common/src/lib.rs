@@ -17,6 +17,7 @@ pub mod net;
 pub mod ota;
 pub mod power;
 pub mod radio;
+pub mod repeater_app;
 pub mod reset;
 pub mod storage;
 pub mod usb;

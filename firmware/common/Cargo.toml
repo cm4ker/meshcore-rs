@@ -34,6 +34,7 @@ heapless = "0.9"
 trouble-host = { version = "=0.7.0", default-features = false, features = ["peripheral", "gatt", "derive", "security", "default-packet-pool-mtu-255", "log"] }
 meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
 meshcore-fw-core = { version = "0.1.0", path = "../fw-core", features = ["net"] }
+meshcore-ui = { version = "0.1.0", path = "../ui" }
 
 [features]
 esp32s3 = ["esp-hal/esp32s3", "esp-radio/esp32s3", "esp-storage/esp32s3", "esp-println/esp32s3", "esp-bootloader-esp-idf/esp32s3"]
