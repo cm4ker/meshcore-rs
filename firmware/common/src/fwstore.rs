@@ -7,7 +7,9 @@
 //!
 //! The cache holds [`SLOTS`] files, one per part: the node's own update and a neighbour's (or two
 //! neighbours') at once. A file somebody is still reading stays (`meshcore::fwshare::pick_slot`):
-//! a request for yet another one waits rather than cut that transfer short.
+//! a request for yet another one waits rather than cut that transfer short. One nobody reads is
+//! asked about again after [`STALE_SECS`] (at once after a check by hand): a newer release may
+//! have come out since, and the server hands out the newest delta.
 
 use alloc::format;
 use alloc::string::String;
@@ -24,7 +26,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, with_timeout};
 use embedded_io_async::Write;
-use meshcore::fwshare::{DeltaHeader, FwQuery, FwStore, Offer, pick_slot};
+use meshcore::fwshare::{DeltaHeader, FwQuery, FwStore, Offer, STORE_IDLE_SECS, pick_slot};
 use meshcore::release;
 use meshcore::util::to_hex;
 
@@ -47,6 +49,8 @@ const MISS_SECS: u64 = 600;
 const REFRESH_SECS: u64 = 300;
 /// After a failed fetch.
 const FAIL_SECS: u64 = 600;
+/// A file held this long is fetched anew when next asked for and nobody reads it.
+const STALE_SECS: u64 = 3600;
 /// What an asking companion is told to wait while a fetch runs.
 const FETCH_RETRY_SECS: u16 = 30;
 
@@ -75,6 +79,8 @@ struct File {
     version: String,
     /// When it was fetched, offered or read last (seconds of uptime).
     used: u64,
+    /// Until when it is served without asking the server again (0 after a check by hand).
+    fresh_until: u64,
 }
 
 struct State {
@@ -158,9 +164,17 @@ impl FwStore for FlashFwStore {
         let key = Key::from(q);
         let now = secs();
         with(|s| {
-            if let Some(f) = s.files.iter_mut().flatten().find(|f| f.key == key) {
-                f.used = now; // the asker's FW_GETs follow
-                return Offer::Ready { len: f.len, id: f.id, counter: f.counter, version: f.version.clone() };
+            let online = ONLINE.load(Ordering::Relaxed) && !s.server.is_empty() && now >= s.failed_until;
+            if let Some(slot) = s.files.iter().position(|f| f.as_ref().is_some_and(|f| f.key == key)) {
+                let fetch_free = s.fetching.is_none();
+                let f = s.files[slot].as_mut().unwrap();
+                let stale = now >= f.fresh_until && now >= f.used + STORE_IDLE_SECS;
+                if !(stale && online && fetch_free) {
+                    f.used = now; // the asker's FW_GETs follow
+                    return Offer::Ready { len: f.len, id: f.id, counter: f.counter, version: f.version.clone() };
+                }
+                // held a while and nobody reads it: whatever the server has now, fetched below
+                s.files[slot] = None;
             }
             if s.fetching.is_some_and(|(k, _)| k == key) {
                 return Offer::Fetching { retry_secs: FETCH_RETRY_SECS };
@@ -169,7 +183,7 @@ impl FwStore for FlashFwStore {
             if s.misses.iter().any(|m| m.0 == key && m.1 <= q.counter) {
                 return Offer::NoUpdate;
             }
-            if !ONLINE.load(Ordering::Relaxed) || s.server.is_empty() || now < s.failed_until {
+            if !online {
                 return Offer::Unavailable;
             }
             // a slot whose file nobody reads now; with every file in use, the asker tries again later
@@ -195,6 +209,9 @@ impl FwStore for FlashFwStore {
             }
             s.refreshed.push((key, now));
             s.misses.retain(|m| m.0 != key);
+            for f in s.files.iter_mut().flatten().filter(|f| f.key == key) {
+                f.fresh_until = 0;
+            }
             s.failed_until = 0;
         });
     }
@@ -231,7 +248,7 @@ pub async fn fetch_task(stack: Stack<'static>, store: SharedStore<'static>, regi
                 Ok(Some(f)) => {
                     log::info!("fw: {what} {} #{}, {} bytes, fetched in {} s from {server}", f.version, f.counter, f.len, t0.elapsed().as_secs());
                     set_status(s, format!("serves {what} {} #{} ({} KB)", f.version, f.counter, f.len.div_ceil(1024)));
-                    s.files[slot] = Some(File { used: now, ..f });
+                    s.files[slot] = Some(File { used: now, fresh_until: now + STALE_SECS, ..f });
                 }
                 Ok(None) => {
                     s.misses.push((key, counter, now + MISS_SECS));
@@ -355,5 +372,5 @@ async fn fetch(
         return Err("the server sent a release the owner did not sign");
     }
     let id = u32::from_le_bytes(m.image_sha256[..4].try_into().unwrap()) ^ len;
-    Ok(Some(File { key, len, id, counter: m.counter, version: m.version.clone(), used: secs() }))
+    Ok(Some(File { key, len, id, counter: m.counter, version: m.version.clone(), used: secs(), fresh_until: 0 }))
 }
