@@ -30,7 +30,9 @@ esp-rtos = { version = "0.4.0", features = [
 ] }
 
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3", "log-04"] }
-log                    = "0.4.27"
+# release_max_level_info compiles out all debug!/trace! call sites (and their format
+# strings) across the whole dep tree in release; dev keeps every level.
+log                    = { version = "0.4.27", features = ["release_max_level_info"] }
 
 embassy-executor = { version = "0.10.0", features = ["log"] }
 embassy-time = { version = "0.5.0", features = ["log"] }

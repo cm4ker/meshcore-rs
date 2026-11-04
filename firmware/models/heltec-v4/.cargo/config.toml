@@ -13,3 +13,5 @@ target = "xtensa-esp32s3-none-elf"
 
 [unstable]
 build-std = ["alloc", "core"]
+# optimize_for_size: build core/alloc with the size-tuned impls (fmt, sort, …)
+build-std-features = ["optimize_for_size"]
