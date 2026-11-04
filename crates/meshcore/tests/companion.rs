@@ -1782,8 +1782,8 @@ fn a_delta_larger_than_the_node_takes_is_not_pulled() {
     let root = LocalIdentity::from_seed(&[42; 32]);
     let base = esp_image(&[1u8; 3000]);
     let file = delta_release(&root, 5, &base, &esp_image(&noise(70_000)));
-    // under the ceiling, over what this node's 64 KB slot holds next to its image
-    assert!((60 * 1024..meshcore::fwshare::MAX_LORA_FILE).contains(&(file.len() as u32)), "{} bytes", file.len());
+    // under the ceiling, over what this node's 64 KB slot holds
+    assert!((64 * 1024..meshcore::fwshare::MAX_LORA_FILE).contains(&(file.len() as u32)), "{} bytes", file.len());
 
     let mut r = serving_repeater(file.clone());
     let (mut c, slot) = pulling_companion(&root, &base);
@@ -1793,9 +1793,31 @@ fn a_delta_larger_than_the_node_takes_is_not_pulled() {
     let _ = c.app.fw_check_now(&c.ctx, false);
     air.run(&mut [&mut r, &mut c], 60_000);
     let kb = (file.len() as u32).div_ceil(1024);
-    let why = format!("the update is {kb} KB, more than this node takes over LoRa (60 KB): install it over USB or BLE");
+    let why = format!("the update is {kb} KB, more than this node takes over LoRa (64 KB): install it over USB or BLE");
     assert!(c.app.fw_line(c.ctx.now).starts_with(&format!("failed: {why}; next try ")), "{}", c.app.fw_line(c.ctx.now));
     assert!(!slot.borrow().1);
+}
+
+/// A slot that holds the new image but not the delta beside it (a Pro Micro with a large build):
+/// the delta is applied as it comes.
+#[test]
+fn a_delta_with_no_room_beside_its_image_is_applied_as_it_comes() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let (base, image) = (esp_image(&noise(50_000)), esp_image(&noise(60_000)));
+    let file = delta_release(&root, 5, &base, &image);
+    let sectors = |n: usize| n.div_ceil(4096);
+    assert!(sectors(image.len()) + sectors(file.len()) > 16, "64 KB slot: {} + {} bytes", image.len(), file.len());
+
+    let mut r = serving_repeater(file.clone());
+    let (mut c, slot) = pulling_companion(&root, &base);
+    c.app.prefs.fw_mode = meshcore::fwstate::mode::INSTALL;
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000);
+    let _ = c.app.fw_check_now(&c.ctx, false);
+    air.run(&mut [&mut r, &mut c], 3_600_000);
+    assert!(slot.borrow().1, "installed: {}", c.app.fw_line(c.ctx.now));
+    assert_eq!(&slot.borrow().0[..image.len()], &image[..]);
 }
 
 /// A delta over the ceiling, with room for it: a check leaves it, `fw update` takes it.
