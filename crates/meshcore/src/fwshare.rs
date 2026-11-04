@@ -207,6 +207,7 @@ pub fn refusal(code: u8) -> &'static str {
         c if c == OtaError::BaseMismatch as u8 => "made for another firmware than this one",
         c if c == OtaError::BadEnvelope as u8 => "unreadable",
         c if c == OtaError::FlashError as u8 => "the update slot can't be written",
+        c if c == OtaError::TooLarge as u8 => "larger than this device's update slot",
         _ => "refused",
     }
 }

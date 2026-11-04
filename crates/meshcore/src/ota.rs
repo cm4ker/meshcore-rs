@@ -172,6 +172,8 @@ pub struct OtaSession {
     erased: Vec<u8>,
     /// DATA requests carry a CRC-32 (BEGIN flags bit2).
     crc_chunks: bool,
+    /// A delta applied as it comes instead of staged first (see [`OtaSession::begin_delta`]).
+    stream: Option<Box<Stream>>,
 }
 
 /// CRC-32 (IEEE 802.3, as zlib's `crc32`).
@@ -253,7 +255,17 @@ impl OtaSession {
         if running_hash(target, base_len)? != base_sha256 {
             return Err(OtaError::BaseMismatch);
         }
-        let mut s = Self::begin_compressed(target, size, raw_size, Some(sha256), chunk_size)?;
+        let mut s = match Self::begin_compressed(target, size, raw_size, Some(sha256), chunk_size) {
+            // no room for the patch beside the image it makes: apply it as it comes, chunks in
+            // order, to the start of the slot (pulled from a neighbour, they come in order)
+            Err(OtaError::TooLarge) if raw_size <= target.capacity() => {
+                let mut s = Self::new(size, Some(sha256), chunk_size, 0, Some(raw_size))?;
+                let patcher = Patcher::new(raw_size, base_len);
+                s.stream = Some(Box::new(Stream { inflater: Inflater::new(), patcher, next: 0 }));
+                s
+            }
+            r => r?,
+        };
         s.base_len = Some(base_len);
         Ok(s)
     }
@@ -279,6 +291,7 @@ impl OtaSession {
             received_count: 0,
             erased: vec![0; sectors.div_ceil(8)],
             crc_chunks: false,
+            stream: None,
         })
     }
 
@@ -314,6 +327,26 @@ impl OtaSession {
             return Err(OtaError::BadParams);
         }
         if bit(&self.received, index as usize) {
+            return Ok(());
+        }
+        let last = index + 1 == self.total_chunks();
+        if let Some(s) = self.stream.as_deref_mut() {
+            // one out of order is dropped: it stays missing and comes again
+            if index != s.next {
+                return Ok(());
+            }
+            let mut fed = s.inflater.feed(target, data, !last, &mut s.patcher);
+            if fed.is_ok() && last {
+                fed = if s.inflater.done { s.patcher.finish(target) } else { Err(OtaError::BadImage) };
+            }
+            if let Err(e) = fed {
+                // the stream is lost: take nothing more, so the session never completes
+                s.next = u32::MAX;
+                return Err(e);
+            }
+            s.next += 1;
+            set_bit(&mut self.received, index as usize);
+            self.received_count += 1;
             return Ok(());
         }
         // erase every sector this chunk touches, once (`base` is sector-aligned)
@@ -370,6 +403,8 @@ impl OtaSession {
             return Err(OtaError::Incomplete);
         }
         let image_size = match (self.raw_size, self.base_len) {
+            // applied as it came: complete, it is in the slot already
+            (Some(raw), Some(_)) if self.stream.is_some() => raw,
             (Some(raw), None) => {
                 inflate(target, self.base, self.size, &mut ImageWriter::new(raw))?;
                 raw
@@ -623,12 +658,13 @@ impl OtaEndpoint {
         self.running_image
     }
 
-    /// The largest compressed update (a delta) the slot holds next to an image as large as the
-    /// running one, which it is rebuilt into; 0 without a slot or a readable running image.
+    /// The largest delta the slot takes: any whose image fits, as one with no room beside that
+    /// image is applied as it comes; 0 without a slot or a readable running image.
     pub fn delta_room(&mut self) -> u32 {
-        let Some((len, _)) = self.running() else { return 0 };
-        let capacity = self.target.as_deref().map_or(0, |t| t.capacity());
-        capacity.saturating_sub(sector_align(len))
+        if self.running().is_none() {
+            return 0;
+        }
+        self.target.as_deref().map_or(0, |t| t.capacity())
     }
 
     /// An update has begun and is neither committed nor aborted.
@@ -907,59 +943,90 @@ fn find_nrf_trailer(target: &mut dyn FirmwareTarget, chip: u32, load: u32) -> Op
 
 /// Inflate the zlib stream at `[src, src + len)` of the slot into `sink`.
 fn inflate(target: &mut dyn FirmwareTarget, src: u32, len: u32, sink: &mut dyn Sink) -> Result<(), OtaError> {
-    use miniz_oxide::inflate::TINFLStatus;
-    use miniz_oxide::inflate::core::inflate_flags::{TINFL_FLAG_HAS_MORE_INPUT, TINFL_FLAG_PARSE_ZLIB_HEADER};
-    use miniz_oxide::inflate::core::{DecompressorOxide, decompress_with_limit};
-
-    const WINDOW: usize = 32 * 1024; // deflate dictionary, wrapping output buffer
-    // straight on the heap: `Box::new(DecompressorOxide::new())` builds its ~11 KB on the stack
-    // first, and the firmware commits from its main loop, whose stack overflowed with it
-    // SAFETY: every field of the decompressor is an integer or an array of integers, and the
-    // state enum's first variant (Start) is 0, so all zeroes is a valid value; `init` resets it
-    let mut state: alloc::boxed::Box<DecompressorOxide> = unsafe { alloc::boxed::Box::new_zeroed().assume_init() };
-    state.init();
-    let mut window = vec![0u8; WINDOW];
+    let mut inflater = Inflater::new();
     let mut input = [0u8; 1024];
-    let (mut in_read, mut in_pos, mut in_len) = (0u32, 0usize, 0usize);
-    let (mut produced, mut flushed) = (0usize, 0usize);
-
-    loop {
-        if in_pos == in_len && in_read < len {
-            in_len = ((len - in_read) as usize).min(input.len());
-            if !target.read(src + in_read, &mut input[..in_len]) {
-                return Err(OtaError::FlashError);
-            }
-            in_read += in_len as u32;
-            in_pos = 0;
+    let mut read = 0u32;
+    while read < len {
+        let n = ((len - read) as usize).min(input.len());
+        if !target.read(src + read, &mut input[..n]) {
+            return Err(OtaError::FlashError);
         }
-        let more = if in_read < len { TINFL_FLAG_HAS_MORE_INPUT } else { 0 };
-        let room = WINDOW - (produced - flushed);
-        let (status, consumed, written) = decompress_with_limit(
-            &mut state,
-            &input[in_pos..in_len],
-            &mut window,
-            produced % WINDOW,
-            room,
-            TINFL_FLAG_PARSE_ZLIB_HEADER | more,
-        );
-        in_pos += consumed;
-        produced += written;
-        let done = status == TINFLStatus::Done;
-        // hand whole sectors (and the tail at the end) out of the window, in contiguous runs
-        while produced - flushed >= SECTOR_SIZE as usize || (done && produced > flushed) {
-            let start = flushed % WINDOW;
-            let n = (produced - flushed).min(SECTOR_SIZE as usize).min(WINDOW - start);
-            sink.put(target, &window[start..start + n])?;
-            flushed += n;
-        }
-        match status {
-            TINFLStatus::Done => break,
-            TINFLStatus::NeedsMoreInput if in_read >= len && in_pos == in_len => return Err(OtaError::BadImage),
-            TINFLStatus::NeedsMoreInput | TINFLStatus::HasMoreOutput => {}
-            _ => return Err(OtaError::BadImage),
-        }
+        read += n as u32;
+        inflater.feed(target, &input[..n], read < len, sink)?;
+    }
+    if !inflater.done {
+        return Err(OtaError::BadImage);
     }
     sink.finish(target)
+}
+
+/// A zlib stream inflated as it comes, piece by piece, its output handed to a sink a sector at a time.
+struct Inflater {
+    state: Box<miniz_oxide::inflate::core::DecompressorOxide>,
+    /// The deflate dictionary, and the output on its way to the sink: a wrapping buffer.
+    window: Vec<u8>,
+    produced: usize,
+    flushed: usize,
+    done: bool,
+}
+
+impl Inflater {
+    const WINDOW: usize = 32 * 1024;
+
+    fn new() -> Self {
+        // straight on the heap: `Box::new(DecompressorOxide::new())` builds its ~11 KB on the stack
+        // first, and the firmware commits from its main loop, whose stack overflowed with it
+        // SAFETY: every field of the decompressor is an integer or an array of integers, and the
+        // state enum's first variant (Start) is 0, so all zeroes is a valid value; `init` resets it
+        let mut state: Box<miniz_oxide::inflate::core::DecompressorOxide> = unsafe { Box::new_zeroed().assume_init() };
+        state.init();
+        Self { state, window: vec![0u8; Self::WINDOW], produced: 0, flushed: 0, done: false }
+    }
+
+    /// Inflate `input` into `sink`; `more`: the stream goes on after it. Input after the stream's
+    /// end is ignored.
+    fn feed(
+        &mut self, target: &mut dyn FirmwareTarget, mut input: &[u8], more: bool, sink: &mut dyn Sink,
+    ) -> Result<(), OtaError> {
+        use miniz_oxide::inflate::TINFLStatus;
+        use miniz_oxide::inflate::core::decompress_with_limit;
+        use miniz_oxide::inflate::core::inflate_flags::{TINFL_FLAG_HAS_MORE_INPUT, TINFL_FLAG_PARSE_ZLIB_HEADER};
+
+        while !self.done {
+            let flags = TINFL_FLAG_PARSE_ZLIB_HEADER | if more { TINFL_FLAG_HAS_MORE_INPUT } else { 0 };
+            let room = Self::WINDOW - (self.produced - self.flushed);
+            let at = self.produced % Self::WINDOW;
+            let (status, consumed, written) =
+                decompress_with_limit(&mut self.state, input, &mut self.window, at, room, flags);
+            input = &input[consumed..];
+            self.produced += written;
+            self.done = status == TINFLStatus::Done;
+            // hand whole sectors (and the tail at the end) out of the window, in contiguous runs
+            while self.produced - self.flushed >= SECTOR_SIZE as usize || (self.done && self.produced > self.flushed) {
+                let start = self.flushed % Self::WINDOW;
+                let n = (self.produced - self.flushed).min(SECTOR_SIZE as usize).min(Self::WINDOW - start);
+                sink.put(target, &self.window[start..start + n])?;
+                self.flushed += n;
+            }
+            match status {
+                TINFLStatus::Done => {}
+                // all of this piece is in: wait for the next one, if the stream goes on
+                TINFLStatus::NeedsMoreInput if input.is_empty() && more => return Ok(()),
+                TINFLStatus::NeedsMoreInput | TINFLStatus::HasMoreOutput if consumed + written > 0 => {}
+                _ => return Err(OtaError::BadImage),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A delta applied as its chunks come, in order: for a slot without the room to keep the patch
+/// beside the image it makes.
+struct Stream {
+    inflater: Inflater,
+    patcher: Patcher,
+    /// The chunk to take next.
+    next: u32,
 }
 
 /// Check the image (its own hash) and the expected hash of the whole image.
@@ -1426,6 +1493,57 @@ mod tests {
         send_all(&mut s, &mut t, &bad);
         assert!(s.commit(&mut t).is_err());
         assert!(!t.activated);
+    }
+
+    /// A slot that holds the new image but not the patch beside it takes the patch as it comes,
+    /// in order.
+    #[test]
+    fn delta_applied_as_it_comes_when_the_slot_has_no_room_for_it() {
+        let code: Vec<u8> = (0..60_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+        let old = segmented_image(&[code.clone()]);
+        let mut code2 = code;
+        code2.splice(30_000..30_000, (0..9_000u32).map(|i| (i.wrapping_mul(40_503) >> 5) as u8));
+        let new = segmented_image(&[code2]);
+        let mut running = old.clone();
+        running.resize(128 * 1024, 0xFF);
+        let mut t = RamTarget::new(sector_align(new.len() as u32) as usize, 0x55, running);
+        let (base_len, base_sha) = running_image(&mut t).unwrap();
+        let mut patch = Vec::new();
+        bsdiff::diff(&old, &new, &mut patch).unwrap();
+        let packed = miniz_oxide::deflate::compress_to_vec_zlib(&patch, 9);
+        let sha: [u8; 32] = Sha256::digest(&new).into();
+        assert!(sector_align(packed.len() as u32) + sector_align(new.len() as u32) > t.capacity());
+        let begin = |t: &mut RamTarget, raw: usize, packed: &[u8]| {
+            OtaSession::begin_delta(t, packed.len() as u32, raw as u32, sha, 152, base_len, base_sha)
+        };
+
+        // one ahead of its turn is dropped and stays missing
+        let mut s = begin(&mut t, new.len(), &packed).unwrap();
+        s.write_chunk(&mut t, 1, &packed[152..304]).unwrap();
+        assert_eq!(s.received_chunks(), 0);
+        assert_eq!(s.missing(0, 2), vec![0, 1]);
+        send_all(&mut s, &mut t, &packed);
+        s.commit(&mut t).unwrap();
+        assert!(t.activated);
+        assert_eq!(&t.mem[..new.len()], &new[..]);
+
+        // a corrupted patch stops the session: it never completes
+        let mut bad = patch.clone();
+        bad.truncate(bad.len() - 1);
+        let bad = miniz_oxide::deflate::compress_to_vec_zlib(&bad, 9);
+        t.activated = false;
+        let mut s = begin(&mut t, new.len(), &bad).unwrap();
+        for i in 0..s.total_chunks() {
+            let a = (i * 152) as usize;
+            let _ = s.write_chunk(&mut t, i, &bad[a..(a + 152).min(bad.len())]);
+        }
+        assert!(!s.is_complete());
+        assert_eq!(s.commit(&mut t), Err(OtaError::Incomplete));
+        assert!(!t.activated);
+
+        // an image larger than the slot is refused at the start
+        let mut t = RamTarget::new(sector_align(new.len() as u32) as usize - SECTOR_SIZE as usize, 0x55, t.running);
+        assert_eq!(begin(&mut t, new.len(), &packed).err(), Some(OtaError::TooLarge));
     }
 
     /// With a pinned root only the image of an accepted signed release can begin a session.
