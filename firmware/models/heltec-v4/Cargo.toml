@@ -30,9 +30,12 @@ esp-rtos = { version = "0.4.0", features = [
 ] }
 
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3", "log-04"] }
-# release_max_level_info compiles out all debug!/trace! call sites (and their format
-# strings) across the whole dep tree in release; dev keeps every level.
-log                    = { version = "0.4.27", features = ["release_max_level_info"] }
+# release_max_level_off compiles out every log call site (and its format strings) across the
+# whole dep tree in release, and lets esp-println's ~64 KB line buffer get DCE'd too. Measured
+# -63.5 KB flash, -64 KB RAM. The interactive serial CLI (get/set) writes the console directly,
+# not through log, so on-demand status survives; only async info/warn/error go quiet. Dev keeps
+# every level (profile.dev, backtraces on).
+log                    = { version = "0.4.27", features = ["release_max_level_off"] }
 
 embassy-executor = { version = "0.10.0", features = ["log"] }
 embassy-time = { version = "0.5.0", features = ["log"] }
