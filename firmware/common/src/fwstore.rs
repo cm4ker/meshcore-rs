@@ -41,8 +41,10 @@ const SECTOR: usize = 4096;
 /// again at once, see `refresh`).
 const MISS_SECS: u64 = 600;
 /// A check by hand makes this node ask the server again about an image at most this often (per
-/// image: one node's checks don't hold up another's, or this node's own `fw update`).
-const REFRESH_SECS: u64 = 60;
+/// image: one node's checks don't hold up another's, or this node's own `fw update`). Longer than
+/// the wait `offer` tells an asker: a repeater from 0.8.3 or before asks again by hand after it,
+/// and would otherwise send this node to the server anew each time.
+const REFRESH_SECS: u64 = 300;
 /// After a failed fetch.
 const FAIL_SECS: u64 = 600;
 /// What an asking companion is told to wait while a fetch runs.

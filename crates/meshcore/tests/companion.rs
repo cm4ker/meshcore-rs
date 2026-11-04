@@ -1681,6 +1681,53 @@ fn a_repeater_without_internet_pulls_its_update_from_a_neighbour() {
     assert!(fx.console.iter().any(|l| l == &format!("fw: installing 0.5.2 #5 from neighbour {name}")), "{:?}", fx.console);
 }
 
+/// A store that asks its server about what it has no answer for, and hears there is nothing
+/// newer; asked by hand, it forgets that answer (as the firmware's does a minute after the last
+/// time it did).
+struct NothingNewer {
+    known: bool,
+    fetches: std::rc::Rc<std::cell::Cell<u32>>,
+}
+
+impl meshcore::fwshare::FwStore for NothingNewer {
+    fn offer(&mut self, _q: &meshcore::fwshare::FwQuery) -> meshcore::fwshare::Offer {
+        if self.known {
+            return meshcore::fwshare::Offer::NoUpdate;
+        }
+        self.known = true;
+        self.fetches.set(self.fetches.get() + 1);
+        meshcore::fwshare::Offer::Fetching { retry_secs: 60 }
+    }
+    fn read(&mut self, _id: u32, _offset: u32, _buf: &mut [u8]) -> Option<usize> {
+        None
+    }
+    fn refresh(&mut self, _q: &meshcore::fwshare::FwQuery) {
+        self.known = false;
+    }
+}
+
+#[test]
+fn a_check_by_hand_ends_when_the_neighbours_server_has_nothing_newer() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&[5u8; 4000]);
+    let fetches = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut serving = repeater(1);
+    serving.app.prefs.fw_serve = true;
+    serving.app.fw_store = Some(Box::new(NothingNewer { known: false, fetches: fetches.clone() }));
+    serving.app.start(&mut serving.ctx);
+    let (mut r, _slot) = self_updating_repeater(3, &root, &base);
+    r.app.fw_store = Some(Box::new(Offline));
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut serving, &mut r], 20_000);
+
+    // the re-ask after "fetching" is not by hand any more: it takes the server's answer
+    assert!(r.app.handle_command(&mut r.ctx, 0, "fw check").starts_with("OK"));
+    air.run(&mut [&mut serving, &mut r], 5 * 60_000);
+    assert!(matches!(r.app.fw_state(), FwState::UpToDate { .. }), "{:?}", r.app.fw_state());
+    assert_eq!(fetches.get(), 1, "the neighbour asked its server once");
+}
+
 #[test]
 fn fw_source_names_the_neighbour_a_repeater_pulls_from() {
     let root = LocalIdentity::from_seed(&[42; 32]);

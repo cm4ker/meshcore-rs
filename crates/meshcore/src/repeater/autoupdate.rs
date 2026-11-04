@@ -585,8 +585,10 @@ impl Repeater {
                 self.lora_get(ctx, 0);
             }
             (Step::Ask, status::FETCHING) => {
-                // asked again when it should have it
+                // asked again when it should have it; it asks its server already, so not by hand
+                // again (or each question would send it to the server anew)
                 let secs = body.get(..2).map_or(60, |b| u16::from_le_bytes([b[0], b[1]])).clamp(10, 900);
+                self.autoupdate.fresh = false;
                 self.autoupdate.state = FwState::Fetching { whom: peer };
                 self.autoupdate.at = ctx.now + secs as u64 * 1000;
             }
