@@ -264,12 +264,13 @@ jobs:
           sign=target/release/ota-sign
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
           # What a node takes over LoRa by itself: at most meshcore::fwshare::MAX_LORA_FILE, and on a Pro Micro
-          # what its staging area (0x7B000..0xD9000, firmware/models/promicro/src/ota.rs) holds next
-          # to the image the delta rebuilds
+          # running release #62 or before what its staging area (0x7B000..0xD9000,
+          # firmware/models/promicro/src/ota.rs) holds next to the image the delta rebuilds (later
+          # ones apply a delta as it comes)
           lora_max=163840
           lora_room() {
             case "$1" in
-              promicro-*) local img; img=$(stat -c %s "images/$1.bin"); echo $(( 385024 - (img + 4095) / 4096 * 4096 )) ;;
+              promicro-*) if [ "${2##*-r}" -le 62 ]; then local img; img=$(stat -c %s "images/$1.bin"); echo $(( 385024 - (img + 4095) / 4096 * 4096 )); else echo "$lora_max"; fi ;;
               *) echo "$lora_max" ;;
             esac
           }
@@ -306,7 +307,7 @@ jobs:
               $sign delta "prev/$tag/$base" "$mcfw" -o "$delta"
               $sign verify "$delta" --root "$root" --base "prev/$tag/$base"
               size=$(stat -c %s "$delta")
-              room=$(lora_room "$name")
+              room=$(lora_room "$name" "$tag")
               [ "$room" -le "$lora_max" ] || room=$lora_max
               mark=""
               if [ "$size" -gt "$room" ]; then

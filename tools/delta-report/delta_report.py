@@ -34,13 +34,14 @@ DEFAULT_OTA_SIGN = REPO / "target" / "release" / ("ota-sign.exe" if os.name == "
 DEFAULT_CACHE = REPO / "target" / "delta-report"
 # What a node takes over LoRa by itself: meshcore::fwshare::MAX_LORA_FILE
 LORA_MAX = 163840
-# A Pro Micro stages a delta in 0x7B000..0xD9000 (firmware/models/promicro/src/ota.rs), next to the
-# image it rebuilds
+# A Pro Micro running release #62 or before stages a delta in 0x7B000..0xD9000
+# (firmware/models/promicro/src/ota.rs), next to the image it rebuilds; later ones apply it as it comes
 PROMICRO_STAGING = 0xD9000 - 0x7B000
+PROMICRO_LAST_STAGED = 62
 
 
-def lora_room(name, image_len):
-    if name.startswith("promicro-"):
+def lora_room(name, image_len, tag):
+    if name.startswith("promicro-") and int(tag.rsplit("-r", 1)[1]) <= PROMICRO_LAST_STAGED:
         return min(LORA_MAX, PROMICRO_STAGING - (image_len + 4095) // 4096 * 4096)
     return LORA_MAX
 
@@ -162,7 +163,7 @@ def main():
             base_image = work / f"{name}.{tag}.bin"
             run(args.ota_sign, "extract", base, "-o", base_image)
             layout = ram_layout(base_image.read_bytes(), image)
-            room = lora_room(name, len(image))
+            room = lora_room(name, len(image), tag)
             mark = warning = ""
             if size > room:
                 title, mark = "Delta over the LoRa limit", f", over the LoRa limit ({room // 1024} KB)"
