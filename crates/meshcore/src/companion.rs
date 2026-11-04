@@ -583,6 +583,10 @@ pub struct Companion {
     sign_data: Option<Vec<u8>>,
     send_scope: TransportKey,
     send_unscoped: bool,
+    /// When to send the next local (zero-hop) self-advert; 0 = off (`prefs.advert_interval`).
+    next_local_advert: u64,
+    /// When to send the next flood self-advert; 0 = off (`prefs.flood_advert_interval`).
+    next_flood_advert: u64,
     dirty_contacts_expiry: u64,
     /// An imported advert, processed as if received (`_pendingLoopback`).
     loopback: Option<Box<Packet>>,
@@ -632,6 +636,8 @@ impl Companion {
             sign_data: None,
             send_scope: TransportKey::default(),
             send_unscoped: false,
+            next_local_advert: 0,
+            next_flood_advert: 0,
             dirty_contacts_expiry: 0,
             loopback: None,
         };
@@ -650,6 +656,24 @@ impl Companion {
         if latest != 0 && latest + 1 > ctx.current_time() {
             ctx.set_current_time(latest + 1);
         }
+        self.update_advert_timer(ctx);
+        self.update_flood_advert_timer(ctx);
+    }
+
+    /// Arm the local (zero-hop) self-advert timer from `prefs.advert_interval` (minutes / 2).
+    fn update_advert_timer(&mut self, ctx: &MeshCtx) {
+        self.next_local_advert = match self.prefs.advert_interval {
+            0 => 0,
+            n => ctx.now + n as u64 * 2 * 60 * 1000,
+        };
+    }
+
+    /// Arm the flood self-advert timer from `prefs.flood_advert_interval` (hours).
+    fn update_flood_advert_timer(&mut self, ctx: &MeshCtx) {
+        self.next_flood_advert = match self.prefs.flood_advert_interval {
+            0 => 0,
+            n => ctx.now + n as u64 * 60 * 60 * 1000,
+        };
     }
 
     pub fn take_effects(&mut self) -> Effects {
@@ -1648,15 +1672,32 @@ impl MeshApp for Companion {
             self.effects.save_contacts = true;
             self.dirty_contacts_expiry = 0;
         }
+        if self.next_flood_advert != 0 && ctx.now >= self.next_flood_advert {
+            if let Some(pkt) = self.self_advert(ctx) {
+                let key = TransportKey(self.prefs.default_scope_key);
+                self.send_flood_with_key(ctx, key, pkt, 0);
+            }
+            self.update_flood_advert_timer(ctx);
+            self.update_advert_timer(ctx); // so a local one does not follow right behind
+        } else if self.next_local_advert != 0 && ctx.now >= self.next_local_advert {
+            if let Some(pkt) = self.self_advert(ctx) {
+                ctx.send_zero_hop(pkt, 0);
+            }
+            self.update_advert_timer(ctx);
+        }
         self.fw_pull_loop(ctx);
     }
 
     fn next_timer(&self) -> Option<u64> {
-        let contacts = (self.dirty_contacts_expiry != 0).then_some(self.dirty_contacts_expiry);
-        match (contacts, self.fw_pull_timer()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [
+            (self.dirty_contacts_expiry != 0).then_some(self.dirty_contacts_expiry),
+            (self.next_local_advert != 0).then_some(self.next_local_advert),
+            (self.next_flood_advert != 0).then_some(self.next_flood_advert),
+            self.fw_pull_timer(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn take_loopback(&mut self) -> Option<Box<Packet>> {

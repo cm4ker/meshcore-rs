@@ -1027,6 +1027,43 @@ impl Companion {
         })
     }
 
+    /// Periodic self-advert, as on a repeater: `get/set advert.interval` (local zero-hop, minutes)
+    /// and `get/set flood.advert.interval` (flooded, hours); 0 turns either off. Returns `None`
+    /// when `cmd` is neither.
+    fn advert_interval_command(&mut self, ctx: &MeshCtx, cmd: &str) -> Option<String> {
+        /// Shortest local advert interval, in minutes (upstream's `MIN_LOCAL_ADVERT_INTERVAL`).
+        const MIN_LOCAL: u32 = 60;
+        if cmd == "get advert.interval" {
+            return Some(format!("> {}", self.prefs.advert_interval as u32 * 2));
+        }
+        if cmd == "get flood.advert.interval" {
+            return Some(format!("> {}", self.prefs.flood_advert_interval));
+        }
+        if let Some(v) = cmd.strip_prefix("set flood.advert.interval ") {
+            let hours = atoi(v);
+            return Some(if (hours > 0 && hours < 3) || hours > 168 {
+                "Error: interval range is 3-168 hours".into()
+            } else {
+                self.prefs.flood_advert_interval = hours as u8;
+                self.update_flood_advert_timer(ctx);
+                self.effects.save_prefs = true;
+                "OK".into()
+            });
+        }
+        if let Some(v) = cmd.strip_prefix("set advert.interval ") {
+            let mins = atoi(v);
+            return Some(if (mins > 0 && mins < MIN_LOCAL) || mins > 240 {
+                format!("Error: interval range is {MIN_LOCAL}-240 minutes")
+            } else {
+                self.prefs.advert_interval = (mins / 2) as u8;
+                self.update_advert_timer(ctx);
+                self.effects.save_prefs = true;
+                "OK".into()
+            });
+        }
+        None
+    }
+
     /// Pins the root keys whose signed releases are installed (`set ota.root`, the `ota_root`
     /// custom variable); with none, unsigned ones are and nothing is pulled from a repeater.
     fn pin_ota_roots(&mut self, roots: Vec<release::Fingerprint>) {
@@ -1268,6 +1305,9 @@ impl Companion {
         }
         if let Some(v) = cmd.strip_prefix("set adc.multiplier ") {
             return Some(self.set_adc_multiplier(v).unwrap_or_else(|| "Error: unsupported".into()));
+        }
+        if let Some(r) = self.advert_interval_command(ctx, cmd) {
+            return Some(r);
         }
         if cmd == "gps" || cmd.starts_with("gps ") {
             return Some(self.gps_command(ctx, cmd[3..].trim()));

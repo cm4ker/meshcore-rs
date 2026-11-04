@@ -1129,6 +1129,38 @@ fn adc_multiplier_on_a_companion() {
     assert_eq!(a.app.adc_multiplier(), Some(5.42));
 }
 
+/// Periodic self-advert on a companion, as on a repeater: `advert.interval` (local, minutes) and
+/// `flood.advert.interval` (hours), off by default, kept in prefs.
+#[test]
+fn periodic_self_advert() {
+    let mut air = Air::new();
+    air.link(0, 1);
+    let mut a = companion(1, "Alice");
+    let mut b = companion(2, "Bob");
+    let cli = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
+
+    // off by default
+    assert_eq!(cli(&mut a, "get advert.interval"), "> 0");
+    assert_eq!(cli(&mut a, "get flood.advert.interval"), "> 0");
+
+    // ranges rejected, as on a repeater
+    assert_eq!(cli(&mut a, "set advert.interval 30"), "Error: interval range is 60-240 minutes");
+    assert_eq!(cli(&mut a, "set flood.advert.interval 2"), "Error: interval range is 3-168 hours");
+
+    // local zero-hop advert every hour; stored as minutes / 2
+    assert_eq!(cli(&mut a, "set advert.interval 60"), "OK");
+    assert!(a.app.take_effects().save_prefs);
+    assert_eq!(cli(&mut a, "get advert.interval"), "> 60");
+    assert_eq!(cli(&mut a, "set flood.advert.interval 6"), "OK");
+    let saved = CompanionPrefs::deserialize(&a.app.prefs.serialize(), 22);
+    assert_eq!((saved.advert_interval, saved.flood_advert_interval), (30, 6));
+
+    // Bob hears Alice advertise herself without any prompting
+    frames(&mut b);
+    air.run(&mut [&mut a, &mut b], 61 * 60 * 1000);
+    assert!(!only(&frames(&mut b), PUSH_CODE_ADVERT).is_empty());
+}
+
 #[test]
 fn round_trip_manual_path() {
     // Alice -- Repeater -- Bob; the app gives Alice a path to Bob, and Bob learns the way back

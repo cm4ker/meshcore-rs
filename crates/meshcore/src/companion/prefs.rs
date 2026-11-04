@@ -54,6 +54,11 @@ pub struct CompanionPrefs {
     pub interference_threshold: u8,
     /// AGC reset interval in seconds / 4; 0 = off.
     pub agc_reset_interval: u8,
+    /// Local (zero-hop) self-advert interval in minutes / 2 (`set advert.interval`, as a
+    /// repeater's); 0 = off, the default.
+    pub advert_interval: u8,
+    /// Flood self-advert interval in hours (`set flood.advert.interval`); 0 = off, the default.
+    pub flood_advert_interval: u8,
     /// Client repeat mode off (the default).
     pub disable_fwd: bool,
     pub default_scope_name: String,
@@ -116,6 +121,8 @@ impl Default for CompanionPrefs {
             cad_enabled: false,
             interference_threshold: 0,
             agc_reset_interval: 0,
+            advert_interval: 0,
+            flood_advert_interval: 0,
             disable_fwd: true,
             default_scope_name: String::new(),
             default_scope_key: [0; 16],
@@ -154,6 +161,8 @@ impl CompanionPrefs {
         self.default_scope_name = truncate_str(&self.default_scope_name, SCOPE_NAME_MAX);
         self.gps_interval = self.gps_interval.min(86_400);
         self.adc_multiplier = self.adc_multiplier.clamp(0.0, 10.0);
+        self.advert_interval = self.advert_interval.min(120); // 240 minutes / 2
+        self.flood_advert_interval = self.flood_advert_interval.min(168);
     }
 
     pub fn is_repeat_enabled(&self) -> bool {
@@ -190,6 +199,8 @@ impl CompanionPrefs {
         let _ = writeln!(s, "cad={}", b(self.cad_enabled));
         let _ = writeln!(s, "int_thr={}", self.interference_threshold);
         let _ = writeln!(s, "agc_int={}", self.agc_reset_interval);
+        let _ = writeln!(s, "adv_int={}", self.advert_interval);
+        let _ = writeln!(s, "f_adv_int={}", self.flood_advert_interval);
         let _ = writeln!(s, "disable_fwd={}", b(self.disable_fwd));
         let _ = writeln!(s, "defs_nm={}", escape(&self.default_scope_name));
         let _ = writeln!(s, "defs_key={}", to_hex(&self.default_scope_key));
@@ -245,6 +256,8 @@ impl CompanionPrefs {
                 "cad" => p.cad_enabled = flag(),
                 "int_thr" => p.interference_threshold = u8v(),
                 "agc_int" => p.agc_reset_interval = u8v(),
+                "adv_int" => p.advert_interval = u8v(),
+                "f_adv_int" => p.flood_advert_interval = u8v(),
                 "disable_fwd" => p.disable_fwd = flag(),
                 "defs_nm" => p.default_scope_name = unescape(v),
                 "defs_key" => {
