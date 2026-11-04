@@ -18,7 +18,7 @@ fn main() {
 /// The update installer (installer/), built as its own program and carried as a flat image
 /// (src/ota.rs puts it in place before an update).
 fn build_installer(out: &Path) {
-    for f in ["installer/src/main.rs", "installer/Cargo.toml", "installer/memory.x", "installer/build.rs"] {
+    for f in ["installer/src", "installer/Cargo.toml", "installer/memory.x", "installer/build.rs", "installer/.cargo/config.toml"] {
         println!("cargo:rerun-if-changed={f}");
     }
     let target_dir = out.join("installer-target");

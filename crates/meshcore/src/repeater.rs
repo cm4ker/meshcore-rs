@@ -273,6 +273,8 @@ pub struct BoardInfo {
     pub fw_rollback: bool,
     /// The release this node was rolled back from: not installed by itself again (0 = none).
     pub fw_skip: u32,
+    /// The node went back by itself: `fw_prev` failed its trial boots.
+    pub fw_prev_failed: bool,
     /// A GPS receiver is wired to the board (`gps` CLI); false = this board has none.
     pub has_gps: bool,
     /// The receiver's latest reading, kept by the firmware for the `gps` CLI; none while the

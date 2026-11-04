@@ -134,6 +134,13 @@ pub fn trial_line(kept_in_secs: u64, prev: &str) -> String {
     }
 }
 
+/// The second line of `fw` after the node went back by itself, while nothing newer is known:
+/// `prev` (the firmware left) failed its trial boots.
+pub fn failed_line(prev: &str) -> String {
+    let prev = if prev.is_empty() { "the update" } else { prev };
+    format!("rolled back: {prev} did not start")
+}
+
 /// Wall-clock hours and minutes, UTC.
 pub fn hm(t: u32) -> String {
     let (_, _, _, h, mi, _) = epoch_to_datetime(t);

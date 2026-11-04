@@ -1320,6 +1320,12 @@ fn fw_tells_what_runs_where_the_update_stands_and_what_the_store_holds() {
     r.app.board.fw_rollback = true;
     assert_eq!(r.app.handle_command(&mut r.ctx, 0, "fw rollback"), "OK - back to 0.8.2 #42: restarting");
     assert!(r.app.take_effects().fw_rollback);
+
+    // back by itself: the update it left did not start
+    r.app.board.fw_trial_until = None;
+    r.app.board.fw_prev = "0.8.4 #60".into();
+    r.app.board.fw_prev_failed = true;
+    assert_eq!(fw(&mut r).lines().nth(1), Some("rolled back: 0.8.4 #60 did not start"));
 }
 
 fn serving_repeater(file: Vec<u8>) -> Mesh<Repeater> {

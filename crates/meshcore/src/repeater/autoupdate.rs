@@ -172,7 +172,10 @@ impl Repeater {
         if let Some(until) = self.board.fw_trial_until.filter(|&t| t > ctx.now) {
             return fwstate::trial_line((until - ctx.now) / 1000, &self.board.fw_prev);
         }
-        self.fw_state().line()
+        match self.fw_state() {
+            FwState::Off | FwState::Waiting { .. } if self.board.fw_prev_failed => fwstate::failed_line(&self.board.fw_prev),
+            s => s.line(),
+        }
     }
 
     /// Start a check now (`fw check`, `fw update`): the reply says where it asks.

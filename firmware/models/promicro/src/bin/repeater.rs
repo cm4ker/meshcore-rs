@@ -2,8 +2,8 @@
 //!
 //! The repeater and its CLI are the same as on the Heltec boards (`meshcore::repeater`); this is
 //! the board under them: the radio, the console on the USB port, the node's data in the internal
-//! flash. No Wi-Fi, no BLE window and no over-the-air updates on this board yet: a new firmware
-//! goes on as UF2 over USB (`tools/uf2/flash_uf2.py`).
+//! flash. No Wi-Fi and no BLE window: a new firmware comes over LoRa (`promicro::ota`) or goes on
+//! as UF2 over USB (`tools/uf2/flash_uf2.py`).
 
 #![no_std]
 #![no_main]
@@ -60,6 +60,9 @@ const BUILD_DATE: &str = env!("BUILD_DATE");
 /// keeps running into the UF2 bootloader (the 1200 baud touch is a soft reset), which does not
 /// feed it: copying the next firmware has to fit in.
 const WATCHDOG_SECS: u32 = 60;
+
+/// A trial firmware that keeps running this long is kept.
+const TRIAL_HEALTHY_MS: u64 = 120_000;
 
 /// Upstream's Pro Micro build transmits at 22 dBm (`LORA_TX_POWER`).
 const DEFAULT_TX_DBM: i8 = 22;
@@ -250,6 +253,8 @@ async fn main(spawner: Spawner) {
     if let Some(s) = &store {
         ota::clear_request(s);
     }
+    // count trial boots of a fresh update before anything can hang
+    let in_trial = store.as_ref().is_some_and(ota::check_trial);
     let prefs = load(&store, Blob::Prefs)
         .map(|d| NodePrefs::deserialize(&String::from_utf8_lossy(&d)))
         .unwrap_or_else(|| NodePrefs { tx_power_dbm: DEFAULT_TX_DBM, ..Default::default() });
@@ -272,11 +277,16 @@ async fn main(spawner: Spawner) {
     .without_rx_patch();
     if let Err(e) = radio.init(prefs.radio, prefs.tx_power_dbm, prefs.rx_boosted_gain).await {
         println!("ERROR: radio init failed: {e:?}");
+        // a firmware on trial that cannot use the radio counts as one that did not start
+        let give_up = in_trial.then(|| now_ms() + 10_000);
         loop {
             led.toggle();
             Timer::after_millis(200).await;
             if let Some(w) = &mut watchdog {
                 w.pet();
+            }
+            if give_up.is_some_and(|t| now_ms() >= t) {
+                cortex_m::peripheral::SCB::sys_reset();
             }
         }
     }
@@ -369,6 +379,10 @@ async fn main(spawner: Spawner) {
         Some(t) => mesh.app.ota.target = Some(Box::new(t)),
         None => warn!("OTA: the bootloader checks this app's CRC (BLE DFU): updates over USB only"),
     }
+    if let Some(s) = &store {
+        let b = &mut mesh.app.board;
+        (b.fw_rollback, b.fw_prev, b.fw_skip, b.fw_prev_failed) = ota::previous(s);
+    }
     mesh.begin(now_ms());
     mesh.app.start(&mut mesh.ctx);
     let mut room = mesh.app.prefs.room.then(|| {
@@ -390,6 +404,9 @@ async fn main(spawner: Spawner) {
     let mut next_clock_save = now_ms() + CLOCK_SAVE_INTERVAL_MS;
     let mut last_clock = mesh.ctx.current_time();
     let mut reboot_at: Option<u64> = None;
+    let mut in_trial = in_trial;
+    let confirm_at = now_ms() + TRIAL_HEALTHY_MS;
+    mesh.app.board.fw_trial_until = in_trial.then_some(confirm_at);
     loop {
         if let Some(w) = &mut watchdog {
             w.pet();
@@ -598,6 +615,15 @@ async fn main(spawner: Spawner) {
             // leave time for a remote CLI reply to go out
             reboot_at = Some(now + 3000);
         }
+        if fx.fw_rollback {
+            if store.as_ref().is_some_and(ota::rollback) {
+                reboot_at = Some(now + 3000);
+            } else {
+                warn!("fw rollback: no firmware to go back to");
+            }
+        }
+        // an update coming in takes the staging area over from the firmware to go back to
+        mesh.app.board.fw_rollback &= ota::PREVIOUS_KEPT.load(core::sync::atomic::Ordering::Relaxed);
         if let Some(r) = room.as_mut() {
             let rfx = r.app.take_effects();
             for line in &rfx.console {
@@ -624,6 +650,15 @@ async fn main(spawner: Spawner) {
             let _ = radio.sleep();
             Timer::after_millis(200).await; // the line goes out
             board::system_off();
+        }
+
+        if in_trial && now >= confirm_at {
+            if let Some(s) = &store {
+                ota::confirm(s);
+            }
+            in_trial = false;
+            mesh.app.board.fw_trial_until = None;
+            info!("OTA: new firmware confirmed");
         }
 
         if reboot_at.is_some_and(|t| now >= t) {

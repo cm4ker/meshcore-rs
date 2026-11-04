@@ -2,4 +2,5 @@
 target = "thumbv7em-none-eabihf"
 
 [target.thumbv7em-none-eabihf]
-rustflags = ["-C", "link-arg=--nmagic"]
+# the compact SHA-256: three pages hold the installer
+rustflags = ["-C", "link-arg=--nmagic", "--cfg", 'sha2_backend_soft="compact"']

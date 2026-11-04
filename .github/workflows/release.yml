@@ -54,6 +54,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: cargo test --workspace --locked
+      # the Pro Micro's update installer: its swap, with the power going at any step
+      - run: cargo test --lib --locked --target x86_64-unknown-linux-gnu
+        working-directory: firmware/models/promicro/installer
 
   esp32s3:
     name: Heltec V4 and V3 (ESP32-S3)
