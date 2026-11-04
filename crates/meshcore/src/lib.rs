@@ -31,6 +31,7 @@ pub mod release;
 pub mod repeater;
 pub mod rng;
 pub mod rtc;
+pub mod sensor;
 pub mod tables;
 pub mod uplink;
 pub mod util;

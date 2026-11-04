@@ -28,6 +28,7 @@ use crate::prefs::*;
 use crate::radio::RadioParams;
 use crate::region::{REGION_DENY_FLOOD, RegionMap, TransportKey, is_name_char};
 use crate::rtc::DEFAULT_EPOCH;
+use crate::sensor::descriptor::Descriptor;
 use crate::util::{atof, atoi, atoi_signed, epoch_to_datetime, from_hex, ftoa, parse_key_prefix, to_hex, truncate_str};
 use crate::{FIRMWARE_VERSION, MAX_ADVERT_DATA_SIZE, MAX_PACKET_PAYLOAD, MAX_PATH_SIZE, PRV_KEY_SIZE, PUB_KEY_SIZE};
 
@@ -199,6 +200,8 @@ pub struct Effects {
     pub fw_rollback: bool,
     /// Persist the region map.
     pub save_regions: bool,
+    /// Persist the text-described sensors.
+    pub save_sensors: bool,
     /// Wi-Fi or MQTT settings changed: reconnect.
     pub network_changed: bool,
     /// The bridge was switched on or off, or moved to another channel: restart its medium.
@@ -309,6 +312,8 @@ pub struct Repeater {
     pub regions: RegionMap,
     /// `region load` in progress: (new map, parent stack by indent level).
     region_load: Option<(RegionMap, [Option<u16>; 8])>,
+    /// Text-described I2C sensors (`sensor add`); the firmware drives them over the bus.
+    pub sensor_descriptors: Vec<Descriptor>,
     logging: bool,
     /// Reply route picked by an anonymous request handler: (path_len, path).
     reply_path: Option<(u8, [u8; MAX_PATH_SIZE])>,
@@ -385,6 +390,7 @@ impl Repeater {
             recv_region: None,
             regions: RegionMap::new(),
             region_load: None,
+            sensor_descriptors: Vec::new(),
             logging: false,
             reply_path: None,
             ota,
@@ -459,6 +465,26 @@ impl Repeater {
 
     pub fn neighbours(&self) -> &[Neighbour] {
         &self.neighbours
+    }
+
+    /// The text-described sensors as one line each, for the flash blob.
+    pub fn sensors_serialize(&self) -> String {
+        let mut out = String::new();
+        for d in &self.sensor_descriptors {
+            out.push_str(&format!("{d}\n"));
+        }
+        out
+    }
+
+    /// Replace the sensor list from a saved blob (one descriptor per line; bad lines are skipped).
+    pub fn sensors_load(&mut self, text: &str) {
+        self.sensor_descriptors = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| Descriptor::parse(l).ok())
+            .take(crate::sensor::descriptor::MAX_SENSORS)
+            .collect();
     }
 
     /// The battery multiplier in use: the one set with `set adc.multiplier`, else the board's own
@@ -1700,14 +1726,48 @@ impl Repeater {
         if cmd == "power" {
             return format!("batt:{} mV usb:n/a solar_chg:n/a ext:no charger:no", self.board.batt_mv);
         }
+        if let Some(line) = cmd.strip_prefix("sensor add ") {
+            return match Descriptor::parse(line) {
+                Ok(d) => {
+                    let exists = self.sensor_descriptors.iter().any(|e| e.name == d.name);
+                    if !exists && self.sensor_descriptors.len() >= crate::sensor::descriptor::MAX_SENSORS {
+                        return "err: too many sensors".into();
+                    }
+                    self.sensor_descriptors.retain(|e| e.name != d.name);
+                    self.sensor_descriptors.push(d);
+                    self.effects.save_sensors = true;
+                    "OK".into()
+                }
+                Err(e) => format!("err: {e:?}"),
+            };
+        }
+        if let Some(name) = cmd.strip_prefix("sensor del ") {
+            let before = self.sensor_descriptors.len();
+            self.sensor_descriptors.retain(|d| d.name != name);
+            if self.sensor_descriptors.len() == before {
+                return "not found".into();
+            }
+            self.effects.save_sensors = true;
+            return "OK".into();
+        }
+        if cmd.starts_with("sensor list") {
+            if self.sensor_descriptors.is_empty() {
+                return "no sensors".into();
+            }
+            let mut out = String::new();
+            for d in &self.sensor_descriptors {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!("{d}"));
+            }
+            return out;
+        }
         if cmd.starts_with("sensor get ") {
             return "null".into();
         }
         if cmd.starts_with("sensor set ") {
             return "can't find custom var".into();
-        }
-        if cmd.starts_with("sensor list") {
-            return "no custom var".into();
         }
         if cmd.starts_with("region") {
             return self.handle_region_command(ctx, cmd);

@@ -40,6 +40,8 @@ pub enum Blob {
     Room = 6,
     /// Hosted room server's ACL.
     RoomAcl = 7,
+    /// Text-described I2C sensors (`sensor add`), one descriptor per line.
+    Sensors = 8,
 }
 
 /// Small blobs of the companion partition.
@@ -56,7 +58,7 @@ pub enum CompBlob {
 }
 
 /// Blobs in the `meshcore` partition (two sectors each).
-const BLOBS: u32 = 8;
+const BLOBS: u32 = 9;
 
 /// Companion partition layout, in sectors: small blobs, the advert table, then the ring log.
 const COMP_BLOB_SECTORS: u32 = 16;

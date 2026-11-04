@@ -41,40 +41,40 @@ impl Reading {
     }
 }
 
-pub struct Ina219 {
-    i2c: Twim<'static>,
-}
+/// The driver is stateless (the calibration lives on the chip); it borrows the shared I2C bus per
+/// call so other sensors can sit on the same bus.
+pub struct Ina219;
 
 impl Ina219 {
     /// The sensor set up, or `None` if nothing answers at its address.
-    pub async fn probe(i2c: Twim<'static>) -> Option<Self> {
-        let mut s = Self { i2c };
-        (s.write(REG_CALIBRATION, CALIBRATION_32V_2A).await && s.write(REG_CONFIG, CONFIG_32V_2A).await).then_some(s)
+    pub async fn probe(i2c: &mut Twim<'static>) -> Option<Self> {
+        (write(i2c, REG_CALIBRATION, CALIBRATION_32V_2A).await && write(i2c, REG_CONFIG, CONFIG_32V_2A).await)
+            .then_some(Self)
     }
 
-    pub async fn read(&mut self) -> Option<Reading> {
-        let bus = self.register(REG_BUS_VOLTAGE).await?;
+    pub async fn read(&self, i2c: &mut Twim<'static>) -> Option<Reading> {
+        let bus = register(i2c, REG_BUS_VOLTAGE).await?;
         // a sharp load can reset the chip and its calibration with it: Adafruit's driver writes
         // the calibration again before reading current or power
-        self.write(REG_CALIBRATION, CALIBRATION_32V_2A).await;
-        let current = self.register(REG_CURRENT).await? as i16;
-        self.write(REG_CALIBRATION, CALIBRATION_32V_2A).await;
-        let power = self.register(REG_POWER).await? as i16;
+        write(i2c, REG_CALIBRATION, CALIBRATION_32V_2A).await;
+        let current = register(i2c, REG_CURRENT).await? as i16;
+        write(i2c, REG_CALIBRATION, CALIBRATION_32V_2A).await;
+        let power = register(i2c, REG_POWER).await? as i16;
         Some(Reading {
             bus_v: (bus >> 3) as f32 * 0.004,
             current_ma: current as f32 / CURRENT_STEPS_PER_MA,
             power_mw: power as f32 * POWER_MW_PER_STEP,
         })
     }
+}
 
-    async fn write(&mut self, reg: u8, value: u16) -> bool {
-        let [hi, lo] = value.to_be_bytes();
-        matches!(with_timeout(TIMEOUT, self.i2c.write(ADDRESS, &[reg, hi, lo])).await, Ok(Ok(())))
-    }
+async fn write(i2c: &mut Twim<'static>, reg: u8, value: u16) -> bool {
+    let [hi, lo] = value.to_be_bytes();
+    matches!(with_timeout(TIMEOUT, i2c.write(ADDRESS, &[reg, hi, lo])).await, Ok(Ok(())))
+}
 
-    async fn register(&mut self, reg: u8) -> Option<u16> {
-        let mut buf = [0u8; 2];
-        matches!(with_timeout(TIMEOUT, self.i2c.write_read(ADDRESS, &[reg], &mut buf)).await, Ok(Ok(())))
-            .then(|| u16::from_be_bytes(buf))
-    }
+async fn register(i2c: &mut Twim<'static>, reg: u8) -> Option<u16> {
+    let mut buf = [0u8; 2];
+    matches!(with_timeout(TIMEOUT, i2c.write_read(ADDRESS, &[reg], &mut buf)).await, Ok(Ok(())))
+        .then(|| u16::from_be_bytes(buf))
 }
