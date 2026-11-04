@@ -33,6 +33,7 @@ use log::{info, warn};
 use heltec_v4::board::Fem;
 use heltec_v4::common::Battery;
 use heltec_v4::display::Oled;
+use heltec_v4::power::Sleeper;
 use heltec_v4::reset;
 use heltec_v4::radio::EspIrq;
 use heltec_v4::storage;
@@ -50,8 +51,8 @@ const BUILD_DATE: &str = env!("BUILD_DATE");
 const WATCHDOG_SECS: u64 = 30;
 /// SX1262 output; the FEM's PA makes ~22 dBm of 10 dBm.
 const MAX_TX_POWER_DBM: i8 = 22;
-/// The on-device interface (no Bluetooth page: the ESP BLE task cannot be switched off yet; no
-/// power-off page: nothing but a reset would wake the board).
+/// The on-device interface (no Bluetooth page: the ESP BLE task cannot be switched off yet). A
+/// long press on the home page turns the board off, as on the repeater; the button turns it on.
 const PAGES: &[Page] = &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Gps, Page::Pull, Page::Advert];
 
 struct HeltecV4<'d> {
@@ -59,6 +60,7 @@ struct HeltecV4<'d> {
     led: Output<'d>,
     battery: Battery<'d>,
     button: Input<'d>,
+    sleeper: Sleeper<'d>,
     oled: Option<Oled<'d>>,
     oled_failures: u8,
     next_oled_try: u64,
@@ -92,13 +94,19 @@ impl Board for HeltecV4<'_> {
         self.fem.set_lna(on);
     }
 
+    /// As the repeater's: deep sleep until the button, the front end unpowered.
     fn power_off(&mut self) {
         heltec_v4::gps::GPS_ON.signal(false);
-        self.fem.shutdown();
+        self.fem.power_off();
+        // the radio sleeps until NSS goes low: keep it high while the chip's pins are off
+        let mut nss =
+            Output::new(unsafe { esp_hal::peripherals::GPIO8::steal() }, Level::High, OutputConfig::default());
+        nss.set_pad_hold(true);
         self.led.set_low();
         if let Some(o) = self.oled.as_mut() {
             o.set_on(false);
         }
+        self.sleeper.power_off(&mut self.button);
     }
 
     async fn battery_mv(&mut self) -> u16 {
@@ -240,6 +248,7 @@ async fn main(spawner: Spawner) -> ! {
         led,
         battery,
         button: Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::Up)),
+        sleeper: Sleeper::new(p.LPWR),
         oled,
         oled_failures: 0,
         next_oled_try: 0,

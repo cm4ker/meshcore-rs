@@ -60,6 +60,8 @@ const CONTACTS_SAVE_INTERVAL_MS: u64 = 30_000;
 pub const TCP_PORT: u16 = 5000;
 /// A button press this long sends a zero-hop advert.
 const ADVERT_PRESS_MS: u64 = 1500;
+/// `poweroff` or a long press on the home page: the "off" page stays up this long first.
+const OFF_PAGE_MS: u64 = 2000;
 /// Static BLE PIN of boards without a screen when none is set (upstream `BLE_PIN_CODE`).
 const DEFAULT_BLE_PIN: u32 = 123_456;
 /// The clock follows the GPS this often (upstream `TIME_SYNC_INTERVAL`).
@@ -79,6 +81,8 @@ pub trait Board {
     fn on_tx_end(&mut self) {}
     /// External LNA (if the front end has a switchable one).
     fn set_lna(&mut self, _on: bool) {}
+    /// Off until the button is pressed (the radio sleeps already, the button is up). May return:
+    /// the loop then waits for nothing.
     fn power_off(&mut self) {}
     async fn battery_mv(&mut self) -> u16 {
         0
@@ -490,11 +494,13 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     // where replies go: the link of the latest request
     let mut reply_to = Link::Usb;
     let mut next_screen = 0u64;
-    let mut ui = Ui::new(board.ui_pages());
+    // a long press on the home page turns the board off, as on the repeater
+    let mut ui = Ui::new(board.ui_pages()).with_home_action(Action::PowerOff);
     if !board.always_on() {
         ui = ui.with_screen_timeout(SCREEN_ON_MS, now_ms());
     }
-    let mut button = Button::default();
+    // a button down at boot is the press that turned the board on: it must not turn it off again
+    let mut button = if board.button_down() { Button::held() } else { Button::default() };
     let mut next_gps = 0u64;
     let mut next_gps_position = 0u64;
     let mut next_gps_time = 0u64;
@@ -733,7 +739,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             save_identity(&store, &prv);
         }
         contacts_pending |= fx.save_contacts;
-        if contacts_pending && (now >= last_contacts_save + CONTACTS_SAVE_INTERVAL_MS || fx.reboot) {
+        if contacts_pending && (now >= last_contacts_save + CONTACTS_SAVE_INTERVAL_MS || fx.reboot || fx.power_off) {
             contacts_pending = false;
             last_contacts_save = now;
             if let Some(s) = &store {
@@ -777,11 +783,18 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         }
         if fx.power_off {
             let _ = radio.sleep();
+            comp_save(&store, CompBlob::Clock, &mesh.ctx.current_time().to_le_bytes());
             if ui.enabled() {
                 let mut view = build_view(&mut ui, &mesh, BleState::Off, None, 0, 0, now);
                 view.body = Body::Off { name: mesh.app.prefs.node_name.clone() };
                 (view.alert, view.pin) = (None, None);
                 board.show_view(&view);
+                Timer::after_millis(OFF_PAGE_MS).await;
+            }
+            // a button still down would turn the board on again at once
+            while board.button_down() {
+                platform.feed_watchdog();
+                Timer::after_millis(50).await;
             }
             board.power_off();
             loop {
