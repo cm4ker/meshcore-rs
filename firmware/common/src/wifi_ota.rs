@@ -71,7 +71,8 @@ pub struct Params {
     /// WPA2 passphrase (>= 8 chars), or `None` for an open network.
     pub password: Option<String>,
     pub node_name: String,
-    pub version: &'static str,
+    /// The running release, as `fw` names it (`0.8.6 #76`).
+    pub version: String,
     /// One-time upload code.
     pub code: u32,
     pub store: SharedStore<'static>,
@@ -188,7 +189,7 @@ x.upload.onprogress=function(e){{document.getElementById('p').value=e.loaded*100
 x.onload=function(){{s.textContent=x.responseText}};x.onerror=function(){{s.textContent='upload failed'}};\
 s.textContent='uploading...';x.send(f)}}</script>",
         name = escape_html(&params.node_name),
-        ver = params.version,
+        ver = escape_html(&params.version),
         slot = params.slots.booted,
         signed = if params.roots.is_empty() { "" } else { " (a root key is pinned: only signed releases)" }
     )
@@ -245,7 +246,9 @@ async fn check_envelope(
                 let (envelope, _) =
                     Envelope::parse(&body[..env_len]).ok_or_else(|| String::from("unreadable release envelope"))?;
                 if !params.roots.is_empty() {
-                    envelope.check(&params.roots, &params.owners, &params.build).map_err(|r| format!("release refused: {r:?}"))?;
+                    envelope
+                        .check(&params.roots, &params.owners, &params.build)
+                        .map_err(|r| format!("release refused: {}", envelope.refusal_text(r, &params.build)))?;
                 }
                 let m = &envelope.manifest;
                 if m.image_len as usize != len - env_len {

@@ -202,7 +202,7 @@ pub fn refusal(code: u8) -> &'static str {
     match code {
         c if c == OtaError::Untrusted as u8 => "not signed by the pinned root key",
         c if c == OtaError::NotOwner as u8 => "not signed by the owner key",
-        c if c == OtaError::WrongBoard as u8 => "made for another board",
+        c if c == OtaError::WrongBoard as u8 => "made for another board or role",
         c if c == OtaError::Downgrade as u8 => "older than this firmware",
         c if c == OtaError::BaseMismatch as u8 => "made for another firmware than this one",
         c if c == OtaError::BadEnvelope as u8 => "unreadable",

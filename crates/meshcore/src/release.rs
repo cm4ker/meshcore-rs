@@ -399,6 +399,26 @@ impl Envelope {
         }
         Ok(())
     }
+
+    /// Why [`check`](Self::check) refused it, for people: what the release is against what the
+    /// device runs, so a file picked for another board or role says which.
+    pub fn refusal_text(&self, refusal: Refusal, build: &Build) -> String {
+        let m = &self.manifest;
+        match refusal {
+            Refusal::Untrusted => "not signed by the pinned root key".into(),
+            Refusal::NotOwner => "not signed by the owner key".into(),
+            Refusal::WrongBoard => alloc::format!(
+                "the file is for {} {}, this device is {} {}",
+                board_name(m.board),
+                role_name(m.role),
+                board_name(build.board),
+                role_name(build.role)
+            ),
+            Refusal::Downgrade => {
+                alloc::format!("release {} #{} is older than the running #{}", m.version, m.counter, build.counter)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -463,9 +483,17 @@ mod tests {
         let v3 = Manifest { board: board::HELTEC_V3, ..manifest() };
         assert_eq!(signed(&root, v3).check(&pin, &[], &build), Err(Refusal::WrongBoard));
         let companion = Manifest { role: role::COMPANION, ..manifest() };
-        assert_eq!(signed(&root, companion).check(&pin, &[], &build), Err(Refusal::WrongBoard));
+        assert_eq!(signed(&root, companion.clone()).check(&pin, &[], &build), Err(Refusal::WrongBoard));
+        assert_eq!(
+            signed(&root, companion).refusal_text(Refusal::WrongBoard, &build),
+            "the file is for heltec-v4 companion, this device is heltec-v4 repeater"
+        );
         let old = Manifest { counter: 40, ..manifest() };
-        assert_eq!(signed(&root, old).check(&pin, &[], &build), Err(Refusal::Downgrade));
+        assert_eq!(signed(&root, old.clone()).check(&pin, &[], &build), Err(Refusal::Downgrade));
+        assert_eq!(
+            signed(&root, old).refusal_text(Refusal::Downgrade, &build),
+            "release 0.5.0 #40 is older than the running #41"
+        );
         let same = Manifest { counter: 41, ..manifest() };
         assert_eq!(signed(&root, same).check(&pin, &[], &build), Ok(()), "reinstalling the running release");
     }
