@@ -19,7 +19,8 @@
 
 В выпуске на GitHub у каждой сборки свой файл `<плата>-<роль>-<версия>-r<номер>.mcfw`
 (`heltec-v4-repeater`, `heltec-v3-companion`, `xiao-c6-repeater`, `t-echo-companion`…), у T-Echo
-и Pro Micro ещё `.uf2` для загрузчика по USB (компаньону Pro Micro нужен только он).
+и Pro Micro ещё `.uf2` для загрузчика по USB (компаньону Pro Micro нужен только он; для веб-флешеров
+есть `promicro-companion.zip`).
 
 ## Возможности
 
@@ -282,8 +283,12 @@ python ..\..\..\tools\uf2\elf2uf2.py target\thumbv7em-none-eabihf\release\compan
 python ..\..\..\tools\uf2\flash_uf2.py companion.uf2 --drive PROMICRO --vid 0x239A --pid 0x00B3
 ```
 
-DFU по BLE из загрузчика (nRF Connect, приложение MeshCore) для компаньона не годится: загрузчик
-кладёт новый образ во вторую половину flash, поверх контактов и данных репитера.
+Веб-флешеры (кастомная прошивка) берут `promicro-companion.zip` из выпуска: тот же образ, пакетом
+для serial DFU загрузчика, как у upstream (`elf2uf2.py --dfu-zip`). Для первой прошивки он годится,
+для обновлений — нет: DFU (по USB или по BLE из nRF Connect) кладёт новый образ во вторую половину
+flash, с 0x89800, поверх контактов; ключ остаётся. Обновлять компаньон — файлом .uf2. Репитеру
+пакета нет: его образ лёг бы поверх ключа и настроек (0xDA000), а после DFU загрузчик проверяет CRC
+прошивки, и обновления по воздуху выключаются.
 
 Спящую ноду (`powersaving on`) по USB не прошить: сначала разбудить её кнопкой PRG или выключить
 сон удалённо (`powersaving off` по LoRa). `--erase-parts otadata` нужен, чтобы загрузчик стартовал со слота 0. Ключ и настройки лежат в

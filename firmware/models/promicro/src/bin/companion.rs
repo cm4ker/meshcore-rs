@@ -201,7 +201,8 @@ async fn main(spawner: Spawner) {
     let rxen = Output::new(p.P0_17, Level::High, OutputDrive::Standard);
     Timer::after_millis(10).await; // the radio powers up
     let mut scfg = spim::Config::default();
-    scfg.frequency = spim::Frequency::M8;
+    // upstream's speed (RadioLib's 2 MHz): some modules and boards do not take 8
+    scfg.frequency = spim::Frequency::M2;
     let spi = Spim::new(p.SPI2, Irqs, p.P1_11, p.P0_02, p.P1_15, scfg);
     let radio = Sx1262::new(
         spi,

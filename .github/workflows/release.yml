@@ -151,6 +151,9 @@ jobs:
           for role in repeater companion; do
             python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role ../../../promicro-$role.uf2 --bin ../../../promicro-$role.bin
           done
+          # the companion for web flashers too (serial DFU); not the repeater: the bootloader stages
+          # an image that size over the repeater's data, and keeps a CRC that turns its updates off
+          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../promicro-companion.uf2 --dfu-zip ../../../promicro-companion.zip
           MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release
           for role in repeater companion; do
             python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role ../../../content/promicro-$role.uf2 --bin ../../../content/promicro-$role.bin
@@ -163,6 +166,7 @@ jobs:
           path: |
             *.bin
             *.uf2
+            *.zip
             *.content
 
   # The deltas a release of this build would have, from the newest release and the newest stable
@@ -246,6 +250,7 @@ jobs:
             $sign bundle "$image" --board "$board" --role "$role" --counter "$MCFW_COUNTER" --version "$MCFW_VERSION" --channel "$MCFW_CHANNEL" -o "$mcfw"
             $sign sign "$mcfw" --key-env MCFW_ROOT_KEY
             if [ -f "images/$name.uf2" ]; then cp "images/$name.uf2" out/; fi
+            if [ -f "images/$name.zip" ]; then cp "images/$name.zip" out/; fi
           done
           if ! ls out/*.mcfw > /dev/null 2>&1; then
             echo "no board's code changed since $prev: nothing to release"
@@ -329,7 +334,7 @@ jobs:
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
           prerelease=$([ "$MCFW_CHANNEL" = dev ] && echo --prerelease || true)
           {
-            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo image for the USB bootloader. The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them."
+            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo or Pro Micro image for the USB bootloader's drive; a .zip, the Pro Micro companion's for its serial DFU (web flashers' custom firmware). The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them."
             if [ -s unchanged.txt ]; then
               echo
               echo "Left out, the same code as in $(cat prev-tag.txt): $(paste -sd, unchanged.txt | sed 's/,/, /g'). Those devices keep what they run; content.txt lists the code of every board and role."

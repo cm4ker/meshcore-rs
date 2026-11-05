@@ -388,9 +388,11 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     prefs.sanitize(max_tx);
     board.set_lna(prefs.radio_fem_rxgain);
 
-    if let Err(e) = radio.init(prefs.radio, prefs.tx_power_dbm, prefs.rx_boosted_gain).await {
+    // a radio that does not answer: blink, say why on USB, and try again every 5 s (a module can
+    // come up late; RadioLib retries its reset too)
+    while let Err(e) = radio.init(prefs.radio, prefs.tx_power_dbm, prefs.rx_boosted_gain).await {
         error!("radio init failed: {e:?}");
-        loop {
+        for _ in 0..12 {
             board.on_tx_start();
             Timer::after_millis(200).await;
             board.on_tx_end();

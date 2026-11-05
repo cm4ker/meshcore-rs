@@ -43,6 +43,7 @@ pub async fn device_task(mut device: UsbDevice<'static, UsbDriver>) {
 pub async fn rx_task(mut rx: Receiver<'static, UsbDriver>, control: ControlChanged<'static>) {
     let mut parser = FrameParser::default();
     let mut buf = [0u8; PACKET];
+    let mut dtr = false;
     loop {
         match select(rx.read_packet(&mut buf), control.control_changed()).await {
             Either::First(Ok(n)) => {
@@ -52,11 +53,17 @@ pub async fn rx_task(mut rx: Receiver<'static, UsbDriver>, control: ControlChang
                     }
                 }
             }
-            Either::First(Err(_)) => rx.wait_connection().await,
-            // the "1200 baud touch": port opened at 1200 baud, then closed
+            Either::First(Err(_)) => {
+                dtr = false;
+                rx.wait_connection().await
+            }
+            // the "1200 baud touch": port opened at 1200 baud, then closed. Only the close counts
+            // (DTR dropping): the host sets the rate before it raises DTR, and a restart in between
+            // fails its open (a web flasher then says the board did not go into DFU)
             Either::Second(()) => {
-                USB_HOST.store(control.dtr(), Ordering::Relaxed);
-                if !control.dtr() && rx.line_coding().data_rate() == 1200 {
+                let was = core::mem::replace(&mut dtr, control.dtr());
+                USB_HOST.store(dtr, Ordering::Relaxed);
+                if was && !dtr && rx.line_coding().data_rate() == 1200 {
                     enter_bootloader();
                 }
             }
