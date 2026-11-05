@@ -101,12 +101,9 @@ impl FwRecord {
     }
 }
 
-/// This firmware, as the record names it for after it is left: `0.8.3-dev.1 #45`.
+/// This firmware, as the record names it for after it is left: `0.8.6 #69`, or `0.8.6` on a local build.
 fn own_label() -> String {
-    match meshcore::release::RELEASE_COUNTER {
-        0 => "a local build".into(),
-        n => meshcore::fwstate::Release::new(meshcore::release::RELEASE_VERSION, n).to_string(),
-    }
+    meshcore::fwstate::Release::new(meshcore::release::PRODUCT_VERSION, meshcore::release::RELEASE_COUNTER).to_string()
 }
 
 /// Run at boot, before anything that could hang. Returns `true` while on a trial boot.

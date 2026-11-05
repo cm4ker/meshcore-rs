@@ -498,7 +498,8 @@ where
 
     let Hardware { mut radio, store, wifi, bt, entropy: trng_entropy } = hw;
     let build_date = cfg.build_date;
-    let client_version: String = alloc::format!("rs-{build_date}");
+    // the map's second line under "meshcore-rs v1.18.0": the product version and release number
+    let client_version: String = meshcore::release::running_label(build_date);
     // the board installs the watchdog (it holds the RTC peripheral) before calling run
 
     println!();

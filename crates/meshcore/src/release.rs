@@ -90,35 +90,40 @@ pub fn default_roots() -> Vec<Fingerprint> {
 }
 
 /// Version of this release, from `MCFW_VERSION` at build time: empty for local builds and for the
-/// builds CI makes to hash the code (which must not change with the version alone).
+/// builds CI makes to hash the code (which must not change with the version alone). It names the
+/// release (git tag, `.mcfw` manifest); what a build calls itself to people is [`PRODUCT_VERSION`].
 pub const RELEASE_VERSION: &str = match option_env!("MCFW_VERSION") {
     Some(v) => v,
     None => "",
 };
 
-/// How a build names itself to people (`ver`, the app's device info, logs): a release by its
-/// number, a local build by its date.
+/// The product version (one source of truth, bumped by hand here). Every build carries it, release
+/// or not, so `ver` and the map's `client_version` always show it.
+pub const PRODUCT_VERSION: &str = "0.8.6";
+
+/// How a build names itself to people (`ver`, the app's device info, logs): the product version,
+/// with the release number on a release and the build date on a local build.
 pub fn build_label(build_date: &str) -> String {
     match RELEASE_COUNTER {
-        0 => alloc::format!("local build {build_date}"),
-        n => alloc::format!("build #{n}"),
+        0 => alloc::format!("{PRODUCT_VERSION} {build_date}"),
+        n => alloc::format!("{PRODUCT_VERSION} #{n}"),
     }
 }
 
-/// The release that runs, as `fw` names it: `0.8.3-dev.1 #45`, or [`build_label`] when the build
-/// has no version.
+/// The release that runs, as `fw` and the map name it: `0.8.6 #69`, or `0.8.6 (1 Nov 2026 10:06)`
+/// on a local build.
 pub fn running_label(build_date: &str) -> String {
-    match (RELEASE_VERSION, RELEASE_COUNTER) {
-        ("", _) | (_, 0) => build_label(build_date),
-        (v, n) => alloc::format!("{v} #{n}"),
+    match RELEASE_COUNTER {
+        0 => alloc::format!("{PRODUCT_VERSION} ({build_date})"),
+        n => alloc::format!("{PRODUCT_VERSION} #{n}"),
     }
 }
 
-/// What `ver` says after the firmware's own version: `0.8.3-dev.1, build #45`, or [`build_label`].
+/// What `ver` says after the firmware's own version: `0.8.6 #69`, or `0.8.6, local 1 Nov 2026 10:06`.
 pub fn ver_label(build_date: &str) -> String {
-    match (RELEASE_VERSION, RELEASE_COUNTER) {
-        ("", _) | (_, 0) => build_label(build_date),
-        (v, n) => alloc::format!("{v}, build #{n}"),
+    match RELEASE_COUNTER {
+        0 => alloc::format!("{PRODUCT_VERSION}, local {build_date}"),
+        n => alloc::format!("{PRODUCT_VERSION} #{n}"),
     }
 }
 

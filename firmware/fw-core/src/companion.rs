@@ -235,10 +235,7 @@ async fn battery_mv<B: Board>(board: &mut B, set: f32) -> u16 {
 /// The update page: where pulling an update from a neighbouring repeater stands, in the same
 /// words as `fw` (in Russian).
 fn pull_info(app: &Companion, now: u64) -> PullInfo {
-    let version = match meshcore::release::RELEASE_COUNTER {
-        0 => alloc::format!("локальная сборка {}", app.board.build_date),
-        _ => meshcore::release::running_label(&app.board.build_date),
-    };
+    let version = meshcore::release::running_label(&app.board.build_date);
     let state = app.fw_state();
     let trial = app.board.fw_trial_until.filter(|&t| t > now).map(|t| ((t - now) / 1000, app.board.fw_prev.as_str()));
     let text = crate::fwtext::fw_text(&state, trial, true);
