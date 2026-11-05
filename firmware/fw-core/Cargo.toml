@@ -17,7 +17,7 @@ embedded-hal-async = "1.0"
 embedded-io-async = { version = "0.7.0", optional = true }
 embedded-storage = "0.3"
 libm = "0.2.16"
-meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
+meshcore = { path = "../../crates/meshcore" }
 meshcore-ui = { version = "0.1.0", path = "../ui" }
 
 [features]

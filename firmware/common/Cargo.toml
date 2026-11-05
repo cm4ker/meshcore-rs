@@ -32,7 +32,7 @@ libm = "0.2.16"
 heapless = "0.9"
 # patched copy in ../vendor/trouble-host (fixed passkey), see the board crates' [patch.crates-io]
 trouble-host = { version = "=0.7.0", default-features = false, features = ["peripheral", "gatt", "derive", "security", "default-packet-pool-mtu-255", "log"] }
-meshcore = { version = "0.1.0", path = "../../crates/meshcore" }
+meshcore = { path = "../../crates/meshcore" }
 meshcore-fw-core = { version = "0.1.0", path = "../fw-core", features = ["net"] }
 meshcore-ui = { version = "0.1.0", path = "../ui" }
 

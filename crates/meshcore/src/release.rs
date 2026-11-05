@@ -97,9 +97,9 @@ pub const RELEASE_VERSION: &str = match option_env!("MCFW_VERSION") {
     None => "",
 };
 
-/// The product version (one source of truth, bumped by hand here). Every build carries it, release
-/// or not, so `ver` and the map's `client_version` always show it.
-pub const PRODUCT_VERSION: &str = "0.8.6";
+/// The product version, from this crate's `Cargo.toml` (one source of truth, bumped by hand there).
+/// Every build carries it, release or not, so `ver` and the map's `client_version` always show it.
+pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How a build names itself to people (`ver`, the app's device info, logs): the product version,
 /// with the release number on a release and the build date on a local build.
