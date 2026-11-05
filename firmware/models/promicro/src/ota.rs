@@ -17,11 +17,12 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::pac;
 use embedded_storage::nor_flash::NorFlash;
 use meshcore::ota::{FirmwareTarget, ImageFormat, NRF_CHIP_NRF52840, NRF_TRAILER_LEN, NRF_TRAILER_MAGIC};
 use meshcore_fw_core::storage::{Blob, SharedStore, Store};
+
+use crate::flash::Flash;
 
 // shared with the installer (installer/src/lib.rs)
 pub const APP_START: u32 = 0x26000;
@@ -40,7 +41,7 @@ pub const MAX_TRIAL_BOOTS: u8 = 3;
 
 static INSTALLER_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/installer.bin"));
 
-type NrfStore = Store<Nvmc<'static>>;
+type NrfStore = Store<Flash>;
 
 /// An update is staged and verified: the reboot hands over to the installer ([`hand_over`]).
 pub static INSTALL_PENDING: AtomicBool = AtomicBool::new(false);
@@ -48,12 +49,12 @@ pub static INSTALL_PENDING: AtomicBool = AtomicBool::new(false);
 pub static PREVIOUS_KEPT: AtomicBool = AtomicBool::new(false);
 
 pub struct StagingTarget {
-    store: SharedStore<Nvmc<'static>>,
+    store: SharedStore<Flash>,
 }
 
 impl StagingTarget {
     /// `None` if the bootloader would not start an app it did not write itself.
-    pub fn new(store: SharedStore<Nvmc<'static>>) -> Option<Self> {
+    pub fn new(store: SharedStore<Flash>) -> Option<Self> {
         no_app_crc().then_some(Self { store })
     }
 }
@@ -186,7 +187,7 @@ fn request(store: &mut NrfStore, size: u32, running: u32) -> bool {
 
 /// Run at boot, before anything that could hang. Returns `true` while on a trial boot.
 /// Never returns if the trial boots are used up and there is a firmware to go back to.
-pub fn check_trial(store: &SharedStore<Nvmc<'static>>) -> bool {
+pub fn check_trial(store: &SharedStore<Flash>) -> bool {
     let mut s = store.borrow_mut();
     let mut record = FwRecord::load(&mut s);
     let Some(boots) = record.trial else {
@@ -220,7 +221,7 @@ pub fn check_trial(store: &SharedStore<Nvmc<'static>>) -> bool {
 
 /// What `fw` and `fw rollback` know of the firmware to go back to: whether the staging area still
 /// holds it, its name, the release rolled back from, and whether it failed its trial boots.
-pub fn previous(store: &SharedStore<Nvmc<'static>>) -> (bool, String, u32, bool) {
+pub fn previous(store: &SharedStore<Flash>) -> (bool, String, u32, bool) {
     let record = FwRecord::load(&mut store.borrow_mut());
     let kept = staged(&record.prev_hash).is_some();
     PREVIOUS_KEPT.store(kept, Ordering::Relaxed);
@@ -231,7 +232,7 @@ pub fn previous(store: &SharedStore<Nvmc<'static>>) -> (bool, String, u32, bool)
 }
 
 /// The new firmware is healthy: keep it.
-pub fn confirm(store: &SharedStore<Nvmc<'static>>) {
+pub fn confirm(store: &SharedStore<Flash>) {
     if INSTALL_PENDING.load(Ordering::Relaxed) {
         return; // the record is the next update's trial already
     }
@@ -243,12 +244,12 @@ pub fn confirm(store: &SharedStore<Nvmc<'static>>) {
 
 /// Go back to the firmware in the staging area (`fw rollback`); the restart is the caller's, and
 /// hands over to the installer.
-pub fn rollback(store: &SharedStore<Nvmc<'static>>) -> bool {
+pub fn rollback(store: &SharedStore<Flash>) -> bool {
     go_back(store, false)
 }
 
 /// [`rollback`], also by itself after failed trial boots (`failed`).
-fn go_back(store: &SharedStore<Nvmc<'static>>, failed: bool) -> bool {
+fn go_back(store: &SharedStore<Flash>, failed: bool) -> bool {
     let mut s = store.borrow_mut();
     let Some(len) = staged(&FwRecord::load(&mut s).prev_hash) else {
         return false;
@@ -326,7 +327,7 @@ impl FirmwareTarget for StagingTarget {
 
 /// At start: a request left behind has been carried out (or was never handed over, after a
 /// crash): forget it.
-pub fn clear_request(store: &SharedStore<Nvmc<'static>>) {
+pub fn clear_request(store: &SharedStore<Flash>) {
     let mut head = [0u8; 4];
     read_flash(RECORD, &mut head);
     if head != [0xFF; 4] {
@@ -339,6 +340,8 @@ pub fn clear_request(store: &SharedStore<Nvmc<'static>>) {
 /// first page for it, point that page at it, reset. Interrupts stay off from here: this firmware
 /// is gone once its first page is.
 pub fn hand_over() -> ! {
+    // the flash controller is the SoftDevice's while it runs
+    crate::sd::disable();
     cortex_m::interrupt::disable();
     let flash = |addr: u32| unsafe { core::ptr::read_volatile(addr as *const u32) };
     let words = INSTALLER_BIN.len().div_ceil(4);

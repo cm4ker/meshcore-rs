@@ -2,4 +2,6 @@
 target = "thumbv7em-none-eabihf"
 
 [target.thumbv7em-none-eabihf]
-rustflags = ["-C", "link-arg=--nmagic"]
+# sha2_backend_soft: the SHA-2 rounds in a loop, not unrolled (SHA-512 alone is 26 KiB unrolled):
+# 32 KiB less code, for the BLE window, at a cost nobody notices in signatures and hashes here
+rustflags = ["-C", "link-arg=--nmagic", "--cfg", 'sha2_backend_soft="compact"']

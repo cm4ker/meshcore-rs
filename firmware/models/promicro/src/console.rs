@@ -63,6 +63,8 @@ fn set_host(on: bool) {
 
 /// Restart into the UF2 bootloader.
 pub fn enter_bootloader() -> ! {
+    // the POWER registers are the SoftDevice's while it runs
+    crate::sd::disable();
     embassy_nrf::pac::POWER.gpregret().write(|w| w.set_gpregret(DFU_MAGIC_UF2_RESET));
     cortex_m::peripheral::SCB::sys_reset()
 }

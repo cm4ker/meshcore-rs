@@ -2,8 +2,9 @@
 //!
 //! The repeater and its CLI are the same as on the Heltec boards (`meshcore::repeater`); this is
 //! the board under them: the radio, the console on the USB port, the node's data in the internal
-//! flash. No Wi-Fi and no BLE window: a new firmware comes over LoRa (`promicro::ota`) or goes on
-//! as UF2 over USB (`tools/uf2/flash_uf2.py`).
+//! flash. A new firmware comes over LoRa (`promicro::ota`), in the BLE update window (`fw ble`,
+//! `promicro::ble`, on the SoftDevice the bootloader keeps), or goes on as UF2 over USB
+//! (`tools/uf2/flash_uf2.py`). No Wi-Fi.
 
 #![no_std]
 #![no_main]
@@ -19,8 +20,9 @@ use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either3, select3};
+use embassy_futures::select::{Either4, select4};
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
+use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::rng::Rng;
 use embassy_nrf::saadc::{self, ChannelConfig, Saadc};
@@ -40,7 +42,7 @@ use meshcore::crypto;
 use meshcore::identity::LocalIdentity;
 use meshcore::mesh::{Mesh, MeshCtx};
 use meshcore::prefs::{NAME_MAX, NodePrefs};
-use meshcore::repeater::{BoardInfo, Repeater};
+use meshcore::repeater::{BLE_OTA_WINDOW_MINS, BoardInfo, Repeater};
 use meshcore::util::to_hex;
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE};
 #[cfg(feature = "extra-sensors")]
@@ -51,13 +53,15 @@ use meshcore_fw_core::bmp280::Bmp280;
 use meshcore_fw_core::sht4x::Sht4x;
 #[cfg(feature = "extra-sensors")]
 use meshcore_fw_core::shtc3::Shtc3;
+use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT};
 use meshcore_fw_core::noise::NoiseFloor;
 use meshcore_fw_core::radio::{LoraRadio, RxEvent, WaitIrq};
 use meshcore_fw_core::storage::{Blob, SharedStore, Store};
 use meshcore_fw_core::sx1262::Sx1262;
 use promicro::board::{self, Battery};
+use promicro::flash::Flash;
 use promicro::ina219::{self, Ina219};
-use promicro::{DATA_REGION, console, ota, println};
+use promicro::{DATA_REGION, ble, console, ota, println, sd};
 use static_cell::StaticCell;
 
 const BUILD_EPOCH: &str = env!("BUILD_EPOCH");
@@ -93,6 +97,7 @@ bind_interrupts!(struct Irqs {
     SAADC => saadc::InterruptHandler;
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
     TEMP => temp::InterruptHandler;
+    EGU2_SWI2 => sd::SoftDeviceEvents;
 });
 
 #[panic_handler]
@@ -109,7 +114,16 @@ unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
     cortex_m::peripheral::SCB::sys_reset()
 }
 
-type NrfStore = Option<SharedStore<Nvmc<'static>>>;
+type NrfStore = Option<SharedStore<Flash>>;
+
+/// The BLE update window's name, as on the Heltec boards.
+fn ota_name(node_name: &str) -> String {
+    let mut s = alloc::format!("MeshCore-OTA-{node_name}");
+    while s.len() > 32 {
+        s.pop();
+    }
+    s
+}
 
 fn now_ms() -> u64 {
     Instant::now().as_millis()
@@ -190,8 +204,8 @@ fn start_room(store: &NrfStore, rep: &Mesh<Repeater>, entropy: &[u8], rng_seed: 
     prefs.radio = rp.radio;
     prefs.tx_power_dbm = rp.tx_power_dbm;
     let ctx = MeshCtx::new(id.clone(), rng_seed, rep.ctx.radio, rep.ctx.current_time());
-    // the battery reading is the repeater's: `adc.multiplier` is set there
-    let board = BoardInfo { adc_multiplier: None, ..rep.app.board.clone() };
+    // the battery reading is the repeater's: `adc.multiplier` is set there; the BLE window too
+    let board = BoardInfo { adc_multiplier: None, ble_ota_name: None, ..rep.app.board.clone() };
     let mut room = Mesh::new(ctx, Repeater::new_room_server(prefs, board));
     if let Some(acl) = load(store, Blob::RoomAcl) {
         room.app.acl_load(&acl, &id);
@@ -213,7 +227,14 @@ async fn main(spawner: Spawner) {
     ncfg.hfclk_source = config::HfclkSource::ExternalXtal;
     ncfg.lfclk_source = config::LfclkSource::InternalRC;
     ncfg.dcdc.reg1 = true; // the DC/DC converter instead of the LDO (upstream `NRF52BoardDCDC`)
+    // priorities the SoftDevice leaves to the app (2, 3, 5..7), so it can run beside them in the
+    // BLE window; the critical sections mask them all (`promicro::sd`)
+    ncfg.time_interrupt_priority = Priority::P2;
+    ncfg.gpiote_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(ncfg);
+    for irq in [interrupt::USBD, interrupt::CLOCK_POWER, interrupt::SPI2, interrupt::SAADC, interrupt::TWISPI0, interrupt::TEMP] {
+        irq.set_priority(Priority::P3);
+    }
     // a watchdog still running from before a soft reset is taken over with the same settings
     let mut wcfg = wdt::Config::default();
     wcfg.timeout_ticks = 32_768 * WATCHDOG_SECS;
@@ -256,7 +277,7 @@ async fn main(spawner: Spawner) {
     }
 
     // ---- persistent state
-    let flash = Nvmc::new(p.NVMC);
+    let flash = Flash::new(Nvmc::new(p.NVMC));
     let store: NrfStore = Some(Rc::new(RefCell::new(Store::with_regions(flash, DATA_REGION, None))));
     if let Some(s) = &store {
         ota::clear_request(s);
@@ -420,8 +441,14 @@ async fn main(spawner: Spawner) {
         build_date: BUILD_DATE.into(),
         adc_multiplier: Some(board::BATT_MV_PER_LSB),
         bootloader_version: Some(board::bootloader_version()),
+        ble_ota_name: sd::present().then(|| ota_name(&prefs.node_name)),
         ..Default::default()
     };
+    if sd::present() {
+        spawner.spawn(ble::task().unwrap());
+    } else {
+        warn!("no SoftDevice S140 6.1.1 below the app: no BLE window");
+    }
     let mut mesh = Mesh::new(ctx, Repeater::new(prefs, board_info));
     if let Some(acl) = load(&store, Blob::Acl) {
         mesh.app.acl_load(&acl, &self_id);
@@ -463,6 +490,7 @@ async fn main(spawner: Spawner) {
     let mut last_clock = mesh.ctx.current_time();
     let mut reboot_at: Option<u64> = None;
     let mut in_trial = in_trial;
+    let mut ble_until: Option<u64> = None;
     let confirm_at = now_ms() + TRIAL_HEALTHY_MS;
     mesh.app.board.fw_trial_until = in_trial.then_some(confirm_at);
     loop {
@@ -520,10 +548,11 @@ async fn main(spawner: Spawner) {
             continue;
         }
 
-        // sleep until a frame arrives, a CLI line comes in, or a timer is due
+        // sleep until a frame arrives, a CLI line or a BLE frame comes in, or a timer is due
         let wake = room.as_ref().map_or(u64::MAX, |r| r.next_wakeup()).min(mesh.next_wakeup()).min(now + 50).max(now + 1);
-        match select3(radio.wait_irq(), console::LINES.receive(), Timer::at(Instant::from_millis(wake))).await {
-            Either3::First(()) => match radio.read_rx() {
+        let woke = select4(radio.wait_irq(), console::LINES.receive(), Timer::at(Instant::from_millis(wake)), ble::FRAMES_IN.receive());
+        match woke.await {
+            Either4::First(()) => match radio.read_rx() {
                 Ok(RxEvent::Frame(f)) => {
                     let t = now_ms();
                     mesh.on_rx_frame(t, &f.data[..f.len], f.snr, f.rssi);
@@ -535,7 +564,7 @@ async fn main(spawner: Spawner) {
                 Ok(RxEvent::Nothing) => {}
                 Err(e) => warn!("rx: {e:?}"),
             },
-            Either3::Second(line) => {
+            Either4::Second(line) => {
                 let cmd = String::from_utf8_lossy(&line);
                 let line = cmd.trim_end();
                 if line.trim() == "wdt test" {
@@ -554,7 +583,12 @@ async fn main(spawner: Spawner) {
                     println!("  -> {reply}");
                 }
             }
-            Either3::Third(()) => {}
+            Either4::Third(()) => {}
+            Either4::Fourth(frame) => {
+                if let Some(reply) = mesh.app.handle_link_frame(&frame) {
+                    let _ = BLE_OUT.try_send(reply);
+                }
+            }
         }
 
         let now = now_ms();
@@ -577,7 +611,11 @@ async fn main(spawner: Spawner) {
         if now >= next_batt {
             next_batt = now + 60_000;
             mesh.app.board.batt_mv = battery.read_mv(mesh.app.adc_multiplier().unwrap_or(board::BATT_MV_PER_LSB)).await;
-            mesh.app.board.mcu_temp_c = Some(mcu_temp.read().await.to_bits() as f32 / 4.0);
+            // the TEMP peripheral is the SoftDevice's while it runs
+            mesh.app.board.mcu_temp_c = match sd::enabled() {
+                true => sd::temp_c(),
+                false => Some(mcu_temp.read().await.to_bits() as f32 / 4.0),
+            };
             if let Some(r) = room.as_mut() {
                 r.app.board.batt_mv = mesh.app.board.batt_mv;
                 r.app.board.mcu_temp_c = mesh.app.board.mcu_temp_c;
@@ -705,8 +743,19 @@ async fn main(spawner: Spawner) {
         if let Some(on) = fx.rx_boosted_gain {
             let _ = radio.set_rx_boosted_gain(on);
         }
-        if fx.start_ota.is_some() || fx.start_ble_ota.is_some() {
-            println!("no Wi-Fi or BLE on this board: updates go over LoRa or USB (UF2)");
+        if let Some(pin) = fx.start_ble_ota {
+            ble_until = Some(now + BLE_OTA_WINDOW_MINS as u64 * 60_000);
+            ble::start(ble::Params { name: ota_name(&mesh.app.prefs.node_name), pin });
+        }
+        // the window stays open while an app is connected
+        if ble_until.is_some_and(|t| now >= t) {
+            if BLE_CONNECTED.load(core::sync::atomic::Ordering::Relaxed) {
+                ble_until = Some(now + 60_000);
+            } else {
+                ble_until = None;
+                ble::stop();
+                println!("BLE update window closed");
+            }
         }
         if fx.erase {
             if let Some(s) = &store {
@@ -752,6 +801,7 @@ async fn main(spawner: Spawner) {
             save(&store, Blob::Clock, &mesh.ctx.current_time().to_le_bytes());
             let _ = radio.sleep();
             Timer::after_millis(200).await; // the line goes out
+            sd::disable(); // System OFF goes through the POWER registers
             board::system_off();
         }
 

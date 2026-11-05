@@ -21,7 +21,10 @@ test = false
 bench = false
 
 [dependencies]
-cortex-m = { version = "0.7.7", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m = { version = "0.7.7", features = ["inline-asm"] }
+# our own critical sections (src/sd.rs): they mask the application's interrupts only, never the
+# SoftDevice's, and keep the BASEPRI they found
+critical-section = { version = "1.2", features = ["restore-state-u8"] }
 # set-vtor: our vector table takes over from the MBR/SoftDevice forwarding of the bootloader
 cortex-m-rt = { version = "0.7.5", features = ["set-vtor"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
@@ -38,6 +41,8 @@ heapless = "0.9"
 embedded-storage = "0.3"
 meshcore = { version = "0.1.0", path = "../../../crates/meshcore" }
 meshcore-fw-core = { version = "0.1.0", path = "../../fw-core" }
+# the Diffie-Hellman of LE Secure Connections pairing (src/ble.rs)
+p256 = { version = "0.13.2", default-features = false, features = ["arithmetic"] }
 
 [profile.dev]
 opt-level = "s"

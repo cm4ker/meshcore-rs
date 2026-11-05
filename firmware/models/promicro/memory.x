@@ -10,9 +10,11 @@
      0xEA000..0xED000  the update installer
      0xED000..0xF4000  upstream's file system, left as it is: upstream's firmware finds its
                        identity and prefs again if it goes back on
-   The SoftDevice is never enabled, so the RAM is ours apart from the MBR's first 8 bytes. */
+   The SoftDevice runs only while a BLE update window is open (src/sd.rs); the RAM below 0x20004000
+   is its own then (the MBR's 8 bytes and the SoftDevice's tables), and is left alone otherwise
+   too: the SoftDevice keeps its interrupt forwarding there while it is disabled. */
 MEMORY
 {
   FLASH : ORIGIN = 0x00026000, LENGTH = 0x7B000 - 0x26000
-  RAM   : ORIGIN = 0x20000008, LENGTH = 256K - 8
+  RAM   : ORIGIN = 0x20004000, LENGTH = 256K - 16K
 }

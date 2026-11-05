@@ -10,6 +10,8 @@ same as the LoRa update of a repeater), so no LoRa airtime is used.
     python ota_app.py --port COM4 firmware.bin
     python ota_app.py --ble D8:E6:C5:14:21:A8 firmware.bin   # paired first: Windows Settings >
                                                              # Bluetooth > Add device, enter the PIN
+    python ota_app.py --ble <address> --pin 123456 release.mcfw   # or pair here (Windows), with
+                                                                  # the PIN `fw ble` replied
     python ota_app.py --tcp 192.168.1.50:5000 firmware.bin
     python ota_app.py --port COM4 --info                     # what the device runs
 
@@ -141,6 +143,38 @@ class TcpLink(StreamLink):
         return cls(reader, writer)
 
 
+async def pair_windows(address, pin):
+    """Pair this Windows PC with the device by passkey entry (bleak only does Just Works), dropping
+    an earlier bond first: a repeater forgets its bonds when it restarts (the Pro Micro), and
+    Windows would keep offering the stale key."""
+    from bleak import BleakScanner
+    from winrt.windows.devices.bluetooth import BluetoothAddressType, BluetoothLEDevice
+    from winrt.windows.devices.enumeration import (
+        DevicePairingKinds, DevicePairingProtectionLevel, DevicePairingResultStatus,
+    )
+    if await BleakScanner.find_device_by_address(address, timeout=20) is None:
+        sys.exit(f"{address} is not advertising: is its update window open (`fw ble`)?")
+    raw = int(address.replace(":", ""), 16)
+    dev = await BluetoothLEDevice.from_bluetooth_address_async(raw)
+    if dev is None:  # a static random address, as the nRF52 boards have
+        dev = await BluetoothLEDevice.from_bluetooth_address_with_bluetooth_address_type_async(raw, BluetoothAddressType.RANDOM)
+    if dev is None:
+        sys.exit(f"Windows does not find {address}")
+    pairing = dev.device_information.pairing
+    if pairing.is_paired:
+        await pairing.unpair_async()
+    custom = pairing.custom
+    token = custom.add_pairing_requested(lambda _, req: req.accept_with_pin(pin))
+    try:
+        result = await custom.pair_with_protection_level_async(
+            DevicePairingKinds.PROVIDE_PIN, DevicePairingProtectionLevel.ENCRYPTION_AND_AUTHENTICATION)
+    finally:
+        custom.remove_pairing_requested(token)
+    if result.status not in (DevicePairingResultStatus.PAIRED, DevicePairingResultStatus.ALREADY_PAIRED):
+        sys.exit(f"pairing failed: {result.status.name}")
+    log("paired with the PIN")
+
+
 class BleLink(Link):
     """Nordic UART: write frames to RX (with response: the device acknowledges once queued)."""
 
@@ -172,6 +206,9 @@ async def open_link(args):
     if args.port:
         return await SerialLink.open(args.port)
     if args.ble:
+        if args.pin and not getattr(args, "paired", False):
+            await pair_windows(args.ble, args.pin)
+            args.paired = True
         return await BleLink.open(args.ble)
     return await TcpLink.open(args.tcp)
 
@@ -202,6 +239,7 @@ async def main():
     link_args.add_argument("--port", help="USB serial port")
     link_args.add_argument("--ble", help="BLE address (pair it first)")
     link_args.add_argument("--tcp", help="host:port of the Wi-Fi interface")
+    ap.add_argument("--pin", help="with --ble on Windows: pair with this PIN first (the one `fw ble` replied)")
     ap.add_argument("--images", type=pathlib.Path, help="image store (delta bases)")
     ap.add_argument("--delta-tool", type=pathlib.Path, default=DEFAULT_DELTA_TOOL)
     ap.add_argument("--no-delta", action="store_true", help="always send the whole image")
@@ -219,7 +257,8 @@ async def main():
         model = dev[19:59].split(b"\0")[0].decode(errors="replace")
         version = dev[59:79].split(b"\0")[0].decode(errors="replace")
         log(f"device: {model}, firmware {version}")
-        board = "xiao-c6" if "Xiao" in model else "t-echo" if "T-Echo" in model else "heltec-v4"
+        board = ("xiao-c6" if "Xiao" in model else "t-echo" if "T-Echo" in model
+                 else "promicro" if "ProMicro" in model else "heltec-v4")
         images = args.images or REPO / "firmware" / "models" / board / "images"
         # the ESP boards keep the previous firmware and fall back to it; the T-Echo has room for one
         after = ("it installs the image and restarts" if board == "t-echo"

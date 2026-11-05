@@ -15,7 +15,7 @@
 | Heltec WiFi LoRa 32 V3 | тот же, фича `heltec-v3` | ESP32-S3, SX1262 без FEM, flash 8 МБ | OLED 128×64 | да, как V4 | собирается, на плате не проверен | как V4 | как V4, слоты по 3,4 МБ |
 | Seeed XIAO ESP32-C6 + Waveshare Core2021-HF | `firmware/models/xiao-c6` | ESP32-C6, Semtech LR2021, flash 4 МБ | нет | нет | да | BLE или Wi-Fi (не вместе; TCP пока ненадёжен), USB | через подключение приложения; два слота по 1,75 МБ, целый образ без сжатия |
 | LilyGO T-Echo | `firmware/models/t-echo` | nRF52840, SX1262, QSPI-флешка | e-paper 200×200 | нет | да, с GPS L76K | BLE, USB | через подключение приложения; один слот, без отката; первая прошивка — UF2 |
-| nRF52840 Pro Micro («Faketec», upstream `promicro`) | `firmware/models/promicro` | nRF52840, SX1262 (HT-RA62, E22), только внутренняя flash | нет | да: room server, INA219 в телеметрии; без Wi-Fi и BLE | нет | USB (консоль) | LoRa (подписанный релиз, дельта); один слот, без отката; первая прошивка — UF2 |
+| nRF52840 Pro Micro («Faketec», upstream `promicro`) | `firmware/models/promicro` | nRF52840, SX1262 (HT-RA62, E22), только внутренняя flash | нет | да: room server, INA219 в телеметрии; без Wi-Fi; BLE только для обновлений (`fw ble`) | нет | USB (консоль) | LoRa (подписанный релиз, дельта) или BLE; откат на прежнюю; первая прошивка — UF2 |
 
 В выпуске на GitHub у каждой сборки свой файл `<плата>-<роль>-<версия>-r<номер>.mcfw`
 (`heltec-v4-repeater`, `heltec-v3-companion`, `xiao-c6-companion`, `t-echo-companion`…), у T-Echo
@@ -238,6 +238,18 @@ firmware\models\promicro\images` для прошитого по USB). По LoRa 
 
 ```powershell
 python tools\ota-lora\meshcore_ota.py --ble D8:E6:C5:14:21:A8 --node <ключ> --password-file pw.txt --images firmware\models\promicro\images release.mcfw
+```
+
+По BLE быстрее: `fw ble` (в консоли или удалённо по LoRa) открывает окно обновления на 15 минут,
+как на Heltec: имя `MeshCore-OTA-<имя>`, одноразовый PIN в ответе, ретрансляция не прерывается.
+BLE даёт SoftDevice S140 6.1.1, который загрузчик держит во flash ниже приложения: он работает
+только пока окно открыто (тогда у него радио BLE, часы, flash и RAM ниже 0x20004000); загрузчик с
+другим SoftDevice окна не даст (`fw ble` ответит, что его нет). Сопряжение — LE Secure Connections
+по PIN; пары живут до перезагрузки, после неё старую пару в Windows надо удалить, а `--pin` удаляет
+и сопрягает заново сам:
+
+```powershell
+python tools\ota-app\ota_app.py --ble <адрес> --pin <PIN> release.mcfw
 ```
 
 Спящую ноду (`powersaving on`) по USB не прошить: сначала разбудить её кнопкой PRG или выключить
