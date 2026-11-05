@@ -29,7 +29,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
 use esp_storage::FlashStorage;
 use meshcore::radio::RadioParams;
-use meshcore_fw::companion_app::{self, Board, Config, Hardware};
+use meshcore_fw::companion_app::{self, Board, Config, Hardware, Serial};
 use meshcore_fw::lr2021::Lr2021;
 use meshcore_fw::reset;
 use meshcore_fw::radio::EspIrq;
@@ -123,8 +123,8 @@ async fn main(spawner: Spawner) -> ! {
         led: Output::new(p.GPIO15, Level::High, OutputConfig::default()),
         button: Input::new(p.GPIO9, InputConfig::default().with_pull(Pull::Up)),
     };
-    let usb_rx = meshcore_fw::usb::start(p.USB_DEVICE);
-    let hw = Hardware { radio, store, usb_rx, wifi: p.WIFI, bt: p.BT, entropy };
+    let serial = Serial::Usb(meshcore_fw::usb::start(p.USB_DEVICE));
+    let hw = Hardware { radio, store, serial, wifi: p.WIFI, bt: p.BT, entropy };
     let cfg = Config {
         // the Omsk mesh this board was built for (upstream variant `LORA_FREQ` etc.)
         radio: RadioParams { freq_mhz: 868.731, bw_khz: 62.5, sf: 7, cr: 7 },

@@ -1784,6 +1784,7 @@ dependencies = [
  "heltec-shared",
  "log",
  "meshcore",
+ "meshcore-fw",
 ]
 
 [[package]]

@@ -11,6 +11,7 @@ use esp_hal::gpio::Level;
 use esp_hal::peripherals::GPIO37;
 use heltec_shared::{ConsolePins, FemPins, Variant};
 use log::info;
+use meshcore_fw::companion_app::Serial;
 
 use crate::fem::Fem;
 
@@ -40,6 +41,10 @@ impl Variant for HeltecV4 {
 
     fn console_woke() -> bool {
         false
+    }
+
+    fn app_serial(pins: ConsolePins) -> Serial {
+        Serial::Usb(meshcore_fw::usb::start(pins.usb))
     }
 }
 

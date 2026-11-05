@@ -28,7 +28,7 @@ use crate::display::Oled;
 use crate::power::Sleeper;
 use crate::radio::EspIrq;
 use crate::sx1262::Sx1262;
-use crate::{FemPins, FrontEnd, Variant, gps, reset, storage};
+use crate::{ConsolePins, FemPins, FrontEnd, Variant, gps, reset, storage};
 
 const WATCHDOG_SECS: u64 = 30;
 /// SX1262 output; the V4's FEM PA makes ~22 dBm of 10 dBm.
@@ -239,11 +239,11 @@ pub async fn run<V: Variant>(spawner: Spawner, build_epoch: &str, build_date: &'
         next_oled_try: 0,
         screen: Policy::default(),
     };
-    let usb_rx = meshcore_fw::usb::start(p.USB_DEVICE);
-    let hw = Hardware { radio, store, usb_rx, wifi: p.WIFI, bt: p.BT, entropy };
+    let serial = V::app_serial(ConsolePins { usb: p.USB_DEVICE, uart0: p.UART0, rx: p.GPIO44 });
+    let hw = Hardware { radio, store, serial, wifi: p.WIFI, bt: p.BT, entropy };
     let cfg = Config {
         radio: RadioParams::default(),
-        tx_power_dbm: 10,
+        tx_power_dbm: V::DEFAULT_TX_DBM,
         build_epoch: build_epoch.parse().unwrap_or(0),
         build_date,
     };

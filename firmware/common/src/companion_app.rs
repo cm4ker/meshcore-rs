@@ -1,5 +1,5 @@
 //! The companion radio on an ESP32: the chip side of `meshcore_fw_core::companion` (BLE, Wi-Fi
-//! and TCP, USB Serial/JTAG, firmware slots, watchdog). Its data lives in the `companion`
+//! and TCP, the serial link, firmware slots, watchdog). Its data lives in the `companion`
 //! partition, apart from the repeater firmware's; firmware updates go over the app link
 //! (`tools/ota-app`).
 //!
@@ -11,8 +11,10 @@ use alloc::string::String;
 
 use embassy_executor::Spawner;
 use embassy_net::Stack;
+use esp_hal::Async;
 use esp_hal::peripherals::{BT, WIFI};
 use esp_hal::rng::Rng;
+use esp_hal::uart::UartRx;
 use esp_storage::FlashStorage;
 use log::warn;
 use meshcore::companion::CompanionPrefs;
@@ -29,18 +31,29 @@ pub struct Hardware<R> {
     /// Not initialised yet: [`run`] configures it from the stored settings.
     pub radio: R,
     pub store: Option<SharedStore<'static>>,
-    pub usb_rx: usb::Input,
+    pub serial: Serial,
     pub wifi: WIFI<'static>,
     pub bt: BT<'static>,
     /// From the hardware TRNG, mixed with the radio's own random numbers.
     pub entropy: [u8; 32],
 }
 
+/// What the app's serial link (`Link::Usb`) runs on.
+pub enum Serial {
+    /// The chip's USB Serial/JTAG port.
+    Usb(usb::Input),
+    /// A UART behind a USB bridge (the Heltec V3's CP2102 on UART0).
+    Uart(UartRx<'static, Async>),
+}
+
 struct Esp {
     store: Option<SharedStore<'static>>,
     slots: Option<Slots>,
     in_trial: bool,
-    usb_rx: Option<usb::Input>,
+    /// Taken when the links start.
+    serial: Option<Serial>,
+    /// The serial link is a UART.
+    uart: bool,
     wifi: Option<WIFI<'static>>,
     bt: Option<BT<'static>>,
     station: Option<Stack<'static>>,
@@ -131,14 +144,19 @@ impl Platform for Esp {
             spawner.spawn(ble::ble_task(bt, params).unwrap());
         }
 
-        if let Some(rx) = self.usb_rx.take() {
-            spawner.spawn(frames::usb_rx_task(rx).unwrap());
+        match self.serial.take() {
+            Some(Serial::Usb(rx)) => spawner.spawn(frames::usb_rx_task(rx).unwrap()),
+            Some(Serial::Uart(rx)) => spawner.spawn(frames::uart_rx_task(rx).unwrap()),
+            None => {}
         }
         Links { ble: ble_on, tcp: self.station.is_some() }
     }
 
     fn usb_write(&mut self, frame: &[u8]) {
-        frames::usb_write(frame);
+        match self.uart {
+            true => frames::uart_write(frame),
+            false => frames::usb_write(frame),
+        }
     }
 
     fn poll_network(&mut self) -> (Option<u32>, Option<String>) {
@@ -147,7 +165,7 @@ impl Platform for Esp {
 }
 
 pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, board: B, cfg: Config) -> ! {
-    let Hardware { radio, store, usb_rx, wifi, bt, entropy } = hw;
+    let Hardware { radio, store, serial, wifi, bt, entropy } = hw;
     let slots = store.as_ref().and_then(|s| ota::slots(&mut s.borrow_mut()));
     let in_trial = match (&store, slots) {
         (Some(s), Some(sl)) => ota::check_trial(&mut s.borrow_mut(), sl.booted),
@@ -157,7 +175,8 @@ pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, boar
         store: store.clone(),
         slots,
         in_trial,
-        usb_rx: Some(usb_rx),
+        uart: matches!(serial, Serial::Uart(_)),
+        serial: Some(serial),
         wifi: Some(wifi),
         bt: Some(bt),
         station: None,

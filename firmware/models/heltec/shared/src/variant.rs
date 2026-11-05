@@ -3,6 +3,7 @@
 use embassy_executor::Spawner;
 use esp_hal::gpio::{AnyPin, Level};
 use esp_hal::peripherals::{GPIO37, GPIO44, UART0, USB_DEVICE};
+use meshcore_fw::companion_app::Serial;
 
 /// The pins of the V4's front end (FEM), handed to every board: on the V3 they lead nowhere.
 pub struct FemPins {
@@ -16,7 +17,8 @@ pub struct FemPins {
     pub ctx: AnyPin<'static>,
 }
 
-/// What the repeater's console can be read through: the chip's USB port, or UART0 (RX 44).
+/// What the serial console (the repeater's CLI, the companion's app link) can run on: the chip's
+/// USB port, or UART0 (RX 44).
 pub struct ConsolePins {
     pub usb: USB_DEVICE<'static>,
     pub uart0: UART0<'static>,
@@ -41,7 +43,7 @@ pub trait FrontEnd {
 pub trait Variant {
     /// The board a signed release for it must name (`meshcore::release::board`).
     const RELEASE_BOARD: u8;
-    /// SX1262 output on a fresh repeater.
+    /// SX1262 output on a fresh node, repeater or companion.
     const DEFAULT_TX_DBM: i8;
 
     type FrontEnd: FrontEnd;
@@ -58,4 +60,7 @@ pub trait Variant {
 
     /// Console input woke the chip from light sleep (its first bytes are lost).
     fn console_woke() -> bool;
+
+    /// The companion's serial link to the app.
+    fn app_serial(pins: ConsolePins) -> Serial;
 }

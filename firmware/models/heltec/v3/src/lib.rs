@@ -15,6 +15,7 @@ use esp_hal::uart::{Config, UartRx, WakeupConfig};
 use heltec_shared::console::ConsoleRx;
 use heltec_shared::{ConsolePins, FemPins, FrontEnd, Variant};
 use log::warn;
+use meshcore_fw::companion_app::Serial;
 
 pub struct HeltecV3;
 
@@ -46,6 +47,11 @@ impl Variant for HeltecV3 {
 
     fn console_woke() -> bool {
         wakeup_cause().contains(WakeupSource::Uart0)
+    }
+
+    /// Over the CP2102 too: the chip's own USB port leads nowhere on the V3.
+    fn app_serial(pins: ConsolePins) -> Serial {
+        Serial::Uart(UartRx::new(pins.uart0, Config::default()).unwrap().with_rx(pins.rx).into_async())
     }
 }
 
