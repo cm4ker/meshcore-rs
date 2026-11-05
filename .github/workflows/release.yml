@@ -110,10 +110,15 @@ jobs:
       - working-directory: firmware/models/xiao-c6
         run: |
           mkdir -p ../../../content
+          save() { # <dir for the images> : the repeater's and the companion's
+            for role in repeater companion; do
+              espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/$role "$1/xiao-c6-$role.bin"
+            done
+          }
           cargo build --locked --release
-          espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/companion ../../../xiao-c6-companion.bin
+          save ../../..
           MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release
-          espflash save-image --chip esp32c6 --flash-size 4mb target/riscv32imac-unknown-none-elf/release/companion ../../../content/xiao-c6-companion.bin
+          save ../../../content
       - name: Content hashes
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
