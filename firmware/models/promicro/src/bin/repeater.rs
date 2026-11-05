@@ -45,14 +45,6 @@ use meshcore::prefs::{NAME_MAX, NodePrefs};
 use meshcore::repeater::{BLE_OTA_WINDOW_MINS, BoardInfo, Repeater};
 use meshcore::util::to_hex;
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE};
-#[cfg(feature = "extra-sensors")]
-use meshcore_fw_core::ahtx0::Ahtx0;
-use meshcore_fw_core::bme280::Bme280;
-use meshcore_fw_core::bmp280::Bmp280;
-#[cfg(feature = "extra-sensors")]
-use meshcore_fw_core::sht4x::Sht4x;
-#[cfg(feature = "extra-sensors")]
-use meshcore_fw_core::shtc3::Shtc3;
 use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT};
 use meshcore_fw_core::noise::NoiseFloor;
 use meshcore_fw_core::radio::{LoraRadio, RxEvent, WaitIrq};
@@ -60,7 +52,7 @@ use meshcore_fw_core::storage::{Blob, SharedStore, Store};
 use meshcore_fw_core::sx1262::Sx1262;
 use promicro::board::{self, Battery};
 use promicro::flash::Flash;
-use promicro::ina219::{self, Ina219};
+use promicro::sensors::Sensors;
 use promicro::{DATA_OVERFLOW, DATA_REGION, ble, console, ota, println, sd};
 use static_cell::StaticCell;
 
@@ -367,62 +359,8 @@ async fn main(spawner: Spawner) {
     icfg.sda_pullup = true;
     icfg.scl_pullup = true;
     static TWIM_BUF: StaticCell<[u8; 8]> = StaticCell::new();
-    let mut i2c = Twim::new(p.TWISPI0, Irqs, p.P1_04, p.P0_11, icfg, TWIM_BUF.init([0; 8]));
-    let ina = Ina219::probe(&mut i2c).await;
-    match &ina {
-        Some(s) => match s.read(&mut i2c).await {
-            Some(r) => info!("INA219 at 0x{:02X}: {:.3} V, {:.1} mA, {:.0} mW", ina219::ADDRESS, r.bus_v, r.current_ma, r.power_mw),
-            None => warn!("INA219 at 0x{:02X}: no reading", ina219::ADDRESS),
-        },
-        None => info!("no INA219 on the I2C"),
-    }
-    let bme = Bme280::probe(&mut i2c).await;
-    match &bme {
-        Some(b) => match b.read(&mut i2c).await {
-            Some(r) => info!("BME280: {:.2} C, {:.1} %RH, {:.1} hPa", r.temp_c, r.humidity_pct, r.pressure_hpa),
-            None => warn!("BME280 found but no reading"),
-        },
-        None => info!("no BME280 on the I2C"),
-    }
-    // a BME280 answers chip-id 0x60 and a BMP280 0x58 at the same addresses, so only one probes
-    let bmp = if bme.is_none() { Bmp280::probe(&mut i2c).await } else { None };
-    match &bmp {
-        Some(b) => match b.read(&mut i2c).await {
-            Some(r) => info!("BMP280: {:.2} C, {:.1} hPa", r.temp_c, r.pressure_hpa),
-            None => warn!("BMP280 found but no reading"),
-        },
-        None => info!("no BMP280 on the I2C"),
-    }
-    #[cfg(feature = "extra-sensors")]
-    let aht = Ahtx0::probe(&mut i2c).await;
-    #[cfg(feature = "extra-sensors")]
-    match &aht {
-        Some(a) => match a.read(&mut i2c).await {
-            Some(r) => info!("AHTX0: {:.2} C, {:.1} %RH", r.temp_c, r.humidity_pct),
-            None => warn!("AHTX0 found but no reading"),
-        },
-        None => info!("no AHTX0 on the I2C"),
-    }
-    #[cfg(feature = "extra-sensors")]
-    let shtc3 = Shtc3::probe(&mut i2c).await;
-    #[cfg(feature = "extra-sensors")]
-    match &shtc3 {
-        Some(s) => match s.read(&mut i2c).await {
-            Some(r) => info!("SHTC3: {:.2} C, {:.1} %RH", r.temp_c, r.humidity_pct),
-            None => warn!("SHTC3 found but no reading"),
-        },
-        None => info!("no SHTC3 on the I2C"),
-    }
-    #[cfg(feature = "extra-sensors")]
-    let sht4x = Sht4x::probe(&mut i2c).await;
-    #[cfg(feature = "extra-sensors")]
-    match &sht4x {
-        Some(s) => match s.read(&mut i2c).await {
-            Some(r) => info!("SHT4X: {:.2} C, {:.1} %RH", r.temp_c, r.humidity_pct),
-            None => warn!("SHT4X found but no reading"),
-        },
-        None => info!("no SHT4X on the I2C"),
-    }
+    let i2c = Twim::new(p.TWISPI0, Irqs, p.P1_04, p.P0_11, icfg, TWIM_BUF.init([0; 8]));
+    let mut sensors = Sensors::probe(i2c).await;
 
     // ---- mesh
     let rng_seed: [u8; 16] = entropy[32..48].try_into().unwrap();
@@ -628,49 +566,10 @@ async fn main(spawner: Spawner) {
         if now >= next_sensors {
             next_sensors = now + SENSOR_INTERVAL_MS;
             let mut lpp = Vec::new();
-            let mut channel = meshcore::lpp::CHANNEL_SELF + 1;
-            if let Some(s) = ina.as_ref() {
-                if let Some(r) = s.read(&mut i2c).await {
-                    r.lpp(channel, &mut lpp);
-                }
-                channel += 1;
-            }
-            if let Some(b) = bme.as_ref() {
-                if let Some(r) = b.read(&mut i2c).await {
-                    meshcore::sensor::bme280::push_lpp(&r, channel, &mut lpp);
-                }
-                channel += 1;
-            }
-            if let Some(b) = bmp.as_ref() {
-                if let Some(r) = b.read(&mut i2c).await {
-                    meshcore::sensor::bmp280::push_lpp(&r, channel, &mut lpp);
-                }
-                channel += 1;
-            }
-            #[cfg(feature = "extra-sensors")]
-            if let Some(a) = aht.as_ref() {
-                if let Some(r) = a.read(&mut i2c).await {
-                    meshcore::sensor::ahtx0::push_lpp(&r, channel, &mut lpp);
-                }
-                channel += 1;
-            }
-            #[cfg(feature = "extra-sensors")]
-            if let Some(s) = shtc3.as_ref() {
-                if let Some(r) = s.read(&mut i2c).await {
-                    meshcore::sensor::shtc3::push_lpp(&r, channel, &mut lpp);
-                }
-                channel += 1;
-            }
-            #[cfg(feature = "extra-sensors")]
-            if let Some(s) = sht4x.as_ref() {
-                if let Some(r) = s.read(&mut i2c).await {
-                    meshcore::sensor::sht4x::push_lpp(&r, channel, &mut lpp);
-                }
-                channel += 1;
-            }
+            let mut channel = sensors.read_lpp(&mut lpp).await;
             // text-described sensors (`sensor add`): each takes the next channel, in list order
             for d in &mesh.app.sensor_descriptors {
-                meshcore_fw_core::sensor::read_descriptor(d, &mut i2c, channel, &mut lpp).await;
+                meshcore_fw_core::sensor::read_descriptor(d, &mut sensors.i2c, channel, &mut lpp).await;
                 channel += 1;
             }
             let _ = channel;
@@ -746,7 +645,7 @@ async fn main(spawner: Spawner) {
         }
         if let Some(pin) = fx.start_ble_ota {
             ble_until = Some(now + BLE_OTA_WINDOW_MINS as u64 * 60_000);
-            ble::start(ble::Params { name: ota_name(&mesh.app.prefs.node_name), pin });
+            ble::start(ble::Params { name: ota_name(&mesh.app.prefs.node_name), pin, role: ble::Role::Window });
         }
         // the window stays open while an app is connected
         if ble_until.is_some_and(|t| now >= t) {

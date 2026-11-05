@@ -466,6 +466,41 @@ fn telemetry_and_path_discovery() {
 }
 
 #[test]
+fn telemetry_carries_the_environment_sensors_when_allowed() {
+    let mut air = Air::new();
+    air.link(0, 1);
+    let mut a = companion(1, "Alice");
+    let mut b = companion(2, "Bob");
+    b.app.prefs.telemetry_mode_base = TELEM_MODE_ALLOW_ALL;
+    // an INA219 on channel 2: 4.10 V
+    let sensors = vec![2, 116, 0x01, 0x9A];
+    b.app.board.sensor_lpp = sensors.clone();
+    exchange_adverts(&mut air, &mut a, &mut b);
+    frames(&mut a);
+    let mut req = vec![CMD_SEND_TELEMETRY_REQ, 0, 0, 0];
+    req.extend_from_slice(&pub_key(&b));
+    let carries = |t: &[u8]| t.windows(sensors.len()).any(|w| w == sensors);
+
+    // the environment is denied by default
+    cmd(&mut a, &req);
+    air.run(&mut [&mut a, &mut b], 5000);
+    let t = only(&frames(&mut a), PUSH_CODE_TELEMETRY_RESPONSE);
+    assert_eq!(t.len(), 1);
+    assert!(!carries(&t[0]));
+
+    b.app.prefs.telemetry_mode_env = TELEM_MODE_ALLOW_ALL;
+    cmd(&mut a, &req);
+    air.run(&mut [&mut a, &mut b], 5000);
+    let t = only(&frames(&mut a), PUSH_CODE_TELEMETRY_RESPONSE);
+    assert_eq!(t.len(), 1);
+    assert!(carries(&t[0]));
+
+    // the app sees all of its own
+    let t = cmd(&mut b, &[CMD_SEND_TELEMETRY_REQ, 0, 0, 0]);
+    assert!(t[0].ends_with(&sensors));
+}
+
+#[test]
 fn export_import_share_and_remove_contacts() {
     let mut air = Air::new();
     air.link(0, 1);

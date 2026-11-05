@@ -3,7 +3,8 @@
    top (from 0xF4000). In between (src/ota.rs, installer/):
      0x26000..0x7B000  the application (this), 340 KiB
      0x7B000..0xD6000  an update being received (staging); once installed, the firmware it
-                       replaced, to go back to
+                       replaced, to go back to. The companion keeps its data here instead
+                       (src/lib.rs `COMPANION_REGION`)
      0xD6000..0xD8000  the node's sensors (src/lib.rs `DATA_OVERFLOW`; staging before they came)
      0xD8000..0xD9000  the app's first page while the installer swaps the two
      0xD9000..0xDA000  the install request
@@ -12,9 +13,10 @@
      0xEA000..0xED000  the update installer
      0xED000..0xF4000  upstream's file system, left as it is: upstream's firmware finds its
                        identity and prefs again if it goes back on
-   The SoftDevice runs only while a BLE update window is open (src/sd.rs); the RAM below 0x20004000
-   is its own then (the MBR's 8 bytes and the SoftDevice's tables), and is left alone otherwise
-   too: the SoftDevice keeps its interrupt forwarding there while it is disabled. */
+   The SoftDevice runs while a BLE update window is open, and all the time in the companion
+   (src/sd.rs); the RAM below 0x20004000 is its own then (the MBR's 8 bytes and the SoftDevice's
+   tables), and is left alone otherwise too: the SoftDevice keeps its interrupt forwarding there
+   while it is disabled. */
 MEMORY
 {
   FLASH : ORIGIN = 0x00026000, LENGTH = 0x7B000 - 0x26000

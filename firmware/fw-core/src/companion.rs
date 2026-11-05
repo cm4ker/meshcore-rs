@@ -66,6 +66,8 @@ const OFF_PAGE_MS: u64 = 2000;
 const DEFAULT_BLE_PIN: u32 = 123_456;
 /// The clock follows the GPS this often (upstream `TIME_SYNC_INTERVAL`).
 const GPS_TIME_SYNC_MS: u64 = 30 * 60 * 1000;
+/// Telemetry answers with sensor readings at most this old.
+pub const SENSOR_INTERVAL_MS: u64 = 15_000;
 
 /// Board-specific hardware around the radio.
 // Only used generically (never as `dyn`), so the futures' `Send`-ness does not matter.
@@ -91,6 +93,15 @@ pub trait Board {
     /// calibrates its reading: [`Self::battery_mv`] is then scaled by the one set over this one.
     fn adc_multiplier(&self) -> Option<f32> {
         None
+    }
+    /// The chip's own temperature (°C) for telemetry, if the board reads it.
+    async fn mcu_temp_c(&mut self) -> Option<f32> {
+        None
+    }
+    /// The environment sensors' readings for telemetry, Cayenne LPP from channel 2 up; asked
+    /// every [`SENSOR_INTERVAL_MS`].
+    async fn sensor_lpp(&mut self) -> Vec<u8> {
+        Vec::new()
     }
     fn button_down(&mut self) -> bool {
         false
@@ -429,7 +440,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         manufacturer: board.manufacturer().into(),
         build_date: cfg.build_date.into(),
         batt_mv,
-        mcu_temp_c: None,
+        mcu_temp_c: board.mcu_temp_c().await,
         max_tx_power_dbm: max_tx,
         has_gps: board.has_gps(),
         adc_multiplier: board.adc_multiplier(),
@@ -480,6 +491,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     let mut noise = NoiseFloor::new();
     let mut next_noise = 0u64;
     let mut next_batt = now_ms() + 60_000;
+    let mut next_sensors = 0u64;
     let mut next_clock_save = now_ms() + CLOCK_SAVE_INTERVAL_MS;
     let mut last_clock = mesh.ctx.current_time();
     let mut contacts_pending = false;
@@ -599,6 +611,11 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         if now >= next_batt {
             next_batt = now + 60_000;
             mesh.app.board.batt_mv = battery_mv(&mut board, mesh.app.prefs.adc_multiplier).await;
+            mesh.app.board.mcu_temp_c = board.mcu_temp_c().await;
+        }
+        if now >= next_sensors {
+            next_sensors = now + SENSOR_INTERVAL_MS;
+            mesh.app.board.sensor_lpp = board.sensor_lpp().await;
         }
 
         let ble_state = match (links.ble && BLE_ENABLED.load(Ordering::Relaxed), ble_app) {

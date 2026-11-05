@@ -148,9 +148,13 @@ jobs:
       - working-directory: firmware/models/promicro
         run: |
           cargo build --locked --release
-          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/repeater ../../../promicro-repeater.uf2 --bin ../../../promicro-repeater.bin
+          for role in repeater companion; do
+            python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role ../../../promicro-$role.uf2 --bin ../../../promicro-$role.bin
+          done
           MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release
-          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/repeater ../../../content/promicro-repeater.uf2 --bin ../../../content/promicro-repeater.bin
+          for role in repeater companion; do
+            python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role ../../../content/promicro-$role.uf2 --bin ../../../content/promicro-$role.bin
+          done
       - name: Content hashes
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

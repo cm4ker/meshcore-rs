@@ -20,6 +20,12 @@ path = "./src/bin/repeater.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "companion"
+path = "./src/bin/companion.rs"
+test = false
+bench = false
+
 [dependencies]
 cortex-m = { version = "0.7.7", features = ["inline-asm"] }
 # our own critical sections (src/sd.rs): they mask the application's interrupts only, never the

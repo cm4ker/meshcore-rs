@@ -445,6 +445,10 @@ pub struct Board {
     pub adc_multiplier: Option<f32>,
     /// Altitude of the latest GPS position, in metres.
     pub altitude_m: f64,
+    /// The environment sensors' latest readings, Cayenne LPP from channel 2 up (upstream
+    /// `EnvironmentSensorManager`), kept by the firmware; telemetry carries them to whoever may see
+    /// the environment.
+    pub sensor_lpp: Vec<u8>,
     /// While the firmware runs on trial after an update: when it is kept (uptime, ms).
     pub fw_trial_until: Option<u64>,
     /// The firmware in the other slot, `fw rollback` goes back to it (empty if not known).
@@ -469,6 +473,7 @@ impl Default for Board {
             gps: None,
             adc_multiplier: None,
             altitude_m: 0.0,
+            sensor_lpp: Vec::new(),
             fw_trial_until: None,
             fw_prev: String::new(),
             fw_rollback: false,
@@ -1105,7 +1110,8 @@ impl Companion {
         }
     }
 
-    /// `querySensors`: the position while the GPS is on, if `perms` allow it.
+    /// `querySensors`: the position while the GPS is on, then the environment sensors, as far as
+    /// `perms` allow.
     fn lpp_sensors(&self, out: &mut Vec<u8>, perms: u8) {
         if perms & TELEM_PERM_LOCATION != 0 && self.gps_active() {
             out.extend_from_slice(&[TELEM_CHANNEL_SELF, LPP_GPS]);
@@ -1114,6 +1120,9 @@ impl Companion {
             for v in [(p.node_lat * 10_000.0) as i32, (p.node_lon * 10_000.0) as i32, (self.board.altitude_m * 100.0) as i32] {
                 out.extend_from_slice(&v.to_be_bytes()[1..]);
             }
+        }
+        if perms & TELEM_PERM_ENVIRONMENT != 0 {
+            out.extend_from_slice(&self.board.sensor_lpp);
         }
     }
 

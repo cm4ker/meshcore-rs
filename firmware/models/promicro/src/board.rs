@@ -90,7 +90,12 @@ pub fn system_off() -> ! {
         w.set_pin(17, true); // RXEN
     });
     pac::P1.pin_cnf(BUTTON_PIN).modify(|w| w.set_sense(pac::gpio::vals::Sense::Low));
-    embassy_nrf::power::set_system_off();
+    // the POWER registers are the SoftDevice's while it runs (the companion's BLE)
+    if crate::sd::enabled() {
+        crate::sd::system_off();
+    } else {
+        embassy_nrf::power::set_system_off();
+    }
     loop {
         cortex_m::asm::wfe();
     }

@@ -1,12 +1,17 @@
-//! The repeater's BLE update window (`fw ble`, as on the Heltec boards) over the SoftDevice (`sd`),
-//! which runs only while the window is open: the Nordic UART service, frames written to RX,
-//! answers notified on TX (`Repeater::handle_link_frame` serves them: firmware updates and the
-//! device query). Both need a link paired with the window's PIN, LE Secure Connections with a
-//! passkey the board shows nowhere but in the reply to `fw ble`.
+//! BLE over the SoftDevice (`sd`): the Nordic UART service, frames written to RX, answers
+//! notified on TX. Both need a link paired with a PIN: LE Secure Connections with a passkey.
 //!
-//! Bonds live in RAM until the next restart: a PC that paired in an earlier window of this boot
-//! reconnects without the PIN; after a restart the board knows no bond, so the PC's old one has to
-//! go (`tools/ota-app/ota_app.py --pin` pairs afresh by itself).
+//! - The repeater's update window (`fw ble`, as on the Heltec boards), [`Role::Window`]: the
+//!   SoftDevice runs only while it is open; `Repeater::handle_link_frame` serves the frames
+//!   (firmware updates and the device query); the PIN is in the reply to `fw ble`. Bonds live in
+//!   RAM until the next restart: a PC that paired in an earlier window of this boot reconnects
+//!   without the PIN; after a restart the board knows no bond, so the PC's old one has to go
+//!   (`tools/ota-app/ota_app.py --pin` pairs afresh by itself).
+//! - The companion's app link, [`Role::Companion`], open as long as the firmware runs: frames go
+//!   to the companion loop (`meshcore_fw_core::frames`), with the PIN the app set (upstream's
+//!   123456 by default), and bonds are kept in its store, so a phone pairs once. Phones connect
+//!   from resolvable private addresses: a bond is found again by the identity key (IRK) the
+//!   phone gave when it paired.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -19,7 +24,8 @@ use embassy_sync::signal::Signal;
 use embassy_time::Timer;
 use log::{info, warn};
 use meshcore::ota::REQ_TYPE_OTA_BEGIN;
-use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT, pairing_begins, pairing_succeeded};
+use meshcore_fw_core::frames::{self, Link};
+use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT, BONDS_CHANGED, pairing_begins, pairing_succeeded};
 use p256::elliptic_curve::point::AffineCoordinates;
 use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use p256::{AffinePoint, EncodedPoint, NonZeroScalar, ProjectivePoint};
@@ -27,10 +33,21 @@ use p256::{AffinePoint, EncodedPoint, NonZeroScalar, ProjectivePoint};
 use crate::sd::{self, NRF_ERROR_NO_MEM, NRF_ERROR_RESOURCES, NRF_SUCCESS, svc};
 
 pub struct Params {
-    /// Advertised name: `MeshCore-OTA-<node name>`.
+    /// Advertised name: `MeshCore-OTA-<node name>` for the window, `MeshCore-<node name>` for
+    /// the companion.
     pub name: String,
-    /// The window's pairing PIN (6 digits).
+    /// The pairing PIN (6 digits).
     pub pin: u32,
+    pub role: Role,
+}
+
+/// Whom the link serves.
+pub enum Role {
+    /// The repeater's update window: frames to [`FRAMES_IN`], bonds in RAM.
+    Window,
+    /// The companion's app link: frames to its loop, bonds from its store (serialized) and back
+    /// through `BONDS_CHANGED`.
+    Companion { bonds: Vec<u8> },
 }
 
 static START: Signal<CriticalSectionRawMutex, Params> = Signal::new();
@@ -317,11 +334,67 @@ fn check(what: &str, err: u32) -> Result<(), ()> {
 
 // ---------------------------------------------------------------- the window
 
-/// A peer that bonded during this boot: its address (`ble_gap_addr_t`) and the key its links use.
+/// A peer that bonded: its identity address (`ble_gap_addr_t`), its identity key (zero if it gave
+/// none) and the key its links use.
 #[derive(Clone, Copy)]
 struct Bond {
     addr: [u8; 7],
+    irk: [u8; 16],
     key: EncKey,
+}
+
+/// A bond in the store: address 7, IRK 16, `enc_info` 17, EDIV 2, Rand 8.
+const BOND_LEN: usize = 50;
+
+impl Bond {
+    fn to_bytes(self) -> [u8; BOND_LEN] {
+        let mut b = [0u8; BOND_LEN];
+        b[..7].copy_from_slice(&self.addr);
+        b[7..23].copy_from_slice(&self.irk);
+        b[23..40].copy_from_slice(&self.key.enc_info);
+        b[40..42].copy_from_slice(&self.key.ediv.to_le_bytes());
+        b[42..].copy_from_slice(&self.key.rand);
+        b
+    }
+
+    fn from_bytes(b: &[u8; BOND_LEN]) -> Self {
+        let key = EncKey {
+            enc_info: b[23..40].try_into().unwrap(),
+            _pad: 0,
+            ediv: u16::from_le_bytes([b[40], b[41]]),
+            rand: b[42..].try_into().unwrap(),
+        };
+        Self { addr: b[..7].try_into().unwrap(), irk: b[7..23].try_into().unwrap(), key }
+    }
+
+    /// The peer at `addr` (`ble_gap_addr_t`) is this one: the same identity address, or a
+    /// resolvable private address that its IRK resolves.
+    fn is_peer(&self, addr: &[u8]) -> bool {
+        let kind = |a: &[u8]| a[0] >> 1;
+        if kind(addr) == kind(&self.addr) && addr[1..] == self.addr[1..] {
+            return true;
+        }
+        const RESOLVABLE: u8 = 2;
+        if kind(addr) != RESOLVABLE || self.irk == [0; 16] {
+            return false;
+        }
+        // ah(IRK, prand): the low 24 bits of AES-128 of the padded prand, all big-endian
+        let mut key = self.irk;
+        key.reverse();
+        let mut block = [0u8; 16];
+        block[13..].copy_from_slice(&[addr[6], addr[5], addr[4]]);
+        let mut out = [0u8; 16];
+        meshcore::crypto::encrypt(&key, &mut out, &block);
+        [out[15], out[14], out[13]] == addr[1..4]
+    }
+}
+
+fn bonds_from(data: &[u8]) -> Vec<Bond> {
+    data.as_chunks::<BOND_LEN>().0.iter().take(MAX_BONDS).map(Bond::from_bytes).collect()
+}
+
+fn bonds_bytes(bonds: &[Bond]) -> Vec<u8> {
+    bonds.iter().flat_map(|b| b.to_bytes()).collect()
 }
 
 struct Window {
@@ -332,6 +405,8 @@ struct Window {
     peer: [u8; 7],
     authenticated: bool,
     secret: Option<NonZeroScalar>,
+    /// The companion's app link (`Role::Companion`).
+    companion: bool,
 }
 
 #[embassy_executor::task]
@@ -341,7 +416,23 @@ pub async fn task() -> ! {
         let params = START.wait().await;
         STOP.reset();
         RUNNING.store(true, Ordering::Relaxed);
-        let mut w = Window { conn: NO_CONN, rx: 0, tx: 0, adv_handle: 0xFF, peer: [0; 7], authenticated: false, secret: None };
+        let companion = match &params.role {
+            Role::Companion { bonds: stored } => {
+                bonds = bonds_from(stored);
+                true
+            }
+            Role::Window => false,
+        };
+        let mut w = Window {
+            conn: NO_CONN,
+            rx: 0,
+            tx: 0,
+            adv_handle: 0xFF,
+            peer: [0; 7],
+            authenticated: false,
+            secret: None,
+            companion,
+        };
         if open(&params, &mut w).is_ok() {
             info!("BLE: advertising as '{}'", params.name);
             serve(&mut w, &mut bonds).await;
@@ -503,6 +594,7 @@ fn readvertise(w: &mut Window) {
 async fn serve(w: &mut Window, bonds: &mut Vec<Bond>) {
     let mut pending: Option<Vec<u8>> = None;
     loop {
+        sd::poll_soc_events();
         while let Some(id) = next_event() {
             handle(w, bonds, id).await;
         }
@@ -607,9 +699,7 @@ async fn handle(w: &mut Window, bonds: &mut Vec<Bond>, id: u16) {
         BLE_GAP_EVT_SEC_INFO_REQUEST => {
             let (addr, ediv, rand) = (&ev[8..15], u16_at(16), &ev[18..26]);
             let legacy = ediv != 0 || rand.iter().any(|&b| b != 0);
-            let bond = bonds.iter().find(|b| {
-                if legacy { b.key.ediv == ediv && b.key.rand == *rand } else { b.addr[1..] == addr[1..] && b.addr[0] >> 1 == addr[0] >> 1 }
-            });
+            let bond = bonds.iter().find(|b| if legacy { b.key.ediv == ediv && b.key.rand == *rand } else { b.is_peer(addr) });
             let enc = bond.map_or(core::ptr::null(), |b| b.key.enc_info.as_ptr());
             let _ = sd_call!(SD_BLE_GAP_SEC_INFO_REPLY, conn, enc, 0, 0);
         }
@@ -633,12 +723,15 @@ async fn handle(w: &mut Window, bonds: &mut Vec<Bond>, id: u16) {
             info!("BLE: paired{}", if flags & 0b1000 != 0 { " (LE Secure Connections)" } else { "" });
             if flags & 0b100 != 0 {
                 let sh = shared();
-                let addr = if kdist_peer & 0b10 != 0 { sh.peer_id.addr } else { w.peer };
+                let (addr, irk) = if kdist_peer & 0b10 != 0 { (sh.peer_id.addr, sh.peer_id.irk) } else { (w.peer, [0; 16]) };
                 bonds.retain(|b| b.addr != addr);
                 if bonds.len() >= MAX_BONDS {
                     bonds.remove(0);
                 }
-                bonds.push(Bond { addr, key: sh.own_enc });
+                bonds.push(Bond { addr, irk, key: sh.own_enc });
+                if w.companion {
+                    BONDS_CHANGED.signal(bonds_bytes(bonds));
+                }
             }
         }
         BLE_GAP_EVT_CONN_SEC_UPDATE => {
@@ -705,7 +798,12 @@ async fn take_frame(w: &Window, frame: Vec<u8>) {
     if frame.first() == Some(&REQ_TYPE_OTA_BEGIN) {
         let _ = sd_call!(SD_BLE_GAP_CONN_PARAM_UPDATE, w.conn, UPLOAD_PARAMS.as_ptr());
     }
-    if !frame.is_empty() {
+    if frame.is_empty() {
+        return;
+    }
+    if w.companion {
+        frames::FRAMES_IN.send((Link::Ble, frame)).await;
+    } else {
         FRAMES_IN.send(frame).await;
     }
 }
