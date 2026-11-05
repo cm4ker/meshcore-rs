@@ -13,7 +13,7 @@
 |---|---|---|---|---|---|---|---|
 | Heltec WiFi LoRa 32 V4 (V4.2, V4.3) | `firmware/models/heltec-v4` | ESP32-S3, SX1262 + FEM (GC1109 / KCT8103L), flash 16 МБ | OLED 128×64 | да: room server, Wi-Fi и MQTT, бридж ESP-NOW, энергосбережение | да | BLE и Wi-Fi (TCP 5000) одновременно, USB | LoRa, Wi-Fi, BLE; два слота, автооткат |
 | Heltec WiFi LoRa 32 V3 | тот же, фича `heltec-v3` | ESP32-S3, SX1262 без FEM, flash 8 МБ | OLED 128×64 | да, как V4 | собирается, на плате не проверен | как V4 | как V4, слоты по 3,4 МБ |
-| Seeed XIAO ESP32-C6 + Waveshare Core2021-HF | `firmware/models/xiao-c6` | ESP32-C6, Semtech LR2021, flash 4 МБ | нет | нет | да | BLE или Wi-Fi (не вместе; TCP пока ненадёжен), USB | через подключение приложения; два слота по 1,75 МБ, целый образ без сжатия |
+| Seeed XIAO ESP32-C6 + Waveshare Core2021-HF | `firmware/models/xiao-c6` | ESP32-C6, Semtech LR2021, flash 4 МБ | нет | своей сборкой (в выпусках нет): room server, Wi-Fi и MQTT; батарею не меряет | да | BLE или Wi-Fi (не вместе; TCP пока ненадёжен), USB | через подключение приложения; два слота по 1,75 МБ, целый образ без сжатия |
 | LilyGO T-Echo | `firmware/models/t-echo` | nRF52840, SX1262, QSPI-флешка | e-paper 200×200 | нет | да, с GPS L76K | BLE, USB | через подключение приложения; один слот, без отката; первая прошивка — UF2 |
 | nRF52840 Pro Micro («Faketec», upstream `promicro`) | `firmware/models/promicro` | nRF52840, SX1262 (HT-RA62, E22), только внутренняя flash | нет | да: room server, датчики на I2C в телеметрии; без Wi-Fi; BLE только для обновлений (`fw ble`) | нет | USB (консоль) | LoRa (подписанный релиз, дельта) или BLE; откат на прежнюю; первая прошивка — UF2 |
 
@@ -137,7 +137,8 @@ firmware/models/        платы, у каждой свой крейт: про�
     wifi_ota.rs         точка доступа + HTTP-загрузка
     broker.rs           MQTT по TCP или TLS 1.3 + WebSocket (embedded-tls)
     bin/main.rs         прошивка репитера; bin/companion.rs — компаньона
-  xiao-c6/              XIAO ESP32-C6 + LR2021 (Waveshare Core2021-HF): компаньон
+  xiao-c6/              XIAO ESP32-C6 + LR2021 (Waveshare Core2021-HF): компаньон и репитер
+                        (`repeater`, на общем `repeater_app`; в выпуски пока не входит)
   t-echo/               LilyGO T-Echo (nRF52840, embassy-nrf): компаньон; BLE на Nordic SDC
                         (trouble-host 0.8), хранилище на QSPI-флешке, экран e-paper;
     installer/          установщик обновления (переносит образ с QSPI во внутреннюю flash)
@@ -188,6 +189,9 @@ cd firmware\models\xiao-c6
 cargo build --release
 espflash flash --erase-parts otadata,meshcore,companion target\riscv32imac-unknown-none-elf\release\companion
 ```
+
+Репитер — тот же `cargo build --release`, прошивается файл `release\repeater`. В выпусках его нет, поэтому
+сам он не обновляется: новая версия — своей сборкой (по USB, Wi-Fi или BLE, как у компаньона).
 
 Подключение модуля (вывод XIAO -> GPIO): CLK D8 -> 19, MISO D9 -> 20, MOSI D10 -> 18, CS D3 -> 21,
 DIO11 (IRQ) D1 -> 1, RESET D2 -> 2, BUSY D0 -> 0.
