@@ -75,25 +75,20 @@ jobs:
           ldproxy: false
       # one espflash for every run: another version may lay the same program out differently
       - run: cargo install espflash --version 4.6.0 --locked
-      - name: Heltec V4
-        working-directory: firmware/models/heltec-v4
+      - name: Heltec V4 and V3
+        working-directory: firmware/models/heltec
         run: |
           mkdir -p ../../../content
+          save() { # <dir for the images> : each board's images with its flash size and layout
+            for role in repeater companion; do
+              espflash save-image --chip esp32s3 --flash-size 16mb --partition-table v4/partitions.csv target/xtensa-esp32s3-none-elf/release/heltec-v4-$role "$1/heltec-v4-$role.bin"
+              espflash save-image --chip esp32s3 --flash-size 8mb --partition-table v3/partitions.csv target/xtensa-esp32s3-none-elf/release/heltec-v3-$role "$1/heltec-v3-$role.bin"
+            done
+          }
           cargo build --locked --release
-          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../heltec-v4-repeater.bin
-          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/companion ../../../heltec-v4-companion.bin
+          save ../../..
           MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release
-          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../content/heltec-v4-repeater.bin
-          espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-none-elf/release/companion ../../../content/heltec-v4-companion.bin
-      - name: Heltec V3
-        working-directory: firmware/models/heltec-v4
-        run: |
-          cargo build --locked --release --features heltec-v3
-          espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../heltec-v3-repeater.bin
-          espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/companion ../../../heltec-v3-companion.bin
-          MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release --features heltec-v3
-          espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/heltec-v4 ../../../content/heltec-v3-repeater.bin
-          espflash save-image --chip esp32s3 --flash-size 8mb --partition-table partitions-v3.csv target/xtensa-esp32s3-none-elf/release/companion ../../../content/heltec-v3-companion.bin
+          save ../../../content
       - name: Content hashes
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

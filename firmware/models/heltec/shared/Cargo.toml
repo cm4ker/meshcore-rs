@@ -1,0 +1,36 @@
+[package]
+name         = "heltec-shared"
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+
+[dependencies]
+esp-hal.workspace                = true
+esp-rtos.workspace               = true
+esp-bootloader-esp-idf.workspace = true
+log.workspace                    = true
+embassy-executor.workspace       = true
+embassy-time.workspace           = true
+esp-alloc.workspace              = true
+esp-backtrace.workspace          = true
+esp-println.workspace            = true
+critical-section.workspace       = true
+static_cell.workspace            = true
+meshcore.workspace               = true
+meshcore-fw.workspace            = true
+meshcore-fw-core.workspace       = true
+meshcore-ui.workspace            = true
+esp-storage.workspace            = true
+embassy-sync.workspace           = true
+embassy-futures.workspace        = true
+embedded-hal-async.workspace     = true
+embedded-io-async.workspace      = true
+embedded-hal.workspace           = true
+libm.workspace                   = true
+esp-radio.workspace              = true
+embassy-net.workspace            = true
+edge-dhcp.workspace              = true
+edge-nal.workspace               = true
+edge-nal-embassy.workspace       = true
+ssd1306.workspace                = true
+embedded-graphics.workspace      = true

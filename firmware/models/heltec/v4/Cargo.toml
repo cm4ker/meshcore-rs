@@ -1,0 +1,26 @@
+[package]
+name         = "heltec-v4"
+build        = "../build.rs"
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+
+[[bin]]
+name = "heltec-v4-repeater"
+path = "./src/bin/repeater.rs"
+
+[[bin]]
+name = "heltec-v4-companion"
+path = "./src/bin/companion.rs"
+
+[dependencies]
+heltec-shared.workspace          = true
+esp-hal.workspace                = true
+esp-rtos.workspace               = true
+esp-bootloader-esp-idf.workspace = true
+esp-backtrace.workspace          = true
+embassy-executor.workspace       = true
+embassy-time.workspace           = true
+log.workspace                    = true
+meshcore.workspace               = true
+meshcore-fw.workspace            = true

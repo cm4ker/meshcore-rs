@@ -1,28 +1,14 @@
-//! MeshCore repeater firmware for the Heltec WiFi LoRa 32 V4, in Rust: the board around the
-//! shared repeater loop ([`meshcore_fw::repeater_app`]).
-
-#![no_std]
-#![no_main]
-#![deny(
-    clippy::mem_forget,
-    reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
-    holding buffers for the duration of a data transfer."
-)]
-
-extern crate alloc;
+//! The MeshCore repeater on a Heltec board, in Rust: the board around the shared repeater loop
+//! ([`meshcore_fw::repeater_app`]).
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::sync::atomic::Ordering;
 
 use embassy_executor::Spawner;
 use embassy_time::{Instant, Timer};
-use esp_backtrace as _;
-#[cfg(feature = "heltec-v3")]
-use esp_hal::Blocking;
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Event, Input, InputConfig, Level, Output, OutputConfig, Pin, Pull};
@@ -32,133 +18,39 @@ use esp_hal::rng::{Trng, TrngSource};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::{Duration as HalDuration, Rate};
 use esp_hal::timer::timg::TimerGroup;
-use esp_println::print;
-use log::{info, warn};
-
-use heltec_v4::board::Fem;
-use heltec_v4::common::Battery;
-use heltec_v4::display::Oled;
-use heltec_v4::ota::SharedStore;
-use heltec_v4::power::Sleeper;
-use heltec_v4::radio::EspIrq;
-use heltec_v4::reset;
-use heltec_v4::storage;
-use heltec_v4::sx1262::Sx1262;
+use esp_storage::FlashStorage;
+use log::warn;
 use meshcore::gps::GpsReading;
 use meshcore::prefs::NodePrefs;
-use meshcore_fw::repeater_app::{self, CLI_LINES, CONSOLE_WOKE_MS, Config, Hardware, RepeaterBoard, SleepWake};
+use meshcore_fw::repeater_app::{self, CONSOLE_WOKE_MS, Config, Hardware, RepeaterBoard, SleepWake};
 use meshcore_ui::View;
-use esp_storage::FlashStorage;
 
-esp_bootloader_esp_idf::esp_app_desc!();
-
-/// esp-println's `println!` ends a line with LF only; the console's lines end with CR LF.
-macro_rules! println {
-    () => {
-        print!("\r\n")
-    };
-    ($($arg:tt)*) => {
-        print!("{}\r\n", format_args!($($arg)*))
-    };
-}
-
-const BUILD_EPOCH: &str = env!("BUILD_EPOCH");
-const BUILD_DATE: &str = env!("BUILD_DATE");
+use crate::battery::{self, Battery};
+use crate::display::Oled;
+use crate::ota::SharedStore;
+use crate::power::Sleeper;
+use crate::radio::EspIrq;
+use crate::sx1262::Sx1262;
+use crate::{ConsolePins, FemPins, FrontEnd, Variant, gps, reset, storage};
 
 /// Longest legitimate stall is one max-length SF12 transmission (~10 s).
 const WATCHDOG_SECS: u64 = 30;
-/// Input closer than this to the wake, or to the input before it, is the rest of the cut line.
-const CUT_LINE_GAP_MS: u32 = 500;
 
 fn now_ms() -> u64 {
     Instant::now().as_millis()
 }
 
-fn load_prefs(store: &Option<SharedStore<'_>>) -> NodePrefs {
+fn load_prefs<V: Variant>(store: &Option<SharedStore<'_>>) -> NodePrefs {
     store
         .as_ref()
-        .and_then(|s| s.borrow_mut().load(heltec_v4::storage::Blob::Prefs))
+        .and_then(|s| s.borrow_mut().load(storage::Blob::Prefs))
         .map(|d| NodePrefs::deserialize(&String::from_utf8_lossy(&d)))
-        .unwrap_or_else(|| NodePrefs { tx_power_dbm: heltec_v4::board::DEFAULT_TX_DBM, ..Default::default() })
+        .unwrap_or_else(|| NodePrefs { tx_power_dbm: V::DEFAULT_TX_DBM, ..Default::default() })
 }
 
-// ---- console
-/// The V4's console is the chip's USB Serial/JTAG port, read in its interrupt (`meshcore_fw::usb`).
-#[cfg(not(feature = "heltec-v3"))]
-type ConsoleRx = meshcore_fw::usb::Input;
-/// The V3's USB port is a CP2102 bridge to UART0 (TX 43, RX 44).
-#[cfg(feature = "heltec-v3")]
-type ConsoleRx = esp_hal::uart::UartRx<'static, Blocking>;
-
-async fn console_read(rx: &mut ConsoleRx, buf: &mut [u8]) -> usize {
-    #[cfg(not(feature = "heltec-v3"))]
-    return rx.read(buf).await;
-    #[cfg(feature = "heltec-v3")]
-    loop {
-        let n = rx.read_buffered(buf).unwrap_or(0);
-        if n > 0 {
-            return n;
-        }
-        Timer::after_millis(20).await;
-    }
-}
-
-/// Read the USB console, echo, and hand complete lines to the main loop.
-#[embassy_executor::task]
-async fn console_task(mut rx: ConsoleRx) {
-    let mut line: Vec<u8> = Vec::with_capacity(160);
-    let mut buf = [0u8; 64];
-    let mut shown = 0;
-    let show = |part: &[u8]| part.iter().for_each(|&c| print!("{}", c as char));
-    let mut cut_line: Option<u32> = None;
-    loop {
-        let n = console_read(&mut rx, &mut buf).await;
-        let typed = n <= 2;
-        let woke = CONSOLE_WOKE_MS.swap(0, Ordering::Relaxed);
-        if woke != 0 {
-            (cut_line, shown) = (Some(woke), 0);
-            line.clear();
-        }
-        for &c in &buf[..n] {
-            if let Some(last) = cut_line {
-                let t = now_ms() as u32;
-                if t.wrapping_sub(last) < CUT_LINE_GAP_MS {
-                    cut_line = (!matches!(c, b'\r' | b'\n')).then_some(t);
-                    continue;
-                }
-                cut_line = None;
-            }
-            match c {
-                b'\r' | b'\n' => {
-                    if !line.is_empty() {
-                        show(&line[shown..]);
-                        println!();
-                        shown = 0;
-                        CLI_LINES.send(core::mem::take(&mut line)).await;
-                    }
-                }
-                0x08 | 0x7F => {
-                    if line.pop().is_some() && shown > line.len() {
-                        shown = line.len();
-                        print!("\x08 \x08");
-                    }
-                }
-                _ if line.len() < 159 => {
-                    line.push(c);
-                    if typed {
-                        show(&line[shown..]);
-                        shown = line.len();
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-/// The Heltec V4 hardware behind the shared repeater loop.
-struct HeltecV4<'d> {
-    fem: Fem<'d>,
+/// The Heltec hardware behind the shared repeater loop.
+struct Heltec<'d, V: Variant> {
+    fem: V::FrontEnd,
     led: Output<'d>,
     oled: Option<Oled<'d>>,
     battery: Battery<'d>,
@@ -166,21 +58,21 @@ struct HeltecV4<'d> {
     sleeper: Sleeper<'d>,
 }
 
-impl RepeaterBoard for HeltecV4<'_> {
+impl<V: Variant> RepeaterBoard for Heltec<'_, V> {
     fn name(&self) -> &str {
         self.fem.name()
     }
 
     fn release_board(&self) -> u8 {
-        heltec_v4::RELEASE_BOARD
+        V::RELEASE_BOARD
     }
 
     fn default_tx_dbm(&self) -> i8 {
-        heltec_v4::board::DEFAULT_TX_DBM
+        V::DEFAULT_TX_DBM
     }
 
     fn adc_multiplier(&self) -> Option<f32> {
-        heltec_v4::board::ADC_MULTIPLIER
+        battery::ADC_MULTIPLIER
     }
 
     fn has_gps(&self) -> bool {
@@ -224,16 +116,16 @@ impl RepeaterBoard for HeltecV4<'_> {
     }
 
     async fn battery_mv(&mut self, multiplier: Option<f32>) -> u16 {
-        let scale = heltec_v4::board::battery_scale(multiplier);
+        let scale = battery::battery_scale(multiplier);
         (self.battery.read_mv().await as f32 * scale) as u16
     }
 
     fn set_gps(&mut self, on: bool) {
-        heltec_v4::gps::GPS_ON.signal(on);
+        gps::GPS_ON.signal(on);
     }
 
     fn gps_latest(&self) -> Option<GpsReading> {
-        heltec_v4::gps::latest()
+        gps::latest()
     }
 
     fn screen_is_on(&self) -> bool {
@@ -283,8 +175,7 @@ impl RepeaterBoard for HeltecV4<'_> {
             woke.button = true;
         }
         // console input woke it: the first bytes are lost, so ask for the line again
-        #[cfg(feature = "heltec-v3")]
-        if esp_hal::rtc_cntl::wakeup_cause().contains(esp_hal::rtc_cntl::WakeupSource::Uart0) {
+        if V::console_woke() {
             CONSOLE_WOKE_MS.store((now_ms() as u32).max(1), Ordering::Relaxed);
             woke.console = true;
         }
@@ -311,8 +202,9 @@ impl RepeaterBoard for HeltecV4<'_> {
     }
 }
 
-#[esp_rtos::main]
-async fn main(spawner: Spawner) -> ! {
+/// The repeater firmware of board `V`, from reset; `build_epoch` and `build_date` are its build
+/// stamp (`BUILD_EPOCH`, `BUILD_DATE` of the build script).
+pub async fn run<V: Variant>(spawner: Spawner, build_epoch: &str, build_date: &'static str) -> ! {
     esp_println::logger::init_logger_from_env();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -328,22 +220,16 @@ async fn main(spawner: Spawner) -> ! {
 
     let store: Option<SharedStore> = storage::open(FlashStorage::new(p.FLASH)).map(|s| Rc::new(RefCell::new(s)));
     if store.is_none() {
-        warn!("no '{}' partition: settings will not persist", heltec_v4::storage::PARTITION_LABEL);
+        warn!("no '{}' partition: settings will not persist", storage::PARTITION_LABEL);
     }
     // the FEM's initial LNA state follows the stored setting (the loop reloads the prefs itself)
-    let prefs = load_prefs(&store);
+    let prefs = load_prefs::<V>(&store);
 
-    // ---- board: LED + FEM
+    // ---- board: LED + front end
     let led = Output::new(p.GPIO35, Level::Low, OutputConfig::default());
-    let fem = Fem::init(
-        p.GPIO7.degrade(),
-        p.GPIO2.degrade(),
-        p.GPIO46.degrade(),
-        p.GPIO5.degrade(),
-        prefs.radio_fem_rxgain,
-    )
-    .await;
-    info!("FEM: {:?}", fem.kind);
+    let fem_pins =
+        FemPins { ldo: p.GPIO7.degrade(), csd: p.GPIO2.degrade(), cps: p.GPIO46.degrade(), ctx: p.GPIO5.degrade() };
+    let fem = V::front_end(fem_pins, prefs.radio_fem_rxgain).await;
 
     // ---- radio (configured by the loop from the stored settings)
     let spi = Spi::new(p.SPI2, SpiConfig::default().with_frequency(Rate::from_mhz(8)))
@@ -370,7 +256,8 @@ async fn main(spawner: Spawner) -> ! {
     // ---- battery
     let mut adc_cfg = AdcConfig::new();
     let bat_pin = adc_cfg.enable_pin_with_cal::<_, AdcCalCurve<ADC1>>(p.GPIO1, Attenuation::_11dB);
-    let battery = Battery::new(Adc::new(p.ADC1, adc_cfg), bat_pin, p.GPIO37);
+    let active = V::divider_active(p.GPIO37.reborrow());
+    let battery = Battery::new(Adc::new(p.ADC1, adc_cfg), bat_pin, p.GPIO37, active);
 
     // ---- OLED status screen (Vext powers it; GPIO36 LOW = on)
     let _vext = Output::new(p.GPIO36, Level::Low, OutputConfig::default());
@@ -389,17 +276,9 @@ async fn main(spawner: Spawner) -> ! {
     let sleeper = Sleeper::new(p.LPWR);
 
     // ---- console
-    #[cfg(not(feature = "heltec-v3"))]
-    let console_rx = meshcore_fw::usb::start(p.USB_DEVICE);
-    #[cfg(feature = "heltec-v3")]
-    let mut console_rx = esp_hal::uart::UartRx::new(p.UART0, esp_hal::uart::Config::default()).unwrap().with_rx(p.GPIO44);
-    #[cfg(feature = "heltec-v3")]
-    if let Err(e) = console_rx.enable_wakeup(&esp_hal::uart::WakeupConfig::default()) {
-        warn!("console: no wake from sleep: {e}");
-    }
-    spawner.spawn(console_task(console_rx).unwrap());
+    V::start_console(spawner, ConsolePins { usb: p.USB_DEVICE, uart0: p.UART0, rx: p.GPIO44 });
 
-    // ---- optional external GPS on the V4's UART1 header (RX 38, TX 39, EN 34, RESET 42)
+    // ---- optional external GPS on the UART1 header (RX 38, TX 39, EN 34, RESET 42)
     let gps_uart = esp_hal::uart::Uart::new(p.UART1, esp_hal::uart::Config::default().with_baudrate(9600))
         .unwrap()
         .with_rx(p.GPIO38)
@@ -407,7 +286,7 @@ async fn main(spawner: Spawner) -> ! {
         .into_async();
     let (gps_rx, gps_tx) = gps_uart.split();
     spawner.spawn(
-        heltec_v4::gps::task(heltec_v4::gps::Gps {
+        gps::task(gps::Gps {
             rx: gps_rx,
             tx: gps_tx,
             enable: Output::new(p.GPIO34, Level::High, OutputConfig::default()),
@@ -416,9 +295,9 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap(),
     );
 
-    let board = HeltecV4 { fem, led, oled, battery, button, sleeper };
+    let board = Heltec::<V> { fem, led, oled, battery, button, sleeper };
     let hw = Hardware { radio, store, wifi: p.WIFI, bt: p.BT, entropy };
-    let cfg = Config { build_epoch: BUILD_EPOCH.parse().unwrap_or(0), build_date: BUILD_DATE };
+    let cfg = Config { build_epoch: build_epoch.parse().unwrap_or(0), build_date };
     // the loop's state on the heap: in the main task's static it would grow with every change to
     // the loop and move the statics after it (see `layout` in build.rs)
     Box::pin(repeater_app::run(spawner, hw, board, cfg)).await

@@ -9,7 +9,7 @@ encrypted with the admin's shared secret, so only a logged-in admin can push fir
     python meshcore_ota.py --ble D8:E6:C5:14:21:A8 --node PKIO ...   # a companion over BLE
 
 Delta updates: the repeater reports the SHA-256 of the image it runs; if that image is in the
-image store (--images, default firmware/models/heltec-v4/images), only a bsdiff patch is sent (made by
+image store (--images, default firmware/models/heltec/images), only a bsdiff patch is sent (made by
 tools/ota-delta, `cargo build --release -p ota-delta`). Every image sent is added to the store;
 add images flashed over USB with --register.
 
@@ -59,7 +59,7 @@ ERRORS = {1: "no OTA slot", 2: "image too large", 3: "bad parameters", 4: "no se
 BOARDS = {1: "heltec-v4", 2: "heltec-v3", 3: "xiao-c6", 4: "t-echo", 5: "promicro"}
 ROLES = {1: "repeater", 2: "companion"}
 REPO = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_IMAGES = REPO / "firmware" / "models" / "heltec-v4" / "images"
+DEFAULT_IMAGES = REPO / "firmware" / "models" / "heltec" / "images"
 DEFAULT_DELTA_TOOL = REPO / "target" / "release" / ("ota-delta.exe" if os.name == "nt" else "ota-delta")
 
 

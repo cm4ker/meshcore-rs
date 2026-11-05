@@ -11,8 +11,8 @@
 
 | Устройство | Крейт | Чип и радио | Экран | Репитер | Компаньон | Связь с приложением | Обновление по воздуху |
 |---|---|---|---|---|---|---|---|
-| Heltec WiFi LoRa 32 V4 (V4.2, V4.3) | `firmware/models/heltec-v4` | ESP32-S3, SX1262 + FEM (GC1109 / KCT8103L), flash 16 МБ | OLED 128×64 | да: room server, Wi-Fi и MQTT, бридж ESP-NOW, энергосбережение | да | BLE и Wi-Fi (TCP 5000) одновременно, USB | LoRa, Wi-Fi, BLE; два слота, автооткат |
-| Heltec WiFi LoRa 32 V3 | тот же, фича `heltec-v3` | ESP32-S3, SX1262 без FEM, flash 8 МБ | OLED 128×64 | да, как V4 | собирается, на плате не проверен | как V4 | как V4, слоты по 3,4 МБ |
+| Heltec WiFi LoRa 32 V4 (V4.2, V4.3) | `firmware/models/heltec/v4` | ESP32-S3, SX1262 + FEM (GC1109 / KCT8103L), flash 16 МБ | OLED 128×64 | да: room server, Wi-Fi и MQTT, бридж ESP-NOW, энергосбережение | да | BLE и Wi-Fi (TCP 5000) одновременно, USB | LoRa, Wi-Fi, BLE; два слота, автооткат |
+| Heltec WiFi LoRa 32 V3 | `firmware/models/heltec/v3` | ESP32-S3, SX1262 без FEM, flash 8 МБ | OLED 128×64 | да, как V4 | собирается, на плате не проверен | как V4 | как V4, слоты по 3,4 МБ |
 | Seeed XIAO ESP32-C6 + Waveshare Core2021-HF | `firmware/models/xiao-c6` | ESP32-C6, Semtech LR2021, flash 4 МБ | нет | своей сборкой (в выпусках нет): room server, Wi-Fi и MQTT; батарею не меряет | да | BLE или Wi-Fi (не вместе; TCP пока ненадёжен), USB | через подключение приложения; два слота по 1,75 МБ, целый образ без сжатия |
 | LilyGO T-Echo | `firmware/models/t-echo` | nRF52840, SX1262, QSPI-флешка | e-paper 200×200 | нет | да, с GPS L76K | BLE, USB | через подключение приложения; один слот, без отката; первая прошивка — UF2 |
 | nRF52840 Pro Micro («Faketec», upstream `promicro`) | `firmware/models/promicro` | nRF52840, SX1262 (HT-RA62, E22), только внутренняя flash | нет | да: room server, датчики на I2C в телеметрии; без Wi-Fi; BLE только для обновлений (`fw ble`) | нет | USB (консоль) | LoRa (подписанный релиз, дельта) или BLE; откат на прежнюю; первая прошивка — UF2 |
@@ -132,11 +132,13 @@ firmware/ui/            интерфейс на устройстве: модел
                         по классам экранов (embedded-graphics, шрифты U8g2), когда перерисовывать
 firmware/vendor/        пропатченные копии trouble-host и embassy-nrf (что и зачем — vendor/README.md)
 firmware/models/        платы, у каждой свой крейт: прошивки, разметка flash, тулчейн
-  heltec-v4/            Heltec V4, и V3 с фичей `heltec-v3`
-    board.rs display.rs FEM GC1109/KCT8103L (V4.2/V4.3); OLED
-    wifi_ota.rs         точка доступа + HTTP-загрузка
-    broker.rs           MQTT по TCP или TLS 1.3 + WebSocket (embedded-tls)
-    bin/main.rs         прошивка репитера; bin/companion.rs — компаньона
+  heltec/               Heltec V3 и V4: один workspace, общие Cargo.lock и target
+    shared/             общее у V3 и V4: репитер и компаньон вокруг платы, OLED, батарея, GPS,
+                        консоль; чем платы различаются, спрашивает через трейт `Variant`
+    v4/                 V4: FEM GC1109/KCT8103L (V4.2/V4.3), консоль на USB чипа, flash 16 МБ;
+                        образы heltec-v4-repeater, heltec-v4-companion
+    v3/                 V3: без FEM, консоль на UART0 (CP2102), flash 8 МБ;
+                        образы heltec-v3-repeater, heltec-v3-companion
   xiao-c6/              XIAO ESP32-C6 + LR2021 (Waveshare Core2021-HF): компаньон и репитер
                         (`repeater`, на общем `repeater_app`; в выпуски пока не входит)
   t-echo/               LilyGO T-Echo (nRF52840, embassy-nrf): компаньон; BLE на Nordic SDC
@@ -161,26 +163,28 @@ tools/ui-preview/       все страницы интерфейса во все
 ```powershell
 espup install --targets esp32s3      # один раз (на Windows ARM64 — x64-версия под эмуляцией)
 . $HOME\export-esp.ps1               # в каждой новой консоли
-cd firmware\models\heltec-v4
-cargo build --release
-espflash flash --erase-parts otadata target\xtensa-esp32s3-none-elf\release\heltec-v4
+cd firmware\models\heltec
+cargo build --release                # все четыре образа, V3 и V4
+espflash flash --partition-table v4\partitions.csv --erase-parts otadata target\xtensa-esp32s3-none-elf\release\heltec-v4-repeater
 # или компаньон:
-espflash flash --erase-parts otadata target\xtensa-esp32s3-none-elf\release\companion
+espflash flash --partition-table v4\partitions.csv --erase-parts otadata target\xtensa-esp32s3-none-elf\release\heltec-v4-companion
 ```
 
-Heltec V3 собирается из того же крейта с фичей `heltec-v3`: FEM нет, флеш 8 МБ (своя разметка
-`partitions-v3.csv`, те же разделы, слоты по 3,4 МБ), консоль на UART0 через CP2102 (на Windows нужен
+Одну плату собирает `cargo build --release -p heltec-v4` (или `-p heltec-v3`), а
+`cargo run --release --bin heltec-v4-repeater`, запущенный из `v4\` (или `v3\`), сразу прошивает с
+разметкой этой платы.
+
+Heltec V3: FEM нет, флеш 8 МБ (своя разметка `v3\partitions.csv`, те же разделы, слоты по 3,4 МБ), консоль на UART0 через CP2102 (на Windows нужен
 драйвер Silicon Labs CP210x), мощность новой ноды по умолчанию 22 dBm. Прошивка upstream на V3
 размечена иначе, поэтому при первой прошивке флеш стирается целиком (сначала снять дамп
 `espflash read-flash 0 0x800000`):
 
 ```powershell
-cargo build --release --features heltec-v3
 espflash erase-flash                 # только в первый раз
-espflash flash --flash-size 8mb --partition-table partitions-v3.csv --erase-parts otadata target\xtensa-esp32s3-none-elf\release\heltec-v4
+espflash flash --flash-size 8mb --partition-table v3\partitions.csv --erase-parts otadata target\xtensa-esp32s3-none-elf\release\heltec-v3-repeater
 ```
 
-Образ для обновления по воздуху — тоже с `--flash-size 8mb --partition-table partitions-v3.csv`.
+Образ для обновления по воздуху — тоже с `--flash-size 8mb --partition-table v3\partitions.csv`.
 
 XIAO ESP32-C6 + LR2021 (обычный stable-тулчейн, `rustup target add riscv32imac-unknown-none-elf`):
 
@@ -276,7 +280,7 @@ python tools/ota-lora/meshcore_ota.py --port COM4 --node PKIO --password-file pw
 ```
 
 Репитер сообщает SHA-256 работающего образа. Если этот образ есть в хранилище
-`firmware/models/heltec-v4/images/`, по эфиру уходит только дельта: при SF7/BW62.5 типичное обновление —
+`firmware/models/heltec/images/`, по эфиру уходит только дельта: при SF7/BW62.5 типичное обновление —
 ~20 КБ, около 3 минут, плюс ~25 секунд на сборку и проверку образа на самом репитере. Каждый
 отправленный образ сохраняется в хранилище; прошитый по USB нужно добавить вручную:
 `meshcore_ota.py --register firmware.bin`. Если базы нет, уходит весь образ (сжатый, ~700 КБ,

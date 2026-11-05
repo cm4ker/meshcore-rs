@@ -1737,7 +1737,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "heltec-v4"
+name = "heltec-shared"
 version = "0.1.0"
 dependencies = [
  "critical-section",
@@ -1769,6 +1769,37 @@ dependencies = [
  "meshcore-ui",
  "ssd1306",
  "static_cell",
+]
+
+[[package]]
+name = "heltec-v3"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-time",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-rtos",
+ "heltec-shared",
+ "log",
+ "meshcore",
+]
+
+[[package]]
+name = "heltec-v4"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-time",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-rtos",
+ "heltec-shared",
+ "log",
+ "meshcore",
+ "meshcore-fw",
 ]
 
 [[package]]

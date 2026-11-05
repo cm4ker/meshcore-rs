@@ -1,4 +1,4 @@
-//! The Heltec V4's SSD1306 OLED (128x64, I2C), showing the interface's pages in the 128 x 64
+//! The SSD1306 OLED of the Heltec V3 and V4 (128x64, I2C), showing the interface's pages in the 128 x 64
 //! layout ([`meshcore_ui::layout::Class::Mono128x64`]).
 //!
 //! The screen goes dark a minute after the last press of the PRG button (OLED burn-in on an

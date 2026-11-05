@@ -258,7 +258,7 @@ async def main():
         version = dev[59:79].split(b"\0")[0].decode(errors="replace")
         log(f"device: {model}, firmware {version}")
         board = ("xiao-c6" if "Xiao" in model else "t-echo" if "T-Echo" in model
-                 else "promicro" if "ProMicro" in model else "heltec-v4")
+                 else "promicro" if "ProMicro" in model else "heltec")
         images = args.images or REPO / "firmware" / "models" / board / "images"
         # the ESP boards keep the previous firmware and fall back to it; the T-Echo has room for one
         after = ("it installs the image and restarts" if board == "t-echo"

@@ -1,7 +1,9 @@
+//! The build script of both boards (`v3`, `v4`), each running it for its own images.
+
 fn main() {
     emit_build_time();
     // the build stamp follows every change of the firmware, as without any rerun-if-changed
-    for f in ["src", "certs", "Cargo.toml", "build.rs"] {
+    for f in ["src", "Cargo.toml", "../build.rs", "../Cargo.toml", "../shared"] {
         println!("cargo:rerun-if-changed={f}");
     }
     linker_be_nice();
@@ -145,13 +147,14 @@ fn linker_be_nice() {
 /// RAM the main task's stack doesn't get. The link fails when a part outgrows its room; raising one
 /// moves what comes after it, so the next delta is a large one.
 fn layout() {
-    let ld = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../ld");
+    let ld = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../../ld");
     println!("cargo:rerun-if-changed={}", ld.display());
     println!("cargo:rustc-link-search={}", ld.display());
-    // (binary, code in RAM, switch tables and constants, those and the statics), in bytes
-    for (bin, rwtext, head, data) in [("companion", 0x3E00, 0x3300, 0x6C00), ("heltec-v4", 0x4A00, 0x4000, 0x7A00)] {
+    let board = std::env::var("CARGO_PKG_NAME").unwrap();
+    // (image, code in RAM, switch tables and constants, those and the statics), in bytes
+    for (role, rwtext, head, data) in [("companion", 0x3E00, 0x3300, 0x6C00), ("repeater", 0x4A00, 0x4000, 0x7A00)] {
         for (sym, room) in [("MC_RWTEXT_ROOM", rwtext), ("MC_DATA_HEAD", head), ("MC_DATA_ROOM", data)] {
-            println!("cargo:rustc-link-arg-bin={bin}=-Wl,--defsym={sym}={room:#x}");
+            println!("cargo:rustc-link-arg-bin={board}-{role}=-Wl,--defsym={sym}={room:#x}");
         }
     }
 }

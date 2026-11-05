@@ -1,22 +1,11 @@
-//! MeshCore companion radio firmware for the Heltec WiFi LoRa 32 V4, in Rust: the board around
-//! the shared companion loop (`meshcore_fw::companion_app`).
-
-#![no_std]
-#![no_main]
-#![deny(
-    clippy::mem_forget,
-    reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
-    holding buffers for the duration of a data transfer."
-)]
-
-extern crate alloc;
+//! The MeshCore companion radio on a Heltec board, in Rust: the board around the shared companion
+//! loop (`meshcore_fw::companion_app`).
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
 use embassy_executor::Spawner;
-use esp_backtrace as _;
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pin, Pull};
@@ -28,35 +17,28 @@ use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
 use esp_storage::FlashStorage;
-use log::{info, warn};
-
-use heltec_v4::board::Fem;
-use heltec_v4::common::Battery;
-use heltec_v4::display::Oled;
-use heltec_v4::power::Sleeper;
-use heltec_v4::reset;
-use heltec_v4::radio::EspIrq;
-use heltec_v4::storage;
-use heltec_v4::sx1262::Sx1262;
+use log::warn;
 use meshcore::radio::RadioParams;
 use meshcore_fw::companion_app::{self, Board, Config, Hardware};
 use meshcore_ui::refresh::oled::Oled as Policy;
 use meshcore_ui::{Page, View};
 
-esp_bootloader_esp_idf::esp_app_desc!();
-
-const BUILD_EPOCH: &str = env!("BUILD_EPOCH");
-const BUILD_DATE: &str = env!("BUILD_DATE");
+use crate::battery::{self, Battery};
+use crate::display::Oled;
+use crate::power::Sleeper;
+use crate::radio::EspIrq;
+use crate::sx1262::Sx1262;
+use crate::{FemPins, FrontEnd, Variant, gps, reset, storage};
 
 const WATCHDOG_SECS: u64 = 30;
-/// SX1262 output; the FEM's PA makes ~22 dBm of 10 dBm.
+/// SX1262 output; the V4's FEM PA makes ~22 dBm of 10 dBm.
 const MAX_TX_POWER_DBM: i8 = 22;
 /// The on-device interface (no Bluetooth page: the ESP BLE task cannot be switched off yet). A
 /// long press on the home page turns the board off, as on the repeater; the button turns it on.
 const PAGES: &[Page] = &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Gps, Page::Pull, Page::Advert];
 
-struct HeltecV4<'d> {
-    fem: Fem<'d>,
+struct Heltec<'d, V: Variant> {
+    fem: V::FrontEnd,
     led: Output<'d>,
     battery: Battery<'d>,
     button: Input<'d>,
@@ -67,13 +49,13 @@ struct HeltecV4<'d> {
     screen: Policy,
 }
 
-impl Board for HeltecV4<'_> {
+impl<V: Variant> Board for Heltec<'_, V> {
     fn manufacturer(&self) -> &str {
         self.fem.name()
     }
 
     fn release_board(&self) -> u8 {
-        heltec_v4::RELEASE_BOARD
+        V::RELEASE_BOARD
     }
 
     fn max_tx_power_dbm(&self) -> i8 {
@@ -96,7 +78,7 @@ impl Board for HeltecV4<'_> {
 
     /// As the repeater's: deep sleep until the button, the front end unpowered.
     fn power_off(&mut self) {
-        heltec_v4::gps::GPS_ON.signal(false);
+        gps::GPS_ON.signal(false);
         self.fem.power_off();
         // the radio sleeps until NSS goes low: keep it high while the chip's pins are off
         let mut nss =
@@ -114,7 +96,7 @@ impl Board for HeltecV4<'_> {
     }
 
     fn adc_multiplier(&self) -> Option<f32> {
-        heltec_v4::board::ADC_MULTIPLIER
+        battery::ADC_MULTIPLIER
     }
 
     fn has_gps(&self) -> bool {
@@ -122,7 +104,7 @@ impl Board for HeltecV4<'_> {
     }
 
     fn set_gps(&mut self, on: bool) {
-        heltec_v4::gps::GPS_ON.signal(on);
+        gps::GPS_ON.signal(on);
     }
 
     fn button_down(&mut self) -> bool {
@@ -169,8 +151,9 @@ impl Board for HeltecV4<'_> {
     }
 }
 
-#[esp_rtos::main]
-async fn main(spawner: Spawner) -> ! {
+/// The companion firmware of board `V`, from reset; `build_epoch` and `build_date` are its build
+/// stamp (`BUILD_EPOCH`, `BUILD_DATE` of the build script).
+pub async fn run<V: Variant>(spawner: Spawner, build_epoch: &str, build_date: &'static str) -> ! {
     esp_println::logger::init_logger_from_env();
     let mut p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
@@ -182,13 +165,14 @@ async fn main(spawner: Spawner) -> ! {
     reset::install(esp_hal::rtc_cntl::Rtc::new(p.RTC_TIMER), WATCHDOG_SECS);
 
     println!();
-    println!("MeshCore companion (Rust) {} {}", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(BUILD_DATE));
+    println!("MeshCore companion (Rust) {} {}", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(build_date));
     let store = storage::open(FlashStorage::new(p.FLASH)).map(|s| Rc::new(RefCell::new(s)));
 
     let led = Output::new(p.GPIO35, Level::Low, OutputConfig::default());
     // the LNA setting is applied from the stored settings once they are loaded
-    let fem = Fem::init(p.GPIO7.degrade(), p.GPIO2.degrade(), p.GPIO46.degrade(), p.GPIO5.degrade(), true).await;
-    info!("FEM: {:?}", fem.kind);
+    let fem_pins =
+        FemPins { ldo: p.GPIO7.degrade(), csd: p.GPIO2.degrade(), cps: p.GPIO46.degrade(), ctx: p.GPIO5.degrade() };
+    let fem = V::front_end(fem_pins, true).await;
     let spi = Spi::new(p.SPI2, SpiConfig::default().with_frequency(Rate::from_mhz(8)))
         .unwrap()
         .with_sck(p.GPIO9)
@@ -211,7 +195,8 @@ async fn main(spawner: Spawner) -> ! {
     }
     let mut adc_cfg = AdcConfig::new();
     let bat_pin = adc_cfg.enable_pin_with_cal::<_, AdcCalCurve<ADC1>>(p.GPIO1, Attenuation::_11dB);
-    let battery = Battery::new(Adc::new(p.ADC1, adc_cfg), bat_pin, p.GPIO37);
+    let active = V::divider_active(p.GPIO37.reborrow());
+    let battery = Battery::new(Adc::new(p.ADC1, adc_cfg), bat_pin, p.GPIO37, active);
 
     // OLED: Vext on with GPIO36 LOW (see the repeater firmware); bounded I2C transfers
     let _vext = Output::new(p.GPIO36, Level::Low, OutputConfig::default());
@@ -226,7 +211,7 @@ async fn main(spawner: Spawner) -> ! {
         .map(|i2c| i2c.with_sda(p.GPIO17).with_scl(p.GPIO18))
         .and_then(|i2c| Oled::new(i2c, oled_rst));
 
-    // optional external GPS on the V4's UART1 header (RX 38, TX 39, EN 34, RESET 42)
+    // optional external GPS on the UART1 header (RX 38, TX 39, EN 34, RESET 42)
     let gps_uart = esp_hal::uart::Uart::new(p.UART1, esp_hal::uart::Config::default().with_baudrate(9600))
         .unwrap()
         .with_rx(p.GPIO38)
@@ -234,7 +219,7 @@ async fn main(spawner: Spawner) -> ! {
         .into_async();
     let (gps_rx, gps_tx) = gps_uart.split();
     spawner.spawn(
-        heltec_v4::gps::task(heltec_v4::gps::Gps {
+        gps::task(gps::Gps {
             rx: gps_rx,
             tx: gps_tx,
             enable: Output::new(p.GPIO34, Level::High, OutputConfig::default()),
@@ -243,7 +228,7 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap(),
     );
 
-    let board = HeltecV4 {
+    let board = Heltec::<V> {
         fem,
         led,
         battery,
@@ -259,8 +244,8 @@ async fn main(spawner: Spawner) -> ! {
     let cfg = Config {
         radio: RadioParams::default(),
         tx_power_dbm: 10,
-        build_epoch: BUILD_EPOCH.parse().unwrap_or(0),
-        build_date: BUILD_DATE,
+        build_epoch: build_epoch.parse().unwrap_or(0),
+        build_date,
     };
     // the main loop's state on the heap: in the main task's static it would grow with every change
     // to the loop and move the statics after it (see `layout` in build.rs)
