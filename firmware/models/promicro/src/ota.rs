@@ -28,6 +28,8 @@ use crate::flash::Flash;
 pub const APP_START: u32 = 0x26000;
 const APP_END: u32 = 0x7B000;
 const STAGING: u32 = 0x7B000;
+/// Up to the sensors' blob (`DATA_OVERFLOW`); firmware from before it stages up to [`RECORD`].
+const STAGING_END: u32 = crate::DATA_OVERFLOW.0;
 const SAVED_FIRST: u32 = 0xD8000;
 const RECORD: u32 = 0xD9000;
 pub const INSTALLER: u32 = 0xEA000;
@@ -257,7 +259,7 @@ fn go_back(store: &SharedStore<Flash>, failed: bool) -> bool {
 
 impl FirmwareTarget for StagingTarget {
     fn capacity(&self) -> u32 {
-        RECORD - STAGING
+        STAGING_END - STAGING
     }
 
     // a staged update waits for the restart as verified: nothing may write over it

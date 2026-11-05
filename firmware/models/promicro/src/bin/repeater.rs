@@ -61,7 +61,7 @@ use meshcore_fw_core::sx1262::Sx1262;
 use promicro::board::{self, Battery};
 use promicro::flash::Flash;
 use promicro::ina219::{self, Ina219};
-use promicro::{DATA_REGION, ble, console, ota, println, sd};
+use promicro::{DATA_OVERFLOW, DATA_REGION, ble, console, ota, println, sd};
 use static_cell::StaticCell;
 
 const BUILD_EPOCH: &str = env!("BUILD_EPOCH");
@@ -278,7 +278,8 @@ async fn main(spawner: Spawner) {
 
     // ---- persistent state
     let flash = Flash::new(Nvmc::new(p.NVMC));
-    let store: NrfStore = Some(Rc::new(RefCell::new(Store::with_regions(flash, DATA_REGION, None))));
+    let store = Store::with_regions(flash, DATA_REGION, None).with_overflow(DATA_OVERFLOW);
+    let store: NrfStore = Some(Rc::new(RefCell::new(store)));
     if let Some(s) = &store {
         ota::clear_request(s);
     }

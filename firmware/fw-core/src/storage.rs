@@ -81,6 +81,9 @@ pub struct Store<F> {
     size: u32,
     /// The companion region (offset, size), if the platform has one.
     comp: Option<(u32, u32)>,
+    /// Where the blobs past the end of the data region go (offset, size), if the platform has
+    /// such a place (`with_overflow`).
+    overflow: Option<(u32, u32)>,
     /// Ring log write position (offset in the partition) and next sequence number.
     log_head: Option<(u32, u32)>,
 }
@@ -110,7 +113,13 @@ impl<F: NorFlash> Store<F> {
     /// the platform has one (ignored if smaller than [`MIN_COMPANION_SIZE`]).
     pub fn with_regions(flash: F, data: (u32, u32), companion: Option<(u32, u32)>) -> Self {
         let comp = companion.filter(|&(_, len)| len >= MIN_COMPANION_SIZE);
-        Self { flash, base: data.0, size: data.1, comp, log_head: None }
+        Self { flash, base: data.0, size: data.1, comp, overflow: None, log_head: None }
+    }
+
+    /// The blobs the data region has no room for go to `region` (offset, size), in order: for a
+    /// data region laid out before they came (the Pro Micro's 64 KiB, eight blobs).
+    pub fn with_overflow(self, region: (u32, u32)) -> Self {
+        Self { overflow: Some(region), ..self }
     }
 
     pub fn has_companion_partition(&self) -> bool {
@@ -209,8 +218,13 @@ impl<F: NorFlash> Store<F> {
     }
 
     fn blob_addr(&self, blob: Blob) -> Option<[u32; 2]> {
-        let off = blob as u32 * 2 * SECTOR;
-        (off + 2 * SECTOR <= self.size).then_some([self.base + off, self.base + off + SECTOR])
+        let in_data = self.size / (2 * SECTOR);
+        let (base, size, i) = match self.overflow {
+            Some((base, size)) if blob as u32 >= in_data => (base, size, blob as u32 - in_data),
+            _ => (self.base, self.size, blob as u32),
+        };
+        let off = i * 2 * SECTOR;
+        (off + 2 * SECTOR <= size).then_some([base + off, base + off + SECTOR])
     }
 
     /// Newest value of a blob; an empty record counts as absent.
@@ -233,7 +247,14 @@ impl<F: NorFlash> Store<F> {
 
     pub fn erase_all(&mut self) -> bool {
         let end = self.base + (BLOBS * 2 * SECTOR).min(self.size);
-        self.flash.erase(self.base, end).is_ok()
+        let overflow = match self.overflow {
+            Some((base, size)) => {
+                let blobs = BLOBS.saturating_sub(self.size / (2 * SECTOR));
+                blobs == 0 || self.flash.erase(base, base + (blobs * 2 * SECTOR).min(size)).is_ok()
+            }
+            None => true,
+        };
+        self.flash.erase(self.base, end).is_ok() && overflow
     }
 
     // ------------------------------------------------------- companion partition
@@ -447,4 +468,78 @@ impl<F: NorFlash> Store<F> {
 fn bytemuck_bytes(buf: &mut [u32; 64]) -> &mut [u8; 256] {
     // SAFETY: same size, u8 has no alignment requirement, any bit pattern is valid
     unsafe { &mut *(buf as *mut [u32; 64] as *mut [u8; 256]) }
+}
+
+#[cfg(test)]
+mod tests {
+    use embedded_storage::nor_flash::{ErrorType, NorFlashErrorKind};
+
+    use super::*;
+
+    /// A NOR flash in RAM: erase sets 0xFF, a write only clears bits.
+    struct RamFlash(Vec<u8>);
+
+    impl ErrorType for RamFlash {
+        type Error = NorFlashErrorKind;
+    }
+
+    impl ReadNorFlash for RamFlash {
+        const READ_SIZE: usize = 4;
+        fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+            let at = offset as usize;
+            bytes.copy_from_slice(self.0.get(at..at + bytes.len()).ok_or(NorFlashErrorKind::OutOfBounds)?);
+            Ok(())
+        }
+        fn capacity(&self) -> usize {
+            self.0.len()
+        }
+    }
+
+    impl NorFlash for RamFlash {
+        const WRITE_SIZE: usize = 4;
+        const ERASE_SIZE: usize = SECTOR as usize;
+        fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+            self.0.get_mut(from as usize..to as usize).ok_or(NorFlashErrorKind::OutOfBounds)?.fill(0xFF);
+            Ok(())
+        }
+        fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+            let at = offset as usize;
+            let to = self.0.get_mut(at..at + bytes.len()).ok_or(NorFlashErrorKind::OutOfBounds)?;
+            to.iter_mut().zip(bytes).for_each(|(t, b)| *t &= b);
+            Ok(())
+        }
+    }
+
+    // the Pro Micro's layout, from 0: overflow 2 sectors, a sector between, data 64 KiB
+    const OVERFLOW: (u32, u32) = (0, 2 * SECTOR);
+    const DATA: (u32, u32) = (3 * SECTOR, 16 * SECTOR);
+
+    fn flash() -> RamFlash {
+        RamFlash(vec![0x5A; (3 + 16) as usize * SECTOR as usize])
+    }
+
+    #[test]
+    fn a_blob_past_the_data_region_goes_to_the_overflow() {
+        let mut store = Store::with_regions(flash(), DATA, None).with_overflow(OVERFLOW);
+        assert!(store.save(Blob::RoomAcl, b"acl"));
+        assert!(store.save(Blob::Sensors, b"bme 76"));
+        assert!(store.save(Blob::Sensors, b"bme 77"));
+        assert_eq!(store.load(Blob::Sensors).as_deref(), Some(&b"bme 77"[..]));
+        assert_eq!(store.load(Blob::RoomAcl).as_deref(), Some(&b"acl"[..]));
+        // the sector between is left alone
+        assert!(store.flash().0[2 * SECTOR as usize..3 * SECTOR as usize].iter().all(|&b| b == 0x5A));
+
+        assert!(store.erase_all());
+        assert_eq!(store.load(Blob::Sensors), None);
+        assert_eq!(store.load(Blob::RoomAcl), None);
+    }
+
+    #[test]
+    fn without_an_overflow_a_blob_past_the_data_region_is_not_kept() {
+        let mut store = Store::with_regions(flash(), DATA, None);
+        assert!(!store.save(Blob::Sensors, b"bme 76"));
+        assert_eq!(store.load(Blob::Sensors), None);
+        assert!(store.erase_all());
+        assert!(store.flash().0[..3 * SECTOR as usize].iter().all(|&b| b == 0x5A));
+    }
 }

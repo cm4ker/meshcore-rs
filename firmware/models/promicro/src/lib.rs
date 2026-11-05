@@ -21,3 +21,8 @@ pub mod sd;
 /// `tools/provision` writes): right below 0xEA000, the end of what the Adafruit bootloader takes
 /// over UF2 (so a UF2 can carry it), and clear of upstream's file system (0xED000..0xF4000).
 pub const DATA_REGION: (u32, u32) = (0xDA000, 0x10000);
+
+/// The blobs that came after [`DATA_REGION`] was laid out and have no room in it (the sensors),
+/// `Store::with_overflow`: the end of the staging area, below the page the installer keeps the
+/// app's first page in (`ota`).
+pub const DATA_OVERFLOW: (u32, u32) = (0xD6000, 0x2000);

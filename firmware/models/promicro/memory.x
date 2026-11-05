@@ -2,9 +2,11 @@
    left in place: the MBR and the SoftDevice take the flash below 0x26000 and the bootloader the
    top (from 0xF4000). In between (src/ota.rs, installer/):
      0x26000..0x7B000  the application (this), 340 KiB
-     0x7B000..0xD9000  an update being received (staging); once installed, the firmware it
-                       replaced, to go back to. Its last page keeps the app's first page while
-                       the installer swaps the two, then the install request at 0xD9000
+     0x7B000..0xD6000  an update being received (staging); once installed, the firmware it
+                       replaced, to go back to
+     0xD6000..0xD8000  the node's sensors (src/lib.rs `DATA_OVERFLOW`; staging before they came)
+     0xD8000..0xD9000  the app's first page while the installer swaps the two
+     0xD9000..0xDA000  the install request
      0xDA000..0xEA000  the node's data (src/lib.rs `DATA_REGION`), up to where the bootloader
                        stops taking UF2 blocks
      0xEA000..0xED000  the update installer
