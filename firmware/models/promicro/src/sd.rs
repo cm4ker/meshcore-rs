@@ -165,8 +165,8 @@ pub fn disable() {
     after_softdevice();
 }
 
-/// Back to the app's own setup: its vector table, the crystal, the DC/DC converter, and the
-/// interrupts the SoftDevice had (VBUS events that came meanwhile are taken now).
+/// Back to the app's own setup: its vector table, the crystal, and the interrupts the SoftDevice
+/// had (VBUS events that came meanwhile are taken now).
 fn after_softdevice() {
     set_vtor(APP_VECTORS);
     let clock = pac::CLOCK;
@@ -174,7 +174,6 @@ fn after_softdevice() {
     clock.tasks_hfclkstart().write_value(1);
     let since = Instant::now();
     while clock.events_hfclkstarted().read() == 0 && since.elapsed() < Duration::from_millis(10) {}
-    pac::POWER.dcdcen().write(|w| w.set_dcdcen(true));
     pac::POWER.intenset().write(|w| {
         w.set_usbdetected(true);
         w.set_usbremoved(true);

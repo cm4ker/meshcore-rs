@@ -218,7 +218,8 @@ async fn main(spawner: Spawner) {
     let mut ncfg = config::Config::default();
     ncfg.hfclk_source = config::HfclkSource::ExternalXtal;
     ncfg.lfclk_source = config::LfclkSource::InternalRC;
-    ncfg.dcdc.reg1 = true; // the DC/DC converter instead of the LDO (upstream `NRF52BoardDCDC`)
+    // the LDO, not the DC/DC converter upstream turns on (`NRF52BoardDCDC`): clones without its
+    // inductor (a SuperMini seen 2026-11-06) lock up the moment it starts
     // priorities the SoftDevice leaves to the app (2, 3, 5..7), so it can run beside them in the
     // BLE window; the critical sections mask them all (`promicro::sd`)
     ncfg.time_interrupt_priority = Priority::P2;
