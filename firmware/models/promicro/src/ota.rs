@@ -92,8 +92,8 @@ impl<const LENDS: bool> StagingTarget<LENDS> {
     }
 }
 
-/// The bootloader starts whatever app is in place: it checks a CRC of the app only when one was
-/// written over BLE DFU (UF2 copies leave the CRC out).
+/// The bootloader starts whatever app is in place: it checks a CRC of the app only when its
+/// settings hold one (UF2 copies and 0.9.2-OTAFIX's serial DFU leave it out, 0).
 fn no_app_crc() -> bool {
     let settings = unsafe { core::ptr::read_volatile(BOOTLOADER_SETTINGS as *const u32) };
     let crc = settings >> 16;
