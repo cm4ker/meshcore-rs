@@ -11,7 +11,7 @@ use super::*;
 use crate::FIRMWARE_VERSION;
 use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, status};
 use crate::fwstate::{self, FwState, mode};
-use crate::ota::{OtaOutcome, REQ_TYPE_OTA_COMMIT};
+use crate::ota::{OtaOutcome, REQ_TYPE_OTA_ABORT, REQ_TYPE_OTA_COMMIT};
 
 /// The first check, a while after boot (the node has heard its neighbours by then), and the next.
 const FIRST_CHECK_MS: u64 = 10 * 60_000;
@@ -245,6 +245,10 @@ impl Companion {
     }
 
     fn fw_pull_reset(&mut self) {
+        // a download given up leaves the update slot free (on some boards it is borrowed)
+        if self.fwpull.loader.is_some() && self.ota.busy() {
+            self.ota.handle(&[REQ_TYPE_OTA_ABORT], FIRMWARE_VERSION);
+        }
         let state = core::mem::replace(&mut self.fwpull.state, FwState::Off);
         self.fwpull = FwPull { state, at: 0, ..FwPull::default() };
     }

@@ -183,6 +183,12 @@ pub trait Platform {
     fn rollback(&mut self) -> bool {
         false
     }
+    /// Every few seconds: whether an update session holds the slot (`update`). A platform whose
+    /// slot is the companion's storage, lent ([`crate::storage::Store::lend`]), takes it back once
+    /// no update needs it; `true` then (the contact list is written again from RAM).
+    fn poll_slot(&mut self, _update: bool) -> bool {
+        false
+    }
     /// Start the app links besides USB (BLE, Wi-Fi/TCP) from the stored settings. From here on
     /// the USB port carries companion frames only.
     fn start_links(&mut self, spawner: &Spawner, prefs: &CompanionPrefs, ble: BleSetup) -> Links;
@@ -518,6 +524,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     let mut gps_fix_secs = 0u32;
     let mut messages_seen = 0u32;
     let mut messages_lit = 0u32;
+    let mut next_slot_poll = 0u64;
     loop {
         platform.feed_watchdog();
         let now = now_ms();
@@ -821,6 +828,14 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             platform.confirm_trial();
             in_trial = false;
             mesh.app.board.fw_trial_until = None;
+        }
+        if now >= next_slot_poll {
+            next_slot_poll = now + 5000;
+            // the storage back in the slot: the firmware to go back to is gone
+            if platform.poll_slot(mesh.app.ota.busy()) {
+                contacts_pending = true;
+                mesh.app.board.fw_rollback = false;
+            }
         }
         if reboot_at.is_some_and(|t| now >= t) {
             comp_save(&store, CompBlob::Clock, &mesh.ctx.current_time().to_le_bytes());

@@ -1,7 +1,9 @@
 //! The Pro Micro under the companion loop (`meshcore_fw_core::companion`): the nRF52840 with the
-//! SoftDevice running for BLE ([`Nrf`]), and the board around the radio ([`ProMicro`]). No
-//! firmware slot: the companion's data takes the staging area (`COMPANION_REGION`).
+//! SoftDevice running for BLE ([`Nrf`]), and the board around the radio ([`ProMicro`]). Its data
+//! takes the staging area (`COMPANION_REGION`) and is moved aside while an update is there.
 
+use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
@@ -10,13 +12,15 @@ use embassy_nrf::gpio::{Input, Output};
 use embassy_nrf::temp::Temp;
 use embassy_nrf::wdt::WatchdogHandle;
 use meshcore::companion::CompanionPrefs;
+use meshcore::ota::FirmwareTarget;
 use meshcore_fw_core::companion::{BleSetup, Board, Links, Platform};
+use meshcore_fw_core::storage::SharedStore;
 
 use crate::board::{self, Battery};
 use crate::flash::Flash;
 use crate::sensors::Sensors;
 use crate::usb_frames::{USB_HOST, USB_OUT};
-use crate::{ble, sd};
+use crate::{ble, ota, sd};
 
 /// The chip: the SoftDevice runs from the start (BLE), the USB port carries the boot log, then
 /// the app's frames.
@@ -24,6 +28,13 @@ pub struct Nrf {
     pub watchdog: Option<WatchdogHandle>,
     /// State of a small generator seeded from the hardware RNG (which the SoftDevice owns).
     pub seed: u64,
+    /// The store, whose companion region an update borrows (`ota::StagingTarget::lending`).
+    pub store: SharedStore<Flash>,
+    /// A fresh update runs on trial (`ota::check_trial`): the region holds the firmware to go
+    /// back to until it is kept.
+    pub in_trial: bool,
+    /// The data could not be put back in the region: it stays aside until the next start.
+    pub stays_aside: bool,
 }
 
 impl Platform for Nrf {
@@ -36,7 +47,43 @@ impl Platform for Nrf {
     }
 
     fn reboot(&mut self) -> ! {
+        if ota::INSTALL_PENDING.load(Ordering::Relaxed) {
+            ota::hand_over();
+        }
         cortex_m::peripheral::SCB::sys_reset()
+    }
+
+    fn ota_target(&mut self) -> Option<Box<dyn FirmwareTarget>> {
+        let target = ota::StagingTarget::lending(self.store.clone())?;
+        Some(Box::new(target))
+    }
+
+    fn in_trial(&self) -> bool {
+        self.in_trial
+    }
+
+    fn confirm_trial(&mut self) {
+        ota::confirm(&self.store);
+        self.in_trial = false;
+        log::info!("OTA: new firmware confirmed");
+    }
+
+    fn other_slot(&mut self) -> (bool, String, u32) {
+        let (kept, prev, skip, _) = ota::previous(&self.store);
+        (kept, prev, skip)
+    }
+
+    fn rollback(&mut self) -> bool {
+        ota::rollback(&self.store)
+    }
+
+    fn poll_slot(&mut self, update: bool) -> bool {
+        let mut store = self.store.borrow_mut();
+        if !store.lent() || update || self.in_trial || self.stays_aside || ota::INSTALL_PENDING.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.stays_aside = !store.take_back();
+        !self.stays_aside
     }
 
     fn random(&mut self) -> u32 {

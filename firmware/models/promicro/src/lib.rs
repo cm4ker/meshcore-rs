@@ -24,7 +24,8 @@ pub mod usb_frames;
 
 /// The node's data in the internal flash (`meshcore_fw_core::storage`, the 64 KiB layout
 /// `tools/provision` writes): right below 0xEA000, the end of what the Adafruit bootloader takes
-/// over UF2 (so a UF2 can carry it), and clear of upstream's file system (0xED000..0xF4000).
+/// over UF2 (so a UF2 can carry it), and clear of upstream's file system (0xED000..0xF4000). The
+/// companion keeps its update record there too.
 pub const DATA_REGION: (u32, u32) = (0xDA000, 0x10000);
 
 /// The blobs that came after [`DATA_REGION`] was laid out and have no room in it (the sensors),
@@ -33,7 +34,18 @@ pub const DATA_REGION: (u32, u32) = (0xDA000, 0x10000);
 pub const DATA_OVERFLOW: (u32, u32) = (0xD6000, 0x2000);
 
 /// The companion's data (identity, contacts, channels, paired phones): the repeater's staging area
-/// (`ota`), up to the sensors' blob. Contacts need more room than the flash has besides, so the
-/// companion takes no updates over the air: UF2 over USB only. Going back to the repeater keeps
-/// its own data ([`DATA_REGION`], [`DATA_OVERFLOW`]); its next update takes the area over.
-pub const COMPANION_REGION: (u32, u32) = (0x7B000, 0xD6000 - 0x7B000);
+/// (`ota`), as much of it as an update of the whole app slot swaps (the slot and a spare page).
+/// Contacts need more room than the flash has besides, so the companion lends it to its updates
+/// (`Store::with_lending`): the data waits in [`COMPANION_ASIDE`] meanwhile. Going back to the
+/// repeater keeps its own data ([`DATA_REGION`], [`DATA_OVERFLOW`]); its next update takes the
+/// area over.
+pub const COMPANION_REGION: (u32, u32) = (0x7B000, 0xD1000 - 0x7B000);
+
+/// Where the companion's data waits while an update is in [`COMPANION_REGION`]: the rest of the
+/// staging area below the sensors' blob, and upstream's file system (which goes then: upstream's
+/// firmware put back makes a new identity).
+pub const COMPANION_ASIDE: [(u32, u32); 2] = [(0xD1000, 0xD6000 - 0xD1000), (0xED000, 0xF4000 - 0xED000)];
+
+/// [`COMPANION_REGION`] before the companion took updates (release #90 and before): up to the
+/// sensors' blob, its adverts in a table.
+pub const COMPANION_REGION_BEFORE: u32 = 0xD6000 - 0x7B000;

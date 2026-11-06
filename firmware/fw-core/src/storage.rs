@@ -9,7 +9,15 @@
 //! KiB and change often: appending spreads the wear over the whole log) and a table of raw
 //! contact adverts keyed by public key.
 //!
+//! A platform short of flash may lend the companion partition to firmware updates ([`lend`]):
+//! the adverts then go in a short ring, and the data moves to a small area of its own while an
+//! update is in the partition.
+//!
 //! Data always passes through a small stack buffer, so heap buffers may live anywhere.
+
+mod lend;
+
+pub use lend::Mount;
 
 use alloc::rc::Rc;
 use alloc::vec;
@@ -55,6 +63,8 @@ pub enum CompBlob {
     Clock = 3,
     /// BLE bonds (paired phones).
     Bonds = 4,
+    /// The partition's layout, with lending (`lend`): the advert ring and the log after it.
+    Layout = 5,
 }
 
 /// Blobs in the `meshcore` partition (two sectors each).
@@ -65,6 +75,9 @@ const COMP_BLOB_SECTORS: u32 = 16;
 const COMP_TABLE_FIRST: u32 = COMP_BLOB_SECTORS;
 const COMP_TABLE_SECTORS: u32 = 24;
 const COMP_LOG_FIRST: u32 = COMP_TABLE_FIRST + COMP_TABLE_SECTORS;
+/// With lending, the adverts go in a ring of this many sectors instead of the table: the newest
+/// ones are kept (63 or more; upstream keeps 20).
+const RING_SECTORS: u32 = 4;
 
 /// Advert table slot: `[state][len][key 32][data 158]`; state 0xFF = free, 0x01 = used,
 /// 0x00 = deleted (programmed in place, no erase).
@@ -86,6 +99,12 @@ pub struct Store<F> {
     overflow: Option<(u32, u32)>,
     /// Ring log write position (offset in the partition) and next sequence number.
     log_head: Option<(u32, u32)>,
+    /// The adverts in a ring ([`RING_SECTORS`]) rather than the table.
+    ring: bool,
+    /// The slot the ring's next advert goes to, once found.
+    ring_head: Option<u32>,
+    /// Where the companion's data goes while its partition is lent to an update (`lend`).
+    lending: Option<lend::Lending>,
 }
 
 fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
@@ -113,7 +132,7 @@ impl<F: NorFlash> Store<F> {
     /// the platform has one (ignored if smaller than [`MIN_COMPANION_SIZE`]).
     pub fn with_regions(flash: F, data: (u32, u32), companion: Option<(u32, u32)>) -> Self {
         let comp = companion.filter(|&(_, len)| len >= MIN_COMPANION_SIZE);
-        Self { flash, base: data.0, size: data.1, comp, overflow: None, log_head: None }
+        Self { flash, base: data.0, size: data.1, comp, overflow: None, log_head: None, ring: false, ring_head: None, lending: None }
     }
 
     /// The blobs the data region has no room for go to `region` (offset, size), in order: for a
@@ -266,11 +285,17 @@ impl<F: NorFlash> Store<F> {
     }
 
     pub fn comp_load(&mut self, blob: CompBlob) -> Option<Vec<u8>> {
+        if self.lent() {
+            return self.lent_load(lend::TAG_BLOB, blob as u8).filter(|d| !d.is_empty());
+        }
         let addr = self.comp_blob_addr(blob)?;
         self.newest(addr).0.map(|(_, d)| d).filter(|d| !d.is_empty())
     }
 
     pub fn comp_save(&mut self, blob: CompBlob, data: &[u8]) -> bool {
+        if self.lent() {
+            return self.lent_append(lend::TAG_BLOB, blob as u8, &[data], false);
+        }
         match self.comp_blob_addr(blob) {
             Some(addr) => self.save_pair(addr, data),
             None => false,
@@ -279,16 +304,26 @@ impl<F: NorFlash> Store<F> {
 
     /// Erase the whole companion partition (factory reset).
     pub fn comp_erase(&mut self) -> bool {
+        if self.lent() {
+            // the partition holds the update: the data starts over where it is
+            return self.write_rescue(&[]);
+        }
         self.log_head = None;
+        self.ring_head = None;
         match self.comp {
             Some((base, size)) => self.flash.erase(base, base + size).is_ok(),
             None => false,
         }
     }
 
+    /// The first sector of the ring log.
+    fn log_first(&self) -> u32 {
+        COMP_TABLE_FIRST + if self.ring { RING_SECTORS } else { COMP_TABLE_SECTORS }
+    }
+
     fn log_range(&self) -> Option<(u32, u32)> {
         let (base, size) = self.comp?;
-        Some((base + COMP_LOG_FIRST * SECTOR, base + size))
+        Some((base + self.log_first() * SECTOR, base + size))
     }
 
     /// Scan the ring log: candidate records `(seq, addr, len, crc)`.
@@ -316,6 +351,9 @@ impl<F: NorFlash> Store<F> {
 
     /// The newest complete snapshot in the ring log.
     pub fn comp_log_latest(&mut self) -> Option<Vec<u8>> {
+        if self.lent() {
+            return self.lent_load(lend::TAG_CONTACTS, 0).map(|d| lend::unpack(&d));
+        }
         let mut found = self.log_scan();
         found.sort_by_key(|r| core::cmp::Reverse(r.0));
         if let (Some(&(seq, addr, len, _)), None) = (found.first(), self.log_head) {
@@ -330,6 +368,9 @@ impl<F: NorFlash> Store<F> {
 
     /// Append a snapshot to the ring log, wrapping around (and erasing ahead) as needed.
     pub fn comp_log_append(&mut self, data: &[u8]) -> bool {
+        if self.lent() {
+            return self.lent_append(lend::TAG_CONTACTS, 0, &[&lend::pack(data)], true);
+        }
         let Some((start, end)) = self.log_range() else {
             return false;
         };
@@ -362,6 +403,165 @@ impl<F: NorFlash> Store<F> {
         hdr[12..].copy_from_slice(&crc32(data).to_le_bytes());
         self.log_head = Some((addr + total, seq.wrapping_add(1)));
         self.write_chunked(addr, &hdr) && self.write_chunked(addr + HEADER as u32, data)
+    }
+
+    // ------------------------------------------------------------ adverts
+
+    pub fn advert_get(&mut self, key: &[u8; 32]) -> Option<Vec<u8>> {
+        if self.lent() {
+            self.lent_advert(key)
+        } else if self.ring {
+            let i = self.ring_find(key)?;
+            self.slot_data(i)
+        } else {
+            self.table_get(key)
+        }
+    }
+
+    pub fn advert_put(&mut self, key: &[u8; 32], data: &[u8]) -> bool {
+        if data.len() > MAX_ADVERT_BLOB || self.comp.is_none() {
+            return false;
+        }
+        if self.lent() {
+            return self.lent_advert(key).as_deref() == Some(data)
+                || self.lent_append(lend::TAG_ADVERT, 0, &[key, data], true);
+        }
+        if self.ring { self.ring_put(key, data) } else { self.table_put(key, data) }
+    }
+
+    pub fn advert_delete(&mut self, key: &[u8; 32]) {
+        if self.lent() {
+            if self.lent_advert(key).is_some() {
+                self.lent_append(lend::TAG_ADVERT_GONE, 0, &[key], false);
+            }
+        } else if self.ring {
+            while let Some(i) = self.ring_find(key) {
+                if !self.mark_deleted(i) {
+                    break;
+                }
+            }
+        } else {
+            self.table_delete(key)
+        }
+    }
+
+    /// A slot's record: `[state][len][key 32][data]`.
+    fn slot_head(&mut self, i: u32) -> Option<[u8; 36]> {
+        let addr = self.slot_addr(i)?;
+        self.read_words::<36>(addr)
+    }
+
+    fn slot_data(&mut self, i: u32) -> Option<Vec<u8>> {
+        let rec = self.read_chunked(self.slot_addr(i)?, SLOT as usize)?;
+        let len = (rec[1] as usize).min(MAX_ADVERT_BLOB);
+        Some(rec[34..34 + len].to_vec())
+    }
+
+    fn mark_deleted(&mut self, i: u32) -> bool {
+        let Some(addr) = self.slot_addr(i) else {
+            return false;
+        };
+        let Some(mut w) = self.read_words::<4>(addr) else {
+            return false;
+        };
+        w[0] = SLOT_DELETED; // only clears bits: programmable without an erase
+        self.write_chunked(addr, &w)
+    }
+
+    // ------------------------------------------------------------ advert ring (with lending)
+
+    fn ring_slots(&self) -> u32 {
+        RING_SECTORS * SLOTS_PER_SECTOR
+    }
+
+    /// The slot the next advert goes to: the first blank one after a written one. The ring
+    /// erases the sector it enters as soon as it enters it, so the blank slots run from there;
+    /// a ring found without one (the power went before that erase) starts over at its start.
+    fn ring_head(&mut self) -> u32 {
+        if let Some(h) = self.ring_head {
+            return h;
+        }
+        let n = self.ring_slots();
+        let blank: Vec<bool> = (0..n)
+            .map(|i| {
+                let addr = self.slot_addr(i).unwrap_or(0);
+                self.read_chunked(addr, SLOT as usize).is_some_and(|r| r.iter().all(|&b| b == 0xFF))
+            })
+            .collect();
+        let head = match (0..n).find(|&i| blank[i as usize] && !blank[((i + n - 1) % n) as usize]) {
+            Some(i) => i,
+            None if blank.iter().all(|&b| b) => 0,
+            None => {
+                self.erase_ring_sector(0);
+                0
+            }
+        };
+        self.ring_head = Some(head);
+        head
+    }
+
+    fn erase_ring_sector(&mut self, slot: u32) -> bool {
+        match self.slot_addr(slot) {
+            Some(addr) => self.erase_sector(addr - addr % SECTOR),
+            None => false,
+        }
+    }
+
+    /// The newest slot holding `key`, from the head backwards.
+    fn ring_find(&mut self, key: &[u8; 32]) -> Option<u32> {
+        let (n, head) = (self.ring_slots(), self.ring_head());
+        (1..=n).map(|k| (head + n - k) % n).find(|&i| {
+            self.slot_head(i).is_some_and(|h| h[0] == SLOT_USED && h[2..34] == key[..])
+        })
+    }
+
+    fn ring_put(&mut self, key: &[u8; 32], data: &[u8]) -> bool {
+        let old = self.ring_find(key);
+        if let Some(i) = old
+            && self.slot_data(i).as_deref() == Some(data)
+        {
+            return true; // unchanged: no flash wear
+        }
+        let (n, i) = (self.ring_slots(), self.ring_head());
+        let Some(addr) = self.slot_addr(i) else {
+            return false;
+        };
+        let mut rec = vec![0xFFu8; SLOT as usize];
+        rec[1] = data.len() as u8;
+        rec[2..34].copy_from_slice(key);
+        rec[34..34 + data.len()].copy_from_slice(data);
+        // the record, then its state: a slot cut short stays unused
+        let mut ok = self.write_chunked(addr, &rec) && self.write_chunked(addr, &[SLOT_USED, rec[1], key[0], key[1]]);
+        if let Some(old) = old {
+            ok &= self.mark_deleted(old);
+        }
+        // the next sector is erased on entering it: the oldest adverts go
+        let next = (i + 1) % n;
+        if next.is_multiple_of(SLOTS_PER_SECTOR) {
+            ok &= self.erase_ring_sector(next);
+        }
+        self.ring_head = Some(next);
+        ok
+    }
+
+    /// Up to `max` adverts of the ring, newest first: `(key, data)`.
+    fn ring_newest(&mut self, max: usize) -> Vec<([u8; 32], Vec<u8>)> {
+        let (n, head) = (self.ring_slots(), self.ring_head());
+        let mut out: Vec<([u8; 32], Vec<u8>)> = Vec::new();
+        for i in (1..=n).map(|k| (head + n - k) % n) {
+            if out.len() >= max {
+                break;
+            }
+            if let Some(h) = self.slot_head(i).filter(|h| h[0] == SLOT_USED) {
+                let key: [u8; 32] = h[2..34].try_into().unwrap();
+                if !out.iter().any(|(k, _)| *k == key)
+                    && let Some(d) = self.slot_data(i)
+                {
+                    out.push((key, d));
+                }
+            }
+        }
+        out
     }
 
     // ------------------------------------------------------------ advert table
@@ -398,18 +598,12 @@ impl<F: NorFlash> Store<F> {
         (None, first_reusable)
     }
 
-    pub fn advert_get(&mut self, key: &[u8; 32]) -> Option<Vec<u8>> {
+    fn table_get(&mut self, key: &[u8; 32]) -> Option<Vec<u8>> {
         let (found, _) = self.find_slot(key);
-        let addr = self.slot_addr(found?)?;
-        let rec = self.read_chunked(addr, SLOT as usize)?;
-        let len = (rec[1] as usize).min(MAX_ADVERT_BLOB);
-        Some(rec[34..34 + len].to_vec())
+        self.slot_data(found?)
     }
 
-    pub fn advert_put(&mut self, key: &[u8; 32], data: &[u8]) -> bool {
-        if data.len() > MAX_ADVERT_BLOB || self.comp.is_none() {
-            return false;
-        }
+    fn table_put(&mut self, key: &[u8; 32], data: &[u8]) -> bool {
         let mut rec = vec![0xFFu8; SLOT as usize];
         rec[0] = SLOT_USED;
         rec[1] = data.len() as u8;
@@ -417,7 +611,7 @@ impl<F: NorFlash> Store<F> {
         rec[34..34 + data.len()].copy_from_slice(data);
         let (found, reusable) = self.find_slot(key);
         if let Some(i) = found {
-            if self.advert_get(key).as_deref() == Some(data) {
+            if self.table_get(key).as_deref() == Some(data) {
                 return true; // unchanged: no flash wear
             }
             self.rewrite_slot(i, &rec)
@@ -433,13 +627,9 @@ impl<F: NorFlash> Store<F> {
         }
     }
 
-    pub fn advert_delete(&mut self, key: &[u8; 32]) {
-        if let (Some(i), _) = self.find_slot(key)
-            && let Some(addr) = self.slot_addr(i)
-            && let Some(mut w) = self.read_words::<4>(addr)
-        {
-            w[0] = SLOT_DELETED; // only clears bits: programmable without an erase
-            self.write_chunked(addr, &w);
+    fn table_delete(&mut self, key: &[u8; 32]) {
+        if let (Some(i), _) = self.find_slot(key) {
+            self.mark_deleted(i);
         }
     }
 
@@ -455,13 +645,17 @@ impl<F: NorFlash> Store<F> {
         self.erase_sector(sector) && self.write_chunked(sector, &data)
     }
 
-    /// Used and total size of the companion partition, KiB.
+    /// Used and total size of the companion partition, KiB (of the area the data is in while
+    /// the partition is lent).
     pub fn comp_usage_kb(&mut self) -> (u32, u32) {
+        if let Some((used, size)) = self.lent_usage() {
+            return (used / 1024, size / 1024);
+        }
         let Some((_, size)) = self.comp else {
             return (0, 0);
         };
         let log = self.log_head.map_or(0, |(addr, _)| addr - self.log_range().map_or(0, |r| r.0));
-        ((COMP_LOG_FIRST * SECTOR + log) / 1024, size / 1024)
+        ((self.log_first() * SECTOR + log) / 1024, size / 1024)
     }
 }
 
@@ -532,6 +726,207 @@ mod tests {
         assert!(store.erase_all());
         assert_eq!(store.load(Blob::Sensors), None);
         assert_eq!(store.load(Blob::RoomAcl), None);
+    }
+
+    // lending, as on the Pro Micro (in sectors): data 16, the companion partition 86 (91 before
+    // the ring), the area 5 right after the partition and 7 more after the old one's end
+    const COMP_AT: u32 = 16 * SECTOR;
+    const COMP: (u32, u32) = (COMP_AT, 86 * SECTOR);
+    const LEGACY: u32 = 91 * SECTOR;
+    const AREA: [(u32, u32); 2] = [(COMP_AT + 86 * SECTOR, 5 * SECTOR), (COMP_AT + 91 * SECTOR, 7 * SECTOR)];
+
+    fn lending_flash() -> RamFlash {
+        RamFlash(vec![0xFF; (16 + 98) as usize * SECTOR as usize])
+    }
+
+    fn lending(flash: RamFlash) -> Store<RamFlash> {
+        Store::with_regions(flash, (0, 16 * SECTOR), Some(COMP)).with_lending(AREA, LEGACY)
+    }
+
+    fn key(i: u32) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        k[..4].copy_from_slice(&i.to_le_bytes());
+        k[31] = 0xA5;
+        k
+    }
+
+    /// A contact list as the companion writes it: 151-byte records, mostly zeros past the name.
+    fn contacts(n: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        for i in 0..n {
+            let mut rec = [0u8; 151];
+            rec[..32].copy_from_slice(&key(i));
+            rec[32..40].copy_from_slice(b"node-abc");
+            rec[131..135].copy_from_slice(&(1_700_000_000 + i).to_le_bytes());
+            out.extend_from_slice(&rec);
+        }
+        out
+    }
+
+    /// An update fills the partition.
+    fn update_over(store: &mut Store<RamFlash>) {
+        store.flash().0[COMP.0 as usize..(COMP.0 + COMP.1) as usize].fill(0x3C);
+    }
+
+    #[test]
+    fn the_ring_keeps_the_newest_adverts() {
+        let mut store = lending(lending_flash());
+        assert_eq!(store.mount(), Mount::Fresh);
+        for i in 0..200 {
+            assert!(store.advert_put(&key(i), &[i as u8; 100]));
+        }
+        // an advert again: one copy, the new one
+        assert!(store.advert_put(&key(199), &[7; 90]));
+        assert_eq!(store.advert_get(&key(199)), Some(vec![7; 90]));
+        assert_eq!(store.advert_get(&key(198)), Some(vec![198; 100]));
+        assert_eq!(store.advert_get(&key(0)), None, "the oldest went");
+        store.advert_delete(&key(198));
+        assert_eq!(store.advert_get(&key(198)), None);
+
+        // after a restart the ring goes on where it was
+        let mut store = lending(core::mem::replace(store.flash(), RamFlash(Vec::new())));
+        assert_eq!(store.mount(), Mount::Ready);
+        assert_eq!(store.advert_get(&key(199)), Some(vec![7; 90]));
+        assert!(store.advert_put(&key(500), &[1; 10]));
+        assert_eq!(store.advert_get(&key(197)), Some(vec![197; 100]));
+        assert_eq!(store.advert_get(&key(500)), Some(vec![1; 10]));
+    }
+
+    #[test]
+    fn data_lent_to_an_update_comes_back() {
+        let mut store = lending(lending_flash());
+        assert_eq!(store.mount(), Mount::Fresh);
+        assert!(store.comp_save(CompBlob::Identity, &[1; 96]));
+        assert!(store.comp_save(CompBlob::Prefs, b"name=a"));
+        for i in 0..30 {
+            assert!(store.advert_put(&key(i), &[i as u8; 120]));
+        }
+        assert!(store.comp_log_append(&contacts(350)));
+
+        assert!(store.lend());
+        update_over(&mut store);
+        assert!(store.lent());
+        assert_eq!(store.comp_load(CompBlob::Identity), Some(vec![1; 96]));
+        assert_eq!(store.comp_log_latest(), Some(contacts(350)));
+        assert_eq!(store.advert_get(&key(29)), Some(vec![29; 120]));
+        assert_eq!(store.advert_get(&key(5)), None, "only the newest 20 move");
+
+        // what changes meanwhile is kept
+        assert!(store.comp_save(CompBlob::Prefs, b"name=b"));
+        assert!(store.comp_log_append(&contacts(351)));
+        assert!(store.advert_put(&key(77), &[77; 50]));
+        store.advert_delete(&key(29));
+        assert_eq!(store.comp_load(CompBlob::Prefs).as_deref(), Some(&b"name=b"[..]));
+        assert_eq!(store.advert_get(&key(29)), None);
+
+        // a restart meanwhile finds it there
+        let mut store = lending(core::mem::replace(store.flash(), RamFlash(Vec::new())));
+        assert_eq!(store.mount(), Mount::Lent);
+        assert_eq!(store.comp_log_latest(), Some(contacts(351)));
+
+        assert!(store.take_back());
+        assert!(!store.lent());
+        let mut store = lending(core::mem::replace(store.flash(), RamFlash(Vec::new())));
+        assert_eq!(store.mount(), Mount::Ready);
+        assert_eq!(store.comp_load(CompBlob::Identity), Some(vec![1; 96]));
+        assert_eq!(store.comp_load(CompBlob::Prefs).as_deref(), Some(&b"name=b"[..]));
+        assert_eq!(store.comp_log_latest(), Some(contacts(351)));
+        assert_eq!(store.advert_get(&key(77)), Some(vec![77; 50]));
+        assert_eq!(store.advert_get(&key(28)), Some(vec![28; 120]));
+        assert_eq!(store.advert_get(&key(29)), None);
+    }
+
+    #[test]
+    fn a_take_back_cut_short_is_done_again() {
+        let mut store = lending(lending_flash());
+        store.mount();
+        assert!(store.comp_save(CompBlob::Identity, &[2; 96]));
+        assert!(store.comp_log_append(&contacts(40)));
+        assert!(store.lend());
+        update_over(&mut store);
+        // the partition half written back when the power went: the area still holds the data
+        store.flash().0[COMP.0 as usize..(COMP.0 + 10 * SECTOR) as usize].fill(0xFF);
+        let mut store = lending(core::mem::replace(store.flash(), RamFlash(Vec::new())));
+        assert_eq!(store.mount(), Mount::Lent);
+        assert!(store.take_back());
+        assert_eq!(store.comp_load(CompBlob::Identity), Some(vec![2; 96]));
+        assert_eq!(store.comp_log_latest(), Some(contacts(40)));
+    }
+
+    #[test]
+    fn appends_stop_short_of_the_room_for_blobs() {
+        let mut store = lending(lending_flash());
+        store.mount();
+        assert!(store.comp_save(CompBlob::Identity, &[3; 96]));
+        assert!(store.lend());
+        // contact lists that pack badly: the area fills, then the blobs still go in
+        let noisy: Vec<u8> = (0..20_000u32).map(|i| (i % 251 + 1) as u8).collect();
+        assert!(store.comp_log_append(&noisy));
+        assert!(store.comp_log_append(&noisy));
+        assert!(!store.comp_log_append(&noisy));
+        assert!(store.comp_save(CompBlob::Clock, &[9; 4]));
+        assert_eq!(store.comp_load(CompBlob::Clock), Some(vec![9; 4]));
+        assert_eq!(store.comp_log_latest(), Some(noisy));
+    }
+
+    #[test]
+    fn data_too_large_for_the_area_is_not_lent() {
+        let mut store = lending(lending_flash());
+        store.mount();
+        let noisy: Vec<u8> = (0..60_000u32).map(|i| (i % 251 + 1) as u8).collect();
+        assert!(store.comp_log_append(&noisy));
+        assert!(!store.lend());
+        assert!(!store.lent());
+        assert_eq!(store.comp_log_latest(), Some(noisy));
+    }
+
+    #[test]
+    fn the_layout_before_the_ring_moves_to_it() {
+        // the partition as the companion laid it out before: advert table, log up to 91 sectors
+        let mut old = Store::with_regions(lending_flash(), (0, 16 * SECTOR), Some((COMP_AT, LEGACY)));
+        assert!(old.comp_save(CompBlob::Identity, &[4; 96]));
+        assert!(old.comp_save(CompBlob::Channels, b"public"));
+        for i in 0..40 {
+            assert!(old.advert_put(&key(i), &[i as u8; 60]));
+        }
+        // enough snapshots for the newest to lie past the new end
+        for n in 300..306 {
+            assert!(old.comp_log_append(&contacts(n)));
+        }
+        let mut store = lending(core::mem::replace(old.flash(), RamFlash(Vec::new())));
+        assert_eq!(store.mount(), Mount::Moved);
+        assert_eq!(store.comp_load(CompBlob::Identity), Some(vec![4; 96]));
+        assert_eq!(store.comp_load(CompBlob::Channels).as_deref(), Some(&b"public"[..]));
+        assert_eq!(store.comp_log_latest(), Some(contacts(305)));
+        assert_eq!((0..40).filter(|&i| store.advert_get(&key(i)).is_some()).count(), 20);
+        let mut store = lending(core::mem::replace(store.flash(), RamFlash(Vec::new())));
+        assert_eq!(store.mount(), Mount::Ready);
+        assert_eq!(store.comp_log_latest(), Some(contacts(305)));
+    }
+
+    #[test]
+    fn a_partition_with_something_else_in_it_starts_empty() {
+        let mut flash = lending_flash();
+        flash.0[COMP.0 as usize..(COMP.0 + COMP.1) as usize].fill(0x11);
+        let mut store = lending(flash);
+        assert_eq!(store.mount(), Mount::Fresh);
+        assert_eq!(store.comp_load(CompBlob::Identity), None);
+        assert_eq!(store.comp_log_latest(), None);
+        let mut store = lending(core::mem::replace(store.flash(), RamFlash(Vec::new())));
+        assert_eq!(store.mount(), Mount::Ready);
+    }
+
+    #[test]
+    fn a_factory_reset_while_lent_leaves_the_update_alone() {
+        let mut store = lending(lending_flash());
+        store.mount();
+        assert!(store.comp_save(CompBlob::Identity, &[5; 96]));
+        assert!(store.lend());
+        update_over(&mut store);
+        assert!(store.comp_erase());
+        assert!(store.lent());
+        assert_eq!(store.comp_load(CompBlob::Identity), None);
+        assert!(store.flash().0[COMP.0 as usize..(COMP.0 + COMP.1) as usize].iter().all(|&b| b == 0x3C));
     }
 
     #[test]

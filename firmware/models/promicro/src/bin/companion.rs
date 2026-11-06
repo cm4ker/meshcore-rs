@@ -3,8 +3,8 @@
 //! The companion loop is the one of the other boards (`meshcore_fw_core::companion`): an app
 //! talks to it over BLE (the SoftDevice the bootloader keeps, running all the time: `promicro::ble`,
 //! `promicro::sd`) or USB serial. Its data lives in the internal flash where the repeater stages
-//! its updates (`promicro::COMPANION_REGION`), so new firmware comes as UF2 over USB only
-//! (`tools/uf2/flash_uf2.py`).
+//! its updates (`promicro::COMPANION_REGION`) and moves aside while an update comes in there
+//! (over BLE, USB or from a repeater, as on the other boards; `promicro::ota`).
 
 #![no_std]
 #![no_main]
@@ -37,16 +37,14 @@ use log::{info, warn};
 use meshcore::radio::RadioParams;
 use meshcore_fw_core::companion::{self, Config};
 use meshcore_fw_core::radio::WaitIrq;
-use meshcore_fw_core::storage::{CompBlob, Store};
+use meshcore_fw_core::storage::{Mount, Store};
 use meshcore_fw_core::sx1262::Sx1262;
 use promicro::board::{self, Battery};
 use promicro::companion::{Nrf, ProMicro};
 use promicro::flash::Flash;
 use promicro::sensors::Sensors;
-use promicro::{COMPANION_REGION, DATA_REGION, console, ota, sd, usb_frames};
+use promicro::{COMPANION_ASIDE, COMPANION_REGION, COMPANION_REGION_BEFORE, DATA_REGION, console, ota, sd, usb_frames};
 use static_cell::StaticCell;
-
-type NrfStore = Store<Flash>;
 
 const BUILD_EPOCH: &str = env!("BUILD_EPOCH");
 const BUILD_DATE: &str = env!("BUILD_DATE");
@@ -72,24 +70,6 @@ bind_interrupts!(struct Irqs {
     TEMP => temp::InterruptHandler;
     EGU2_SWI2 => sd::SoftDeviceEvents;
 });
-
-/// The companion's region may hold what was there before (the repeater's firmware to go back to,
-/// an update it received, upstream's files): without an identity of the companion's own in it,
-/// it starts empty. A page takes ~85 ms to erase: ~8 s for the region, within the watchdog's time.
-fn claim_region(store: &mut NrfStore) {
-    if store.comp_load(CompBlob::Identity).is_some() {
-        return;
-    }
-    let (base, len) = COMPANION_REGION;
-    // SAFETY: the internal flash, memory-mapped
-    let words = unsafe { core::slice::from_raw_parts(base as *const u32, len as usize / 4) };
-    if words.iter().any(|&w| w != u32::MAX) {
-        info!("companion region: clearing what was there before");
-        if !store.comp_erase() {
-            warn!("companion region: erase failed");
-        }
-    }
-}
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -190,11 +170,25 @@ async fn main(spawner: Spawner) {
 
     // ---- persistent state
     let flash = Flash::new(Nvmc::new(p.NVMC));
-    let mut store = Store::with_regions(flash, DATA_REGION, Some(COMPANION_REGION));
-    claim_region(&mut store);
+    let mut store =
+        Store::with_regions(flash, DATA_REGION, Some(COMPANION_REGION)).with_lending(COMPANION_ASIDE, COMPANION_REGION_BEFORE);
+    // a page takes ~85 ms to erase: the region (~7 s) fits in the watchdog's time
+    match store.mount() {
+        Mount::Ready | Mount::Fresh => {}
+        Mount::Lent => info!("companion data: aside, an update holds its region"),
+        Mount::Moved => info!("companion data: moved to the advert ring"),
+        Mount::Failed => warn!("companion data: the flash failed to take it"),
+    }
     let store = Rc::new(RefCell::new(store));
-    // an install request the repeater left (the installer only runs when the app hands over)
+    // an install request left behind (the installer only runs when the app hands over)
     ota::clear_request(&store);
+    // count trial boots of a fresh update before anything can hang
+    let in_trial = ota::check_trial(&store);
+    // an update given up, or gone back from: the data goes back in place
+    let lent = store.borrow().lent();
+    if lent && !in_trial && !store.borrow_mut().take_back() {
+        warn!("companion data: could not put it back, it stays aside");
+    }
 
     // ---- radio: its supply, the receive side of the antenna switch, the chip
     let led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
@@ -233,7 +227,7 @@ async fn main(spawner: Spawner) {
     let sensors = Sensors::probe(i2c).await;
     let board = ProMicro { led, rxen, button: Input::new(p.P1_00, Pull::Up), battery, temp: Temp::new(p.TEMP, Irqs), sensors };
     let seed = u64::from_le_bytes(entropy[..8].try_into().unwrap()) ^ u64::from_le_bytes(entropy[8..16].try_into().unwrap());
-    let platform = Nrf { watchdog, seed };
+    let platform = Nrf { watchdog, seed, store: store.clone(), in_trial, stays_aside: false };
     let cfg = Config {
         // the Omsk mesh, as on the T-Echo (the repeater firmware's settings win, if it ran here)
         radio: RadioParams { freq_mhz: 868.731, bw_khz: 62.5, sf: 7, cr: 7 },

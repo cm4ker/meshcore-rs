@@ -12,6 +12,9 @@
 //! Images are the app's flash contents followed by a trailer (`meshcore::ota::ImageFormat::Nrf`,
 //! written by `tools/uf2/elf2uf2.py`), which is flashed with the app: the running firmware finds
 //! its own image by it, the base of delta updates, and the one in the staging area by its own.
+//!
+//! The companion keeps its data in the staging area and lends it to an update as one begins
+//! ([`StagingTarget::lending`]): the data waits aside until the update is kept or given up.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -52,12 +55,36 @@ pub static PREVIOUS_KEPT: AtomicBool = AtomicBool::new(false);
 
 pub struct StagingTarget {
     store: SharedStore<Flash>,
+    /// The companion's: the staging area is its storage, lent to the update (`Store::lend`).
+    lends: bool,
 }
+
+// the companion's storage takes an update of the whole app slot, and the spare page of the swap
+const _: () = assert!(crate::COMPANION_REGION.0 == STAGING && crate::COMPANION_REGION.1 >= APP_END - APP_START + PAGE);
 
 impl StagingTarget {
     /// `None` if the bootloader would not start an app it did not write itself.
     pub fn new(store: SharedStore<Flash>) -> Option<Self> {
-        no_app_crc().then_some(Self { store })
+        no_app_crc().then_some(Self { store, lends: false })
+    }
+
+    /// The companion's: its storage (`COMPANION_REGION`) is the staging area, its data moved
+    /// aside when the update begins.
+    pub fn lending(store: SharedStore<Flash>) -> Option<Self> {
+        no_app_crc().then_some(Self { store, lends: true })
+    }
+
+    /// The staging area is the update's from here on.
+    fn claim(&mut self) -> bool {
+        if !self.lends {
+            return true;
+        }
+        let mut store = self.store.borrow_mut();
+        if store.lent() {
+            return true;
+        }
+        log::info!("OTA: the companion's data moves aside for the update");
+        store.lend()
     }
 }
 
@@ -259,12 +286,13 @@ fn go_back(store: &SharedStore<Flash>, failed: bool) -> bool {
 
 impl FirmwareTarget for StagingTarget {
     fn capacity(&self) -> u32 {
-        STAGING_END - STAGING
+        // the companion's storage leaves no room for a delta beside the image: it comes as it goes
+        if self.lends { APP_END - APP_START } else { STAGING_END - STAGING }
     }
 
     // a staged update waits for the restart as verified: nothing may write over it
     fn erase(&mut self, offset: u32, len: u32) -> bool {
-        if INSTALL_PENDING.load(Ordering::Relaxed) || offset + len > self.capacity() {
+        if INSTALL_PENDING.load(Ordering::Relaxed) || offset + len > self.capacity() || !self.claim() {
             return false;
         }
         // an update comes in over the firmware to go back to
@@ -278,7 +306,7 @@ impl FirmwareTarget for StagingTarget {
     }
 
     fn write(&mut self, offset: u32, data: &[u8]) -> bool {
-        if INSTALL_PENDING.load(Ordering::Relaxed) || offset as usize + data.len() > self.capacity() as usize {
+        if INSTALL_PENDING.load(Ordering::Relaxed) || offset as usize + data.len() > self.capacity() as usize || !self.claim() {
             return false;
         }
         NorFlash::write(self.store.borrow_mut().flash(), STAGING + offset, data).is_ok()
