@@ -1,8 +1,8 @@
 //! E-paper: a page turn, a notice, a pairing PIN, Bluetooth, the home page or new messages change
 //! the screen at once; anything else (counters, ages, the battery) at most every
 //! [`MIN_REFRESH_MS`]: an e-paper keeps its image without power, and refreshes are slow and wear
-//! it. Refreshes are partial, but a partial refresh drives only the pixels that change and the
-//! rest slowly fades, so now and then the page is redrawn in full, which flashes the screen: once
+//! it. Refreshes are partial, but a partial refresh fully drives only the pixels that change (the
+//! rest get a short pulse) and those slowly fade, so now and then every pixel is driven: once
 //! nothing has changed for [`QUIET_MS`] after [`CLEAN_AFTER_PARTIALS`] partial refreshes (or
 //! after any, if the last full one is [`CLEAN_EVERY_MS`] old), and at every [`FULL_EVERY`]th
 //! refresh in a row.

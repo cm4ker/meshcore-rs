@@ -18,11 +18,12 @@ impl Font {
     }
 }
 
-/// Square e-paper, 200 x 200 (T-Echo): 15 to 25 px type.
+/// Square e-paper, 200 x 200 (T-Echo): 15 to 25 px type. The small type is bold: an e-paper
+/// shows a stroke one pixel wide as grey.
 pub mod square {
     use super::*;
 
-    pub static SMALL: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox3h_tf>(), 15);
+    pub static SMALL: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox3hb_tf>(), 15);
     pub static TEXT: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4h_tf>(), 20);
     pub static TEXT_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4hb_tf>(), 20);
     pub static BIG: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox5h_tf>(), 25);

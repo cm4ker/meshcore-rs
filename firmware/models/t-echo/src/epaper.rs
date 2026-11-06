@@ -1,6 +1,6 @@
-//! The T-Echo's 1.54" e-paper (GDEH0154D67, SSD1681 controller, 200 x 200): the interface's
+//! The T-Echo's 1.54" e-paper (DEPG0150BN, SSD1681 controller, 200 x 200): the interface's
 //! pages in the square e-paper layout ([`meshcore_ui::layout::Class::EpaperSquare`]), drawn in
-//! their own task so a refresh (up to 2 s) never holds up the radio, when the e-paper refresh
+//! their own task so a refresh (about a second) never holds up the radio, when the e-paper refresh
 //! policy ([`meshcore_ui::refresh::epaper`]) says so.
 
 use embassy_nrf::gpio::{Input, Output};
@@ -18,6 +18,30 @@ pub const WIDTH: usize = 200;
 pub const HEIGHT: usize = 200;
 
 pub static SCREEN: Signal<CriticalSectionRawMutex, View> = Signal::new();
+
+/// The partial refresh's waveform, upstream's (GxEPD2's `GxEPD2_150_BN::lut_partial`; the T-Echo's
+/// panel is a DEPG0150BN): a pixel that changes is driven for 15 frames and more towards its new
+/// colour, one that stays gets a single frame towards its own.
+const LUT_PARTIAL: [u8; 153] = [
+    0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x80, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, //
+    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x00, 0x00, 0x00,
+];
 
 /// A 1-bit frame in the controller's layout: rows of 25 bytes, bit 7 leftmost, 1 = white. Drawn
 /// turned as upstream's (GxEPD2 rotation 3).
@@ -67,7 +91,7 @@ pub struct Epaper {
 
 impl Epaper {
     async fn wait_idle(&mut self) {
-        // BUSY is high while the controller works; a refresh takes up to ~2 s
+        // BUSY is high while the controller works; a refresh takes ~0.9 s
         let _ = embassy_time::with_timeout(Duration::from_secs(5), self.busy.wait_for_low()).await;
     }
 
@@ -82,7 +106,7 @@ impl Epaper {
         self.cs.set_high();
     }
 
-    /// Reset and set the panel up (GxEPD2's `GxEPD2_154_D67::_InitDisplay`).
+    /// Reset and set the panel up (GxEPD2's `GxEPD2_150_BN::_InitDisplay`).
     async fn init(&mut self) {
         self.reset.set_low();
         Timer::after_millis(10).await;
@@ -95,8 +119,13 @@ impl Epaper {
         self.command(0x11, &[0x03]).await; // data entry: x then y, both increasing
         self.command(0x44, &[0x00, (WIDTH / 8 - 1) as u8]).await; // RAM x window (bytes)
         self.command(0x45, &[0x00, 0x00, (HEIGHT - 1) as u8, ((HEIGHT - 1) >> 8) as u8]).await; // RAM y window
-        self.command(0x3C, &[0x05]).await; // border
+        self.command(0x3C, &[0x05]).await; // border: white
         self.command(0x18, &[0x80]).await; // internal temperature sensor
+        // the panel's own waveform, for its voltages, then upstream's in its place
+        self.command(0x22, &[0xB1]).await;
+        self.command(0x20, &[]).await;
+        self.wait_idle().await;
+        self.command(0x32, &LUT_PARTIAL).await;
     }
 
     async fn write_ram(&mut self, ram: u8, frame: &Frame) {
@@ -105,21 +134,38 @@ impl Epaper {
         self.command(ram, &frame.0).await;
     }
 
-    /// Show `frame`: a full refresh, or a partial one against the image shown before.
-    async fn show(&mut self, frame: &Frame, full: bool) {
-        self.write_ram(0x24, frame).await; // new image
-        if full {
-            self.write_ram(0x26, frame).await; // the base of the next partial refresh
-            self.command(0x22, &[0xF7]).await;
-        } else {
-            self.command(0x3C, &[0x80]).await; // border unchanged during partial refreshes
-            self.command(0x22, &[0xFC]).await;
+    /// [`write_ram`](Self::write_ram) with every pixel the other colour.
+    async fn write_ram_inverse(&mut self, ram: u8, frame: &Frame) {
+        self.command(0x4E, &[0x00]).await;
+        self.command(0x4F, &[0x00, 0x00]).await;
+        self.cs.set_low();
+        self.dc.set_low();
+        let _ = self.spi.write(&[ram]).await;
+        self.dc.set_high();
+        let mut buf = [0u8; 250];
+        for part in frame.0.chunks(buf.len()) {
+            for (b, f) in buf.iter_mut().zip(part) {
+                *b = !f;
+            }
+            let _ = self.spi.write(&buf[..part.len()]).await;
         }
+        self.cs.set_high();
+    }
+
+    /// Show `frame` with upstream's waveform: against the image shown before, or (`full`) against
+    /// its inverse, so that every pixel gets the full drive towards its colour. The panel's own
+    /// full refresh (0xF7) fades the image it has drawn in its last phase: whatever no partial
+    /// refresh redrew after it stayed pale. The voltages go off after each refresh (GxEPD2's
+    /// `powerOff`: "avoids screen fading over time").
+    async fn show(&mut self, frame: &Frame, full: bool) {
+        if full {
+            self.write_ram_inverse(0x26, frame).await;
+        }
+        self.write_ram(0x24, frame).await;
+        self.command(0x22, &[0xCF]).await;
         self.command(0x20, &[]).await;
         self.wait_idle().await;
-        if !full {
-            self.write_ram(0x26, frame).await;
-        }
+        self.write_ram(0x26, frame).await; // the base of the next refresh
     }
 
     /// Deep sleep: the image stays, the controller draws next to nothing until a reset.

@@ -43,10 +43,10 @@ fn bar<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View) {
     if let Some(mv) = v.bar.batt_mv {
         // small and without the space, leaving the title room
         let batt = volts(mv).replace(' ', "");
-        c.right(&SMALL, &batt, end - 6, 8);
-        end -= 6 + width(&SMALL, &batt);
+        c.right(&SMALL, &batt, end - 4, 8);
+        end -= 4 + width(&SMALL, &batt);
     }
-    let title_end = end - 5;
+    let title_end = end - 3;
     let title = fit(&TEXT_BOLD, &clean(title(v)), title_end - MARGIN);
     c.text(&TEXT_BOLD, &title, MARGIN, 4);
     c.line(Point::new(0, 25), Point::new(w - 1, 25));
@@ -299,7 +299,7 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
                 c.text(&SMALL, "PIN для подключения", MARGIN, BODY_TOP + 2);
                 c.centered(&HUGE_DIGITS, &format!("{:06}", o.pin), BODY_TOP + 16);
                 c.text(&TEXT, if o.connected { "Подключено" } else { "Ждет подключения" }, MARGIN, BODY_TOP + 62);
-                c.text(&SMALL, &format!("Закроется через {} мин", o.mins_left), MARGIN, BODY_TOP + 84);
+                c.text(&SMALL, &format!("До закрытия {} мин", o.mins_left), MARGIN, BODY_TOP + 84);
                 c.text(&SMALL, &fit(&SMALL, &clean(&o.name), full), MARGIN, BODY_TOP + 100);
                 if !o.connected {
                     hint(c, "закрыть");
