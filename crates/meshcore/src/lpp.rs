@@ -1,5 +1,5 @@
-//! CayenneLPP records as upstream's telemetry writes them (the ElectronicCats CayenneLPP library):
-//! channel, type, then the value big-endian, scaled and cut toward zero.
+//! CayenneLPP records as upstream's telemetry writes them (the ElectronicCats CayenneLPP library,
+//! 1.6.1 as upstream pins it): channel, type, then the value big-endian, scaled and cut toward zero.
 
 use alloc::vec::Vec;
 
@@ -9,9 +9,9 @@ pub const TEMPERATURE: u8 = 103;
 pub const RELATIVE_HUMIDITY: u8 = 104;
 /// 2 bytes, 0.1 hPa, unsigned.
 pub const BAROMETRIC_PRESSURE: u8 = 115;
-/// 2 bytes, 0.01 V, unsigned.
+/// 2 bytes, 0.01 V, signed.
 pub const VOLTAGE: u8 = 116;
-/// 2 bytes, 0.001 A, unsigned.
+/// 2 bytes, 0.001 A, signed: an INA219 on the battery reads a discharge below zero.
 pub const CURRENT: u8 = 117;
 /// 2 bytes, 1 m, signed.
 pub const ALTITUDE: u8 = 121;
@@ -29,8 +29,8 @@ pub fn push(out: &mut Vec<u8>, channel: u8, kind: u8, value: f32) {
         TEMPERATURE => (2, 10.0, true),
         RELATIVE_HUMIDITY => (1, 2.0, false),
         BAROMETRIC_PRESSURE => (2, 10.0, false),
-        VOLTAGE => (2, 100.0, false),
-        CURRENT => (2, 1000.0, false),
+        VOLTAGE => (2, 100.0, true),
+        CURRENT => (2, 1000.0, true),
         ALTITUDE => (2, 1.0, true),
         POWER => (2, 1.0, false),
         _ => return,
@@ -52,10 +52,10 @@ mod tests {
     fn records_as_upstream_writes_them() {
         let mut out = Vec::new();
         push(&mut out, 2, VOLTAGE, 4.137);
-        push(&mut out, 2, CURRENT, -0.0123);
-        push(&mut out, 2, POWER, 0.6);
+        push(&mut out, 2, CURRENT, -0.0123); // 1 mA signed: -12 -> 0xFFF4
+        push(&mut out, 2, POWER, -0.6); // unsigned: the magnitude, whole watts
         push(&mut out, 1, TEMPERATURE, -2.5);
-        assert_eq!(out, [2, 116, 0x01, 0x9D, 2, 117, 0, 12, 2, 128, 0, 0, 1, 103, 0xFF, 0xE7]);
+        assert_eq!(out, [2, 116, 0x01, 0x9D, 2, 117, 0xFF, 0xF4, 2, 128, 0, 0, 1, 103, 0xFF, 0xE7]);
     }
 
     #[test]
