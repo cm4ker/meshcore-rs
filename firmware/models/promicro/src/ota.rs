@@ -53,30 +53,34 @@ pub static INSTALL_PENDING: AtomicBool = AtomicBool::new(false);
 /// The staging area still holds the firmware to go back to: no update has come into it since.
 pub static PREVIOUS_KEPT: AtomicBool = AtomicBool::new(false);
 
-pub struct StagingTarget {
+/// `LENDS`: the companion's, whose storage the staging area is, lent to the update
+/// (`Store::lend`). A type parameter, so the repeater carries none of the lending code.
+pub struct StagingTarget<const LENDS: bool> {
     store: SharedStore<Flash>,
-    /// The companion's: the staging area is its storage, lent to the update (`Store::lend`).
-    lends: bool,
 }
 
 // the companion's storage takes an update of the whole app slot, and the spare page of the swap
 const _: () = assert!(crate::COMPANION_REGION.0 == STAGING && crate::COMPANION_REGION.1 >= APP_END - APP_START + PAGE);
 
-impl StagingTarget {
+impl StagingTarget<false> {
     /// `None` if the bootloader would not start an app it did not write itself.
     pub fn new(store: SharedStore<Flash>) -> Option<Self> {
-        no_app_crc().then_some(Self { store, lends: false })
+        no_app_crc().then_some(Self { store })
     }
+}
 
+impl StagingTarget<true> {
     /// The companion's: its storage (`COMPANION_REGION`) is the staging area, its data moved
     /// aside when the update begins.
     pub fn lending(store: SharedStore<Flash>) -> Option<Self> {
-        no_app_crc().then_some(Self { store, lends: true })
+        no_app_crc().then_some(Self { store })
     }
+}
 
+impl<const LENDS: bool> StagingTarget<LENDS> {
     /// The staging area is the update's from here on.
     fn claim(&mut self) -> bool {
-        if !self.lends {
+        if !LENDS {
             return true;
         }
         let mut store = self.store.borrow_mut();
@@ -284,10 +288,10 @@ fn go_back(store: &SharedStore<Flash>, failed: bool) -> bool {
     FwRecord { failed, ..FwRecord::left(own) }.save(&mut s) && request(&mut s, len, own.map_or(0, |(l, _)| l))
 }
 
-impl FirmwareTarget for StagingTarget {
+impl<const LENDS: bool> FirmwareTarget for StagingTarget<LENDS> {
     fn capacity(&self) -> u32 {
         // the companion's storage leaves no room for a delta beside the image: it comes as it goes
-        if self.lends { APP_END - APP_START } else { STAGING_END - STAGING }
+        if LENDS { APP_END - APP_START } else { STAGING_END - STAGING }
     }
 
     // a staged update waits for the restart as verified: nothing may write over it
