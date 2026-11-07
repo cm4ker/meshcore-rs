@@ -48,6 +48,7 @@ impl DrawTarget for Sheet {
 fn look(class: Class) -> (Rgb888, Rgb888, u32) {
     match class {
         Class::EpaperSquare => (Rgb888::new(24, 26, 24), Rgb888::new(232, 233, 224), 1),
+        Class::EpaperWide => (Rgb888::new(24, 26, 24), Rgb888::new(232, 233, 224), 2),
         Class::Mono128x64 => (Rgb888::new(170, 220, 255), Rgb888::new(0, 0, 0), 2),
     }
 }
@@ -57,7 +58,7 @@ fn main() {
     std::fs::create_dir_all(&out).expect("output directory");
     let views = samples::all();
     let mut problems = Vec::new();
-    for class in [Class::EpaperSquare, Class::Mono128x64] {
+    for class in Class::ALL {
         let (ink, paper, scale) = look(class);
         let size = class.size();
         let (tw, th) = (size.width * scale, size.height * scale);

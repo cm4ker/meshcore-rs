@@ -13,6 +13,7 @@
 |---|---|---|---|---|---|---|---|
 | Heltec WiFi LoRa 32 V4 (V4.2, V4.3) | `firmware/models/heltec/v4` | ESP32-S3, SX1262 + FEM (GC1109 / KCT8103L), flash 16 МБ | OLED 128×64 | да: room server, Wi-Fi и MQTT, бридж ESP-NOW, энергосбережение | да | BLE и Wi-Fi (TCP 5000) одновременно, USB | LoRa, Wi-Fi, BLE; два слота, автооткат |
 | Heltec WiFi LoRa 32 V3 | `firmware/models/heltec/v3` | ESP32-S3, SX1262 без FEM, flash 8 МБ | OLED 128×64 | да, как V4 | собирается, на плате не проверен | как V4 | как V4, слоты по 3,4 МБ |
+| Heltec Wireless Paper (V1.1.1, SSD1682) | `firmware/models/heltec/paper` | ESP32-S3, SX1262 без FEM, flash 8 МБ | e-paper 250×122 | нет | да, экран ещё настраивается | как V3 | как V3, на плате не проверено |
 | Seeed XIAO ESP32-C6 + Waveshare Core2021-HF | `firmware/models/xiao-c6` | ESP32-C6, Semtech LR2021, flash 4 МБ | нет | да: room server, Wi-Fi и MQTT; батарею не меряет | да | BLE или Wi-Fi (не вместе; TCP пока ненадёжен), USB | через подключение приложения; два слота по 1,75 МБ, целый образ без сжатия |
 | LilyGO T-Echo | `firmware/models/t-echo` | nRF52840, SX1262, QSPI-флешка | e-paper 200×200 | нет | да, с GPS L76K | BLE, USB | через подключение приложения; один слот, без отката; первая прошивка — UF2 |
 | nRF52840 Pro Micro («Faketec», upstream `promicro`) | `firmware/models/promicro` | nRF52840, SX1262 (HT-RA62, E22), только внутренняя flash | нет | да: room server, датчики на I2C в телеметрии; без Wi-Fi; BLE только для обновлений (`fw ble`) | да, до 350 контактов, датчики в телеметрии | репитер: USB (консоль); компаньон: BLE и USB | репитер: LoRa (подписанный релиз, дельта) или BLE, откат на прежнюю; компаньон: дельта от репитера по LoRa или через подключение приложения, откат на время пробного запуска; первая прошивка — UF2 |
@@ -92,8 +93,8 @@
   часы раз в 30 минут сверяются по спутникам;
 - **интерфейс на устройстве** (`firmware/ui`, общий для всех плат, на русском): страницы роли и одна
   кнопка, как в upstream (нажатие — дальше, двойное — назад, удержание — действие на странице).
-  Раскладка своя у класса экрана, а не у платы: квадратный e-paper 200×200 (T-Echo) и OLED 128×64
-  (Heltec). В верхней строке на всех страницах — заголовок, напряжение батареи (в вольтах: процент
+  Раскладка своя у класса экрана, а не у платы: квадратный e-paper 200×200 (T-Echo), широкий
+  e-paper 250×122 (Wireless Paper) и OLED 128×64 (Heltec). В верхней строке на всех страницах — заголовок, напряжение батареи (в вольтах: процент
   заряда без типа аккумулятора не вычислить) и Bluetooth. Компаньон: новые сообщения, сообщения, кто рядом, радио, Bluetooth (выключается с
   устройства), GPS, обновление (что с ним и удержание — проверить или поставить), advert, выключение;
   на Heltec без страниц Bluetooth и выключения. Удержание на главной странице выключает и
@@ -139,6 +140,8 @@ firmware/models/        платы, у каждой свой крейт: про�
                         образы heltec-v4-repeater, heltec-v4-companion
     v3/                 V3: без FEM, консоль на UART0 (CP2102), flash 8 МБ;
                         образы heltec-v3-repeater, heltec-v3-companion
+    paper/              Wireless Paper: V3 с e-paper 250×122 вместо OLED и своими выводами;
+                        образ heltec-paper-companion
   xiao-c6/              XIAO ESP32-C6 + LR2021 (Waveshare Core2021-HF): компаньон и репитер
                         (`repeater`, на общем `repeater_app`; в выпуски пока не входит)
   t-echo/               LilyGO T-Echo (nRF52840, embassy-nrf): компаньон; BLE на Nordic SDC

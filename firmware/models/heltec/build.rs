@@ -151,8 +151,13 @@ fn layout() {
     println!("cargo:rerun-if-changed={}", ld.display());
     println!("cargo:rustc-link-search={}", ld.display());
     let board = std::env::var("CARGO_PKG_NAME").unwrap();
-    // (image, code in RAM, switch tables and constants, those and the statics), in bytes
+    let bins = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/bin");
+    // (image, code in RAM, switch tables and constants, those and the statics), in bytes, for the
+    // images the board has
     for (role, rwtext, head, data) in [("companion", 0x3E00, 0x3300, 0x6C00), ("repeater", 0x4A00, 0x4000, 0x7A00)] {
+        if !bins.join(format!("{role}.rs")).exists() {
+            continue;
+        }
         for (sym, room) in [("MC_RWTEXT_ROOM", rwtext), ("MC_DATA_HEAD", head), ("MC_DATA_ROOM", data)] {
             println!("cargo:rustc-link-arg-bin={board}-{role}=-Wl,--defsym={sym}={room:#x}");
         }

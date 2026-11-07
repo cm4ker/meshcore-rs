@@ -5,7 +5,9 @@
 //! rest get a short pulse) and those slowly fade, so now and then every pixel is driven: once
 //! nothing has changed for [`QUIET_MS`] after [`CLEAN_AFTER_PARTIALS`] partial refreshes (or
 //! after any, if the last full one is [`CLEAN_EVERY_MS`] old), and at every [`FULL_EVERY`]th
-//! refresh in a row.
+//! refresh in a row. Some panels wear much faster ([`Epaper::ghosting`]): there every partial
+//! refresh greys the white a little and leaves the old image showing through, so the image is
+//! cleaned once nothing has changed for [`GHOSTS_QUIET_MS`] after any.
 //!
 //! Times are in milliseconds since boot.
 
@@ -16,6 +18,7 @@ pub const QUIET_MS: u64 = 20_000;
 pub const CLEAN_AFTER_PARTIALS: u32 = 15;
 pub const CLEAN_EVERY_MS: u64 = 60 * 60 * 1000;
 pub const FULL_EVERY: u32 = 30;
+pub const GHOSTS_QUIET_MS: u64 = 3_000;
 
 /// A change worth a refresh right away (else it waits for [`MIN_REFRESH_MS`]).
 pub fn urgent(old: &View, new: &View) -> bool {
@@ -42,6 +45,8 @@ pub fn urgent(old: &View, new: &View) -> bool {
 /// What is on the screen, and how worn the image is.
 #[derive(Default)]
 pub struct Epaper {
+    /// Partial refreshes leave ghosts: the image is cleaned soon after each.
+    ghosts: bool,
     shown: Option<View>,
     /// The last refresh, and the last full one.
     last: u64,
@@ -51,6 +56,11 @@ pub struct Epaper {
 }
 
 impl Epaper {
+    /// For a panel whose partial refreshes leave ghosts (the Wireless Paper's SSD1682).
+    pub fn ghosting() -> Self {
+        Self { ghosts: true, ..Self::default() }
+    }
+
     pub fn shown(&self) -> Option<&View> {
         self.shown.as_ref()
     }
@@ -61,6 +71,7 @@ impl Epaper {
         let quiet = self.last + QUIET_MS;
         match self.partials {
             0 => None,
+            _ if self.ghosts => Some(self.last + GHOSTS_QUIET_MS),
             n if n >= CLEAN_AFTER_PARTIALS => Some(quiet),
             _ => Some(quiet.max(self.last_full + CLEAN_EVERY_MS)),
         }
@@ -126,6 +137,18 @@ mod tests {
         }
         assert_eq!(e.clean_at(), Some(3000 + CLEAN_AFTER_PARTIALS as u64 - 1 + QUIET_MS));
         e.cleaned(100_000);
+        assert_eq!(e.clean_at(), None);
+    }
+
+    #[test]
+    fn ghosting_panel_cleans_after_any_partial() {
+        let mut e = Epaper::ghosting();
+        let radio = samples::companion_view(crate::model::Page::Radio);
+        e.drawn(radio, true, 1000);
+        assert_eq!(e.clean_at(), None);
+        e.drawn(samples::companion_view(crate::model::Page::Home), false, 2000);
+        assert_eq!(e.clean_at(), Some(2000 + GHOSTS_QUIET_MS));
+        e.cleaned(5000);
         assert_eq!(e.clean_at(), None);
     }
 }

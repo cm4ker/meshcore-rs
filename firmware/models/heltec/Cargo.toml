@@ -1,9 +1,10 @@
 cargo-features = ["panic-immediate-abort"]
 
 # Heltec WiFi LoRa 32 boards: what the V3 and V4 share in `shared`, what sets each apart in `v3`
-# and `v4`, each with its own firmware images (repeater, companion).
+# and `v4`, each with its own firmware images (repeater, companion). `paper`, the Wireless Paper
+# (a V3 with an e-paper and its own pins), takes the board-independent parts of `shared`.
 [workspace]
-members  = ["shared", "v3", "v4"]
+members  = ["shared", "v3", "v4", "paper"]
 resolver = "3"
 
 [workspace.package]

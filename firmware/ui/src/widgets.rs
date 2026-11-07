@@ -218,28 +218,35 @@ impl<'a, D: DrawTarget<Color = BinaryColor>> Canvas<'a, D> {
 
     /// The Bluetooth rune, 10 x 18 (on a dark square while connected, struck through while off).
     pub fn ble_large(&mut self, x: i32, y: i32, state: BleState) {
-        self.mark(Rectangle::new(Point::new(x - 3, y - 2), Size::new(15, 22)), "ble");
+        let rune = [(0, 4), (8, 12), (4, 17), (4, 0), (8, 5), (0, 13)];
+        self.ble_bold(x, y, state, rune, Size::new(15, 22), ((-2, 18), (10, -1)));
+    }
+
+    /// The Bluetooth rune, 8 x 13 (on a dark square while connected, struck through while off).
+    pub fn ble_medium(&mut self, x: i32, y: i32, state: BleState) {
+        let rune = [(0, 3), (6, 9), (3, 12), (3, 0), (6, 3), (0, 9)];
+        self.ble_bold(x, y, state, rune, Size::new(14, 17), ((-2, 13), (8, -1)));
+    }
+
+    /// The Bluetooth rune through `rune` (from `x`, `y`) in strokes two pixels wide, in a box of
+    /// `size` from 3 px left of it and 2 px above; struck through from `strike.0` to `strike.1`.
+    fn ble_bold(&mut self, x: i32, y: i32, state: BleState, rune: [(i32, i32); 6], size: Size, strike: ((i32, i32), (i32, i32))) {
+        self.mark(Rectangle::new(Point::new(x - 3, y - 2), size), "ble");
         let color = if state == BleState::Connected {
-            self.rect(x - 3, y - 2, 15, 22, Some(INK));
+            self.rect(x - 3, y - 2, size.width, size.height, Some(INK));
             PAPER
         } else {
             INK
         };
-        let pts = [
-            Point::new(x, y + 4),
-            Point::new(x + 8, y + 12),
-            Point::new(x + 4, y + 17),
-            Point::new(x + 4, y),
-            Point::new(x + 8, y + 5),
-            Point::new(x, y + 13),
-        ];
         for dx in 0..2 {
-            let shifted: Vec<Point> = pts.iter().map(|p| *p + Point::new(dx, 0)).collect();
-            let _ = Polyline::new(&shifted).into_styled(PrimitiveStyle::with_stroke(color, 1)).draw(self.d);
+            let pts: Vec<Point> = rune.iter().map(|&(px, py)| Point::new(x + px + dx, y + py)).collect();
+            let _ = Polyline::new(&pts).into_styled(PrimitiveStyle::with_stroke(color, 1)).draw(self.d);
         }
         if state == BleState::Off {
-            self.line(Point::new(x - 2, y + 18), Point::new(x + 10, y - 1));
-            self.line(Point::new(x - 1, y + 18), Point::new(x + 11, y - 1));
+            let ((ax, ay), (bx, by)) = strike;
+            for dx in 0..2 {
+                self.line(Point::new(x + ax + dx, y + ay), Point::new(x + bx + dx, y + by));
+            }
         }
     }
 

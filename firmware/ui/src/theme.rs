@@ -35,6 +35,26 @@ pub mod square {
     pub static FREQ_DIGITS: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_logisoso32_tn>(), 36);
 }
 
+/// Wide e-paper, 250 x 122 (Heltec Wireless Paper): 13 to 20 px type, digits up to 42 px. Its
+/// pixels are larger than the T-Echo's, the type smaller, and all of it bold: this panel shows a
+/// stroke one pixel wide as grey even after a full refresh. `TEXT` and `BIG` are the same as their
+/// `_BOLD`s, kept apart for the layout's sake.
+pub mod wide {
+    use super::*;
+
+    pub static SMALL: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox2hb_tf>(), 13);
+    pub static TEXT: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox3hb_tf>(), 16);
+    pub static TEXT_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox3hb_tf>(), 16);
+    pub static BIG: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4hb_tf>(), 20);
+    pub static BIG_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4hb_tf>(), 20);
+    /// "Выключено" on a node left off.
+    pub static HUGE_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox5hb_tf>(), 25);
+    /// Digits only: the PINs, the frequency.
+    pub static DIGITS: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_logisoso32_tn>(), 36);
+    /// Digits only: the unread count.
+    pub static HUGE_DIGITS: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_logisoso42_tn>(), 46);
+}
+
 /// Monochrome 128 x 64 (Heltec OLED): 10 to 12 px type, digits up to 24 px.
 pub mod mono {
     use super::*;

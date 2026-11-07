@@ -8,20 +8,26 @@ use crate::model::{Body, Page, View};
 use crate::widgets::{Canvas, Recorder};
 
 pub mod epaper_square;
+pub mod epaper_wide;
 pub mod mono_128x64;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Class {
     /// Square e-paper, 200 x 200 (T-Echo).
     EpaperSquare,
+    /// Wide e-paper, 250 x 122 (Heltec Wireless Paper).
+    EpaperWide,
     /// Monochrome OLED, 128 x 64 (Heltec V3/V4).
     Mono128x64,
 }
 
 impl Class {
+    pub const ALL: [Class; 3] = [Class::EpaperSquare, Class::EpaperWide, Class::Mono128x64];
+
     pub fn size(self) -> Size {
         match self {
             Class::EpaperSquare => Size::new(200, 200),
+            Class::EpaperWide => Size::new(250, 122),
             Class::Mono128x64 => Size::new(128, 64),
         }
     }
@@ -37,6 +43,7 @@ impl Class {
         let mut c = Canvas::new(d, s.width as i32, s.height as i32, rec);
         match self {
             Class::EpaperSquare => epaper_square::draw(&mut c, v),
+            Class::EpaperWide => epaper_wide::draw(&mut c, v),
             Class::Mono128x64 => mono_128x64::draw(&mut c, v),
         }
     }
@@ -143,7 +150,7 @@ mod tests {
     #[test]
     fn every_page_fits_every_class() {
         let mut failures = alloc::vec::Vec::new();
-        for class in [Class::EpaperSquare, Class::Mono128x64] {
+        for class in Class::ALL {
             for (name, v) in samples::all() {
                 for p in check(class, &v) {
                     failures.push(alloc::format!("{class:?} {name}: {p}"));

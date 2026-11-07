@@ -1,0 +1,28 @@
+[package]
+name         = "heltec-paper"
+build        = "../build.rs"
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+
+[[bin]]
+name = "heltec-paper-companion"
+path = "./src/bin/companion.rs"
+
+[dependencies]
+heltec-shared.workspace          = true
+esp-hal.workspace                = true
+esp-rtos.workspace               = true
+esp-bootloader-esp-idf.workspace = true
+esp-backtrace.workspace          = true
+esp-alloc.workspace              = true
+esp-println.workspace            = true
+esp-storage.workspace            = true
+embassy-executor.workspace       = true
+embassy-time.workspace           = true
+embassy-sync.workspace           = true
+embedded-graphics.workspace      = true
+log.workspace                    = true
+meshcore.workspace               = true
+meshcore-fw.workspace            = true
+meshcore-ui.workspace            = true
