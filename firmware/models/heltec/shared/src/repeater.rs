@@ -278,11 +278,11 @@ pub async fn run<V: Variant>(spawner: Spawner, build_epoch: &str, build_date: &'
     // ---- console
     V::start_console(spawner, ConsolePins { usb: p.USB_DEVICE, uart0: p.UART0, rx: p.GPIO44 });
 
-    // ---- optional external GPS on the UART1 header (RX 38, TX 39, EN 34, RESET 42)
+    // ---- optional external GPS on the UART1 header (we read 39, write 38; EN 34, RESET 42)
     let gps_uart = esp_hal::uart::Uart::new(p.UART1, esp_hal::uart::Config::default().with_baudrate(9600))
         .unwrap()
-        .with_rx(p.GPIO38)
-        .with_tx(p.GPIO39)
+        .with_rx(p.GPIO39)
+        .with_tx(p.GPIO38)
         .into_async();
     let (gps_rx, gps_tx) = gps_uart.split();
     spawner.spawn(

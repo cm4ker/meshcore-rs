@@ -1,6 +1,8 @@
 //! An optional external GPS on the Heltec V4's dedicated header (upstream `variants/heltec_v4`:
-//! `ENV_INCLUDE_GPS=1`). A bare NMEA receiver on UART1 — RX 38, TX 39 — powered through EN 34 and
-//! held in reset through RESET 42, both active LOW. Bytes feed the shared parser
+//! `ENV_INCLUDE_GPS=1`). A bare NMEA receiver on UART1 — its TX on GPIO39 (our RX), its RX on
+//! GPIO38 (our TX) — powered through EN 34 and held in reset through RESET 42, both active LOW.
+//! The variant's `PIN_GPS_RX=38`/`PIN_GPS_TX=39` name the receiver's pins: upstream passes them to
+//! `Serial1.setPins(rx, tx)` as `(PIN_GPS_TX, PIN_GPS_RX)`. Bytes feed the shared parser
 //! (`meshcore_fw_core::gps`), whose readings the companion loop and the repeater `gps` CLI read.
 //!
 //! The Vext rail (GPIO36) that powers the receiver is already held on by the bins (LOW = on), so
