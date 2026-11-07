@@ -443,6 +443,9 @@ pub struct Board {
     /// The board's own battery multiplier if `set adc.multiplier` calibrates its reading; none =
     /// unsupported.
     pub adc_multiplier: Option<f32>,
+    /// The front end has a switchable LNA: `radio.fem.rxgain` and its `fem_rxgain` custom
+    /// variable are offered.
+    pub fem_lna_controllable: bool,
     /// Altitude of the latest GPS position, in metres.
     pub altitude_m: f64,
     /// The environment sensors' latest readings, Cayenne LPP from channel 2 up (upstream
@@ -472,6 +475,7 @@ impl Default for Board {
             has_gps: false,
             gps: None,
             adc_multiplier: None,
+            fem_lna_controllable: false,
             altitude_m: 0.0,
             sensor_lpp: Vec::new(),
             fw_trial_until: None,

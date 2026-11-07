@@ -675,6 +675,10 @@ impl Companion {
                         self.set_adc_multiplier(core::str::from_utf8(value).unwrap_or("0"));
                         self.write_ok();
                     }
+                    b"fem_rxgain" if self.board.fem_lna_controllable => {
+                        self.set_fem_rxgain(value.first() == Some(&b'1'));
+                        self.write_ok();
+                    }
                     b"fw_root" | b"fw_owner" | b"fw_auto" | b"fw_channel" | b"fw_source" | b"fw_do" => {
                         let name = core::str::from_utf8(name).unwrap_or("");
                         let value = core::str::from_utf8(value).unwrap_or("").trim();
@@ -980,7 +984,7 @@ impl Companion {
     }
 
     /// The custom variables, comma-separated: the GPS's settings, the battery multiplier in use
-    /// (boards that take one), the root keys whose signed releases are installed and the owner
+    /// (boards that take one), the front end's LNA (boards that can switch it), the root keys whose signed releases are installed and the owner
     /// keys that must sign them too (fingerprints separated by spaces; `short`: their first 16
     /// hex digits, when the whole ones do not fit in a frame), and the updates pulled from a
     /// neighbouring repeater.
@@ -999,6 +1003,9 @@ impl Companion {
         }
         if let Some(m) = self.adc_multiplier() {
             vars.push(alloc::format!("adc_multiplier:{m:.3}"));
+        }
+        if self.board.fem_lna_controllable {
+            vars.push(alloc::format!("fem_rxgain:{}", self.prefs.radio_fem_rxgain as u8));
         }
         vars.push(fps("fw_root", &self.prefs.ota_roots));
         vars.push(fps("fw_owner", &self.prefs.ota_owners));
@@ -1025,6 +1032,32 @@ impl Companion {
             true => "OK - using default board multiplier".into(),
             false => format!("OK - multiplier set to {:.3}", self.prefs.adc_multiplier),
         })
+    }
+
+    /// `get/set radio.fem.rxgain` as upstream's `HeltecV4Board::handleCommand`: the front end's
+    /// LNA on boards that can switch it, kept in prefs. Returns `None` when `cmd` is neither.
+    fn fem_rxgain_command(&mut self, cmd: &str) -> Option<String> {
+        let state = match cmd.strip_prefix("set radio.fem.rxgain ") {
+            Some(v) => Some(v),
+            None if cmd == "get radio.fem.rxgain" => None,
+            None => return None,
+        };
+        let onoff = |b: bool| if b { "on" } else { "off" };
+        Some(match state {
+            _ if !self.board.fem_lna_controllable => "Error: unsupported".into(),
+            None => format!("> {}", onoff(self.prefs.radio_fem_rxgain)),
+            Some(v) if v.starts_with("on") || v.starts_with("off") => {
+                self.set_fem_rxgain(v.starts_with("on"));
+                format!("OK - LoRa FEM RX gain {}", onoff(self.prefs.radio_fem_rxgain))
+            }
+            Some(_) => "Error: state must be on or off".into(),
+        })
+    }
+
+    fn set_fem_rxgain(&mut self, on: bool) {
+        self.prefs.radio_fem_rxgain = on;
+        self.effects.fem_lna = Some(on);
+        self.effects.save_prefs = true;
     }
 
     /// Periodic self-advert, as on a repeater: `get/set advert.interval` (local zero-hop, minutes)
@@ -1305,6 +1338,9 @@ impl Companion {
         }
         if let Some(v) = cmd.strip_prefix("set adc.multiplier ") {
             return Some(self.set_adc_multiplier(v).unwrap_or_else(|| "Error: unsupported".into()));
+        }
+        if let Some(r) = self.fem_rxgain_command(cmd) {
+            return Some(r);
         }
         if let Some(r) = self.advert_interval_command(ctx, cmd) {
             return Some(r);

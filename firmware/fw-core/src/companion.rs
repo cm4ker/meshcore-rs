@@ -81,6 +81,10 @@ pub trait Board {
     /// Around each transmission: front-end module, TX LED.
     fn on_tx_start(&mut self) {}
     fn on_tx_end(&mut self) {}
+    /// The front end has a switchable LNA (`set radio.fem.rxgain`).
+    fn lna_controllable(&self) -> bool {
+        false
+    }
     /// External LNA (if the front end has a switchable one).
     fn set_lna(&mut self, _on: bool) {}
     /// Off until the button is pressed (the radio sleeps already, the button is up). May return:
@@ -452,6 +456,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         max_tx_power_dbm: max_tx,
         has_gps: board.has_gps(),
         adc_multiplier: board.adc_multiplier(),
+        fem_lna_controllable: board.lna_controllable(),
         ..Default::default()
     };
     let mut mesh = Mesh::new(ctx, Companion::new(prefs, info));

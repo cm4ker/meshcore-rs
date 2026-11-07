@@ -1164,6 +1164,36 @@ fn adc_multiplier_on_a_companion() {
     assert_eq!(a.app.adc_multiplier(), Some(5.42));
 }
 
+/// `radio.fem.rxgain` as on a repeater: only on boards whose front end can switch its LNA, over
+/// the CLI and as a custom variable, kept in prefs.
+#[test]
+fn fem_rxgain_on_a_companion() {
+    let mut a = companion(1, "Alice");
+    let cli = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
+    assert_eq!(cli(&mut a, "get radio.fem.rxgain"), "Error: unsupported");
+    assert_eq!(cli(&mut a, "set radio.fem.rxgain off"), "Error: unsupported");
+    assert_eq!(cmd(&mut a, b"\x29fem_rxgain:0")[0][0], RESP_CODE_ERR);
+    assert!(!cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..].starts_with(b"fem_rxgain"));
+    assert!(a.app.prefs.radio_fem_rxgain);
+    assert_eq!(a.app.take_effects().fem_lna, None);
+
+    a.app.board.fem_lna_controllable = true;
+    assert_eq!(cli(&mut a, "get radio.fem.rxgain"), "> on");
+    assert!(cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..].starts_with(b"fem_rxgain:1,fw_root:"));
+    assert_eq!(cli(&mut a, "set radio.fem.rxgain off"), "OK - LoRa FEM RX gain off");
+    let fx = a.app.take_effects();
+    assert_eq!(fx.fem_lna, Some(false));
+    assert!(fx.save_prefs);
+    assert_eq!(cli(&mut a, "get radio.fem.rxgain"), "> off");
+    assert_eq!(cli(&mut a, "set radio.fem.rxgain loud"), "Error: state must be on or off");
+    let saved = CompanionPrefs::deserialize(&a.app.prefs.serialize(), 22);
+    assert!(!saved.radio_fem_rxgain);
+
+    assert_eq!(cmd(&mut a, b"\x29fem_rxgain:1")[0][0], RESP_CODE_OK);
+    assert_eq!(a.app.take_effects().fem_lna, Some(true));
+    assert!(cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..].starts_with(b"fem_rxgain:1,"));
+}
+
 /// Periodic self-advert on a companion, as on a repeater: `advert.interval` (local, minutes) and
 /// `flood.advert.interval` (hours), off by default, kept in prefs.
 #[test]

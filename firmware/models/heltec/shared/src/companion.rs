@@ -72,6 +72,10 @@ impl<V: Variant> Board for Heltec<'_, V> {
         self.fem.rx_mode();
     }
 
+    fn lna_controllable(&self) -> bool {
+        self.fem.lna_controllable()
+    }
+
     fn set_lna(&mut self, on: bool) {
         self.fem.set_lna(on);
     }
