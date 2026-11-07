@@ -230,6 +230,7 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
         Body::Network(n) => {
             let (state, ssid, ip) = match &n.wifi {
                 Wifi::Off => ("не настроен", "", ""),
+                Wifi::Disabled { ssid } => ("выключен", ssid.as_str(), ""),
                 Wifi::Connecting { ssid } => ("подключается", ssid.as_str(), ""),
                 Wifi::Up { ssid, ip } => ("подключен", ssid.as_str(), ip.as_str()),
             };

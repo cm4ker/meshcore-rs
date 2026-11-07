@@ -443,6 +443,7 @@ fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64
         Page::Network => {
             let up = |a: &core::sync::atomic::AtomicBool| a.load(Ordering::Relaxed);
             let wifi = match (info.wifi, up(&net::WIFI_UP)) {
+                (false, _) if !p.wifi_enabled && !p.wifi_ssid.is_empty() => Wifi::Disabled { ssid: p.wifi_ssid.clone() },
                 (false, _) => Wifi::Off,
                 (true, false) => Wifi::Connecting { ssid: p.wifi_ssid.clone() },
                 (true, true) => Wifi::Up { ssid: p.wifi_ssid.clone(), ip: app.board.wifi_ip.clone().unwrap_or_default() },
@@ -638,7 +639,7 @@ where
     let mut station: Option<embassy_net::Stack<'static>> = None;
     let bridge_on = mesh.app.prefs.bridge_enabled;
     let mut bridge_radio = false;
-    if !mesh.app.prefs.wifi_ssid.is_empty() {
+    if mesh.app.prefs.wifi_enabled && !mesh.app.prefs.wifi_ssid.is_empty() {
         let seed = (Rng::new().random() as u64) << 32 | Rng::new().random() as u64;
         let params = net::StationParams {
             ssid: mesh.app.prefs.wifi_ssid.clone(),
@@ -1050,6 +1051,8 @@ where
             let online = net::WIFI_UP.load(Ordering::Relaxed) && ip.is_some();
             fwstore::sync(online, &mesh.app.prefs.fw_server);
             mesh.app.board.wifi_ip = ip;
+        } else if !mesh.app.prefs.wifi_enabled && !mesh.app.prefs.wifi_ssid.is_empty() {
+            mesh.app.board.wifi_status = String::from("off (set wifi.enabled on)");
         } else {
             mesh.app.board.wifi_status = String::from("off (set wifi.ssid / wifi.pwd)");
         }

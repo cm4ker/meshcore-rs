@@ -194,6 +194,8 @@ pub struct PowerInfo {
 pub enum Wifi {
     /// No network set.
     Off,
+    /// A network is set, but the station is switched off.
+    Disabled { ssid: String },
     Connecting { ssid: String },
     Up { ssid: String, ip: String },
 }

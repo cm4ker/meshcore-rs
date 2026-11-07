@@ -72,6 +72,8 @@ pub struct NodePrefs {
     /// Wi-Fi station (MQTT observer, LAN OTA).
     pub wifi_ssid: String,
     pub wifi_pwd: String,
+    /// `set wifi.enabled off` keeps the station down without forgetting the network.
+    pub wifi_enabled: bool,
     /// MQTT observer: region code in topics; `UNSET` disables publishing.
     pub mqtt_iata: String,
     /// Enabled brokers, bits as in the C++ firmware: 1 meshcoretel, 8 ommesh (2/4 letsmesh eu/us
@@ -157,6 +159,7 @@ impl Default for NodePrefs {
             dynamic_cr: false,
             wifi_ssid: String::new(),
             wifi_pwd: String::new(),
+            wifi_enabled: true,
             mqtt_iata: "UNSET".into(),
             mqtt_brokers: 0x01,
             mqtt_packets: true,
@@ -281,6 +284,7 @@ impl NodePrefs {
         let _ = writeln!(s, "dyn_cr={}", b(self.dynamic_cr));
         let _ = writeln!(s, "wifi_ssid={}", escape(&self.wifi_ssid));
         let _ = writeln!(s, "wifi_pwd={}", escape(&self.wifi_pwd));
+        let _ = writeln!(s, "wifi_enabled={}", b(self.wifi_enabled));
         let _ = writeln!(s, "mqtt_iata={}", self.mqtt_iata);
         let _ = writeln!(s, "mqtt_brokers={}", self.mqtt_brokers);
         let _ = writeln!(s, "mqtt_packets={}", b(self.mqtt_packets));
@@ -352,6 +356,7 @@ impl NodePrefs {
                 "dyn_cr" => p.dynamic_cr = flag(),
                 "wifi_ssid" => p.wifi_ssid = unescape(v),
                 "wifi_pwd" => p.wifi_pwd = unescape(v),
+                "wifi_enabled" => p.wifi_enabled = flag(),
                 "mqtt_iata" => p.mqtt_iata = v.into(),
                 "mqtt_brokers" => p.mqtt_brokers = u8v(),
                 "mqtt_packets" => p.mqtt_packets = flag(),

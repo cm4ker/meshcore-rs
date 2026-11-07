@@ -294,8 +294,11 @@ pub fn all() -> Vec<(String, View)> {
             with(r(Page::Power), Body::Power(PowerInfo { batt_mv: 3300, powersaving: ps, asleep_pct: 0, uptime_min: 59 })),
         );
     }
-    for (i, wifi) in [Wifi::Off, Wifi::Connecting { ssid: format!("Сеть {long}") }].into_iter().enumerate() {
-        add(&format!("network-{i}"), with(r(Page::Network), Body::Network(NetInfo { wifi, mqtt_on: [0, 4][i], mqtt_up: 0, time_synced: false })));
+    for (i, wifi) in [Wifi::Off, Wifi::Connecting { ssid: format!("Сеть {long}") }, Wifi::Disabled { ssid: format!("Сеть {long}") }]
+        .into_iter()
+        .enumerate()
+    {
+        add(&format!("network-{i}"), with(r(Page::Network), Body::Network(NetInfo { wifi, mqtt_on: [0, 4, 0][i], mqtt_up: 0, time_synced: false })));
     }
     let window = |connected| OtaWindow { name: "MeshCore-OTA-Wan3-SVOBODA-".into(), pin: 482_913, connected, mins_left: 14 };
     add(

@@ -2263,10 +2263,17 @@ impl Repeater {
             };
             self.prefs.fw_serve = on;
             self.save_prefs();
-            return match (on, self.fw_store.is_some(), self.prefs.wifi_ssid.is_empty()) {
+            let no_wifi = if self.prefs.wifi_ssid.is_empty() {
+                Some("not set up (set wifi.ssid)")
+            } else if !self.prefs.wifi_enabled {
+                Some("off (set wifi.enabled on)")
+            } else {
+                None
+            };
+            return match (on, self.fw_store.is_some(), no_wifi) {
                 (true, false, _) => "OK - but this board has no update store".into(),
-                (true, true, true) => "OK - but Wi-Fi is not set up (set wifi.ssid): nothing to hand on yet".into(),
-                (true, true, false) => format!("OK - updates from {} handed on to neighbours", self.prefs.fw_server),
+                (true, true, Some(why)) => format!("OK - but Wi-Fi is {why}: nothing to hand on yet"),
+                (true, true, None) => format!("OK - updates from {} handed on to neighbours", self.prefs.fw_server),
                 (false, _, _) => "OK - updates not handed on".into(),
             };
         }
@@ -2654,6 +2661,7 @@ impl Repeater {
         let onoff = |b: bool| if b { "on" } else { "off" };
         let r = match cfg.trim() {
             "wifi.ssid" => format!("> {}", p.wifi_ssid),
+            "wifi.enabled" => format!("> {}", onoff(p.wifi_enabled)),
             "wifi.status" => format!("> {}", self.board.wifi_status),
             "mqtt.status" => format!("> {}", self.board.mqtt_status),
             "mqtt.iata" => format!("> {}", p.mqtt_iata),
@@ -2685,6 +2693,14 @@ impl Repeater {
             }
             "wifi.pwd" => {
                 p.wifi_pwd = truncate_str(value, 65);
+                RESTART.into()
+            }
+            "wifi.enabled" => {
+                p.wifi_enabled = match value.trim() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Some("Err - on or off".into()),
+                };
                 RESTART.into()
             }
             "mqtt.iata" => {

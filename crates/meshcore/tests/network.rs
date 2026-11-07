@@ -716,6 +716,24 @@ fn adc_multiplier_calibrates_the_battery_reading() {
     assert_eq!(r.app.adc_multiplier(), Some(1.815));
 }
 
+/// `wifi.enabled off` keeps the network for later, on by default and for prefs saved before it.
+#[test]
+fn wifi_switches_off_without_forgetting_the_network() {
+    let mut r = repeater(1);
+    let mut cmd = |c: &str| r.app.handle_command(&mut r.ctx, 0, c);
+    assert_eq!(cmd("get wifi.enabled"), "> on");
+    assert_eq!(cmd("set wifi.ssid Home"), "OK - rebooting to apply");
+    assert_eq!(cmd("set wifi.enabled 0"), "Err - on or off");
+    assert_eq!(cmd("set wifi.enabled off"), "OK - rebooting to apply");
+    assert_eq!(cmd("get wifi.enabled"), "> off");
+    assert_eq!(cmd("get wifi.ssid"), "> Home");
+    assert!(r.app.take_effects().network_changed);
+    let saved = NodePrefs::deserialize(&r.app.prefs.serialize());
+    assert!(!saved.wifi_enabled);
+    assert_eq!(saved.wifi_ssid, "Home");
+    assert!(NodePrefs::deserialize("wifi_ssid=Home\n").wifi_enabled);
+}
+
 /// Log `c` in with `password` (zero-hop direct), then ask for telemetry with the inverted
 /// permission mask byte `mask`; the reply's CayenneLPP records.
 fn telemetry(r: &mut Mesh<Repeater>, c: &mut Mesh<Client>, password: &[u8], mask: u8) -> Vec<u8> {

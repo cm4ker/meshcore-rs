@@ -533,6 +533,7 @@ meshcore-cli -s COM4 cli "fw"
 ```
 set wifi.ssid <сеть>
 set wifi.pwd <пароль>
+set wifi.enabled off         # выключить Wi-Fi, не забывая сеть; on — включить обратно
 set mqtt.iata OMS            # код региона в топиках; UNSET — не публиковать
 set mqtt.ommesh on           # meshcoretel включён по умолчанию; ещё letsmesh-eu, letsmesh-us; не больше 3
 set mqtt.tx on               # публиковать и свои передачи
