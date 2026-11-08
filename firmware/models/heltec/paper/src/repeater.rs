@@ -121,8 +121,10 @@ impl RepeaterBoard for Paper {
         self.button.is_low()
     }
 
+    /// Never: the USB-C port leads to the CP2102, and the chip's own USB pins (19, 20) switch and
+    /// read the battery divider, which its USB peripheral may take for a host's frames.
     fn usb_host_active(&mut self) -> bool {
-        self.sleeper.usb_host_active()
+        false
     }
 
     fn power_summary(&mut self) -> String {

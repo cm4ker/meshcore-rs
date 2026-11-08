@@ -761,7 +761,8 @@ where
         (true, None) => PAGES_SINGLE_SLOT,
     };
     let mut ui = Ui::new(pages).with_home_action(Action::PowerOff);
-    if !board.always_on() {
+    let always_on = board.always_on();
+    if !always_on {
         ui = ui.with_screen_timeout(SCREEN_ON_MS, now_ms());
     }
     let mut ui_button = if board.button_down() { Button::held() } else { Button::default() };
@@ -838,14 +839,15 @@ where
         }
 
         // `powersaving on`: light sleep until the next timer or a packet, when nothing needs the
-        // chip awake (radios other than LoRa, a console, queued packets)
+        // chip awake (radios other than LoRa, a console, queued packets, a lit screen: an e-paper
+        // is never dark, and keeps its image through the sleep)
         if mesh.app.ota.requests != ota_requests {
             (ota_requests, ota_seen) = (mesh.app.ota.requests, now);
         }
         let usb_host = board.usb_host_active();
         if mesh.app.prefs.powersaving_enabled
             && now >= awake_until
-            && !ui.screen_on(now)
+            && (always_on || !ui.screen_on(now))
             && !usb_host
             && station.is_none()
             && wifi.is_some()
