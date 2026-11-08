@@ -147,7 +147,7 @@ impl Default for NodePrefs {
             agc_reset_interval: 0,
             owner_info: String::new(),
             rx_boosted_gain: true,
-            radio_fem_rxgain: true,
+            radio_fem_rxgain: false, // the V4.3 KCT8103L LNA hears better bypassed (#6); upstream: on
             path_hash_mode: 0,
             loop_detect: LOOP_DETECT_MINIMAL,
             cad_enabled: false,

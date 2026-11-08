@@ -116,7 +116,7 @@ impl Default for CompanionPrefs {
             autoadd_config: 0,
             autoadd_max_hops: 0,
             rx_boosted_gain: true,
-            radio_fem_rxgain: true,
+            radio_fem_rxgain: false, // the V4.3 KCT8103L LNA hears better bypassed (#6); upstream: on
             path_hash_mode: 0,
             cad_enabled: false,
             interference_threshold: 0,

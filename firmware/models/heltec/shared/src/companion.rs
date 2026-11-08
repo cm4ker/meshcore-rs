@@ -176,7 +176,7 @@ pub async fn run<V: Variant>(spawner: Spawner, build_epoch: &str, build_date: &'
     // the LNA setting is applied from the stored settings once they are loaded
     let fem_pins =
         FemPins { ldo: p.GPIO7.degrade(), csd: p.GPIO2.degrade(), cps: p.GPIO46.degrade(), ctx: p.GPIO5.degrade() };
-    let fem = V::front_end(fem_pins, true).await;
+    let fem = V::front_end(fem_pins, false).await;
     let spi = Spi::new(p.SPI2, SpiConfig::default().with_frequency(Rate::from_mhz(8)))
         .unwrap()
         .with_sck(p.GPIO9)
