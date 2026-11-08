@@ -119,14 +119,39 @@ class StreamLink(Link):
         self.writer.close()
 
 
+async def ota_status(link, tries=4):
+    """OTA_STATUS, asked again if it goes unanswered: a device behind a USB-serial bridge that is
+    busy writing flash loses bytes, its frame parser then takes a stray '<' in the chunks that
+    follow for a frame and swallows what comes until the link is quiet for half a second, the
+    request too."""
+    for i in range(tries):
+        try:
+            return await link.request(bytes([OTA_STATUS, 0, 0]), timeout=5)
+        except RuntimeError:
+            if i == tries - 1:
+                raise
+
+
 class SerialLink(StreamLink):
     @classmethod
     async def open(cls, port):
+        import serial
+        import serial.tools.list_ports
         import serial_asyncio_fast as serial_asyncio
-        reader, writer = await serial_asyncio.open_serial_connection(url=port, baudrate=115200)
-        # as the meshcore library does: DTR on, RTS off (RTS alone resets an ESP32 on USB-Serial-JTAG)
-        writer.transport.serial.dtr = True
-        writer.transport.serial.rts = False
+        # as the meshcore library does: DTR on, RTS off (RTS alone resets an ESP32 on USB-Serial-JTAG).
+        # Behind a CP210x bridge (Heltec V3, Wireless Paper) both go to the auto-reset circuit:
+        # RTS pulls EN low and DTR GPIO0, and esptool's way into the bootloader is just a reset
+        # released with DTR on, so there both stay off from the moment the port opens.
+        cp210x = any(p.device == port and p.vid == 0x10C4 for p in serial.tools.list_ports.comports())
+        ser = serial.serial_for_url(port, baudrate=115200, do_not_open=True)
+        ser.dtr = not cp210x
+        ser.rts = False
+        ser.open()
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        transport = serial_asyncio.SerialTransport(loop, protocol, ser)
+        writer = asyncio.StreamWriter(transport, protocol, reader, loop)
         # writes that wait until they are done: the transport's non-blocking ones on Windows reuse
         # one OVERLAPPED, so a write issued while the device is busy (erasing flash) and not taking
         # data cuts the end off the one still pending
@@ -334,11 +359,11 @@ async def main():
                 await link.send(bytes([OTA_DATA]) + body + struct.pack("<I", zlib.crc32(body)))
                 if round_no == 0 and k % 500 == 499:
                     # asking for the status also keeps a serial link from queueing far ahead
-                    reply = await link.request(bytes([OTA_STATUS, 0, 0]))
+                    reply = await ota_status(link)
                     received = struct.unpack_from("<H", reply, 1)[0] if not reply[0] else k + 1
                     rate = received * CHUNK / max(time.time() - start, 1e-3) / 1024
                     log(f"device has {received}/{total} chunks ({rate:.1f} KiB/s)")
-            reply = await link.request(bytes([OTA_STATUS, 0, 0]))
+            reply = await ota_status(link)
             if reply[0]:
                 sys.exit(f"status failed: {ERRORS.get(reply[0], reply[0])}")
             received, tot, n = struct.unpack_from("<HHB", reply, 1)
