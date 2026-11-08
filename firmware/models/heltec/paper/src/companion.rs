@@ -6,20 +6,14 @@ use alloc::rc::Rc;
 use core::cell::RefCell;
 
 use embassy_executor::Spawner;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer, with_timeout};
-use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin, Attenuation};
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
-use esp_hal::peripherals::{ADC2, GPIO20};
 use esp_hal::rng::{Trng, TrngSource};
-use esp_hal::spi::Mode as SpiMode;
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
-use esp_hal::Blocking;
 use esp_println::println;
 use esp_storage::FlashStorage;
 use heltec_shared::power::Sleeper;
@@ -30,39 +24,13 @@ use meshcore::radio::RadioParams;
 use meshcore_fw::companion_app::{self, Board, Config, Hardware, Serial};
 use meshcore_ui::{Page, View};
 
-use crate::epaper::{self, Epaper, SCREEN};
+use crate::battery::{ADC_MULTIPLIER, Battery};
+use crate::epaper::{self, OFF_DRAWN, SCREEN};
 
 const WATCHDOG_SECS: u64 = 30;
 const MAX_TX_POWER_DBM: i8 = 22;
 /// The on-device interface, as the V3's without the GPS page (no GPS header on this board).
 const PAGES: &[Page] = &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Pull, Page::Advert];
-
-/// The battery divider, about 1:1 as Meshtastic has it for this board (upstream's `ADC_MULTIPLIER`
-/// of 8.4 reads several times the battery), over the calibrated ADC; `get adc.multiplier` shows it.
-const ADC_MULTIPLIER: f32 = 2.0;
-
-/// The e-paper task has drawn the "off" page.
-pub static OFF_DRAWN: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-
-/// Battery voltage through the divider on GPIO20, switched on by GPIO19 low.
-struct Battery {
-    adc: Adc<'static, ADC2<'static>, Blocking>,
-    pin: AdcPin<GPIO20<'static>, ADC2<'static>, AdcCalCurve<ADC2<'static>>>,
-    ctrl: Output<'static>,
-}
-
-impl Battery {
-    async fn read_mv(&mut self) -> u16 {
-        self.ctrl.set_low();
-        Timer::after_millis(10).await;
-        let mut sum = 0u32;
-        for _ in 0..8 {
-            sum += self.adc.read_blocking(&mut self.pin) as u32;
-        }
-        self.ctrl.set_high();
-        ((sum / 8) as f32 * ADC_MULTIPLIER) as u16
-    }
-}
 
 struct Paper {
     spawner: Spawner,
@@ -103,7 +71,7 @@ impl Board for Paper {
     }
 
     async fn battery_mv(&mut self) -> u16 {
-        self.battery.read_mv().await
+        self.battery.read_mv(None).await
     }
 
     fn adc_multiplier(&self) -> Option<f32> {
@@ -188,26 +156,9 @@ pub async fn run(spawner: Spawner, build_epoch: &str, build_date: &'static str) 
             trng.read(&mut entropy);
         }
     }
-    let mut adc_cfg = AdcConfig::new();
-    let pin = adc_cfg.enable_pin_with_cal::<_, AdcCalCurve<ADC2>>(p.GPIO20, Attenuation::_11dB);
-    let battery = Battery {
-        adc: Adc::new(p.ADC2, adc_cfg),
-        pin,
-        ctrl: Output::new(p.GPIO19, Level::High, OutputConfig::default()),
-    };
+    let battery = Battery::new(p.ADC2, p.GPIO20, p.GPIO19);
 
-    let epd_spi = Spi::new(p.SPI3, SpiConfig::default().with_frequency(Rate::from_mhz(4)).with_mode(SpiMode::_0))
-        .unwrap()
-        .with_sck(p.GPIO3)
-        .with_mosi(p.GPIO2);
-    let epd = Epaper {
-        spi: epd_spi,
-        cs: Output::new(p.GPIO4, Level::High, OutputConfig::default()),
-        dc: Output::new(p.GPIO5, Level::High, OutputConfig::default()),
-        reset: Output::new(p.GPIO6, Level::High, OutputConfig::default()),
-        busy: Input::new(p.GPIO7, InputConfig::default().with_pull(Pull::None)),
-    };
-    spawner.spawn(epaper::task(epd).unwrap());
+    epaper::start(spawner, p.SPI3, p.GPIO3, p.GPIO2, p.GPIO4, p.GPIO5, p.GPIO6, p.GPIO7);
 
     let board = Paper {
         spawner,

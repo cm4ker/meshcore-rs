@@ -59,7 +59,7 @@ jobs:
         working-directory: firmware/models/promicro/installer
 
   esp32s3:
-    name: Heltec V4 and V3 (ESP32-S3)
+    name: Heltec V4, V3 and Wireless Paper (ESP32-S3)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -75,7 +75,7 @@ jobs:
           ldproxy: false
       # one espflash for every run: another version may lay the same program out differently
       - run: cargo install espflash --version 4.6.0 --locked
-      - name: Heltec V4 and V3
+      - name: Heltec V4, V3 and Wireless Paper
         working-directory: firmware/models/heltec
         run: |
           mkdir -p ../../../content
@@ -83,6 +83,7 @@ jobs:
             for role in repeater companion; do
               espflash save-image --chip esp32s3 --flash-size 16mb --partition-table v4/partitions.csv target/xtensa-esp32s3-none-elf/release/heltec-v4-$role "$1/heltec-v4-$role.bin"
               espflash save-image --chip esp32s3 --flash-size 8mb --partition-table v3/partitions.csv target/xtensa-esp32s3-none-elf/release/heltec-v3-$role "$1/heltec-v3-$role.bin"
+              espflash save-image --chip esp32s3 --flash-size 8mb --partition-table paper/partitions.csv target/xtensa-esp32s3-none-elf/release/heltec-paper-$role "$1/heltec-paper-$role.bin"
             done
           }
           cargo build --locked --release

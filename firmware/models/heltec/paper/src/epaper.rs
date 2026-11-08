@@ -6,17 +6,21 @@
 //! The board came with two panels (upstream's `E213Display`, after todd-herbert's
 //! heltec-eink-modules): V1.1's LCMEN2R13EFC1 (a Fitipower controller, BUSY low while busy, its
 //! partial refresh from the waveforms below) and V1.1.1's E0213A367 (Solomon SSD1682, BUSY high
-//! while busy, both refreshes from the panel's own waveforms). Held in reset, the controller
-//! shows which by its BUSY level.
+//! while busy, both refreshes from the panel's own waveforms with a pulse added, see
+//! [`Driver::load_waveform`]). Held in reset, the controller shows which by its BUSY level.
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer, with_deadline, with_timeout};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
+use embassy_executor::Spawner;
 use esp_hal::Blocking;
-use esp_hal::gpio::{Input, Output};
-use esp_hal::spi::master::Spi;
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
+use esp_hal::peripherals::{GPIO2, GPIO3, GPIO4, GPIO5, GPIO6, GPIO7, SPI3};
+use esp_hal::spi::Mode as SpiMode;
+use esp_hal::spi::master::{Address, Command, Config as SpiConfig, DataMode, Spi};
+use esp_hal::time::Rate;
 use meshcore_ui::layout::Class;
 use meshcore_ui::refresh::epaper::Epaper as Policy;
 use meshcore_ui::{Body, View};
@@ -29,6 +33,8 @@ const ROW_BYTES: usize = 16;
 const ROWS: usize = 250;
 
 pub static SCREEN: Signal<CriticalSectionRawMutex, View> = Signal::new();
+/// The "off" page is on the screen.
+pub static OFF_DRAWN: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// The partial refresh of V1.1's panel (heltec-eink-modules' LCMEN2R13EFC1, after GxEPD2's
 /// GDEW0154M09): VCOM, then white to white, black to white, white to black, black to black.
@@ -50,6 +56,43 @@ const fn lut(a: [u8; 7], b: [u8; 7]) -> [u8; 56] {
         i += 1;
     }
     t
+}
+
+/// The SSD1682's waveform register (0x32 to write, 0x33 to read), laid out as the SSD1680's: for
+/// each of 12 groups the voltage of its four phases (two bits each) per transition (black to black,
+/// black to white, white to black, white to white, then VCOM), from byte 60 the groups' timing
+/// (frames of phases A and B, a repeat, of C and D, a repeat, repeats of the group), then frame
+/// rates and gate scan.
+const WAVEFORM: usize = 153;
+const TIMING: usize = 60;
+/// A group in which each pixel is driven towards its own colour: VSH1 (0b01) draws black, VSL
+/// (0b10) white.
+const HOLD: [u8; 5] = [0x40, 0x80, 0x40, 0x80, 0x00];
+
+/// Appends a [`HOLD`] group to the panel's own waveform: a frame per 15 that the waveform drives.
+/// Its partial waveform drives only the pixels that change and leaves the rest at VCOM, which
+/// darkens the white a little each time (filmed: from 154 to 141 of the camera's levels in ten
+/// refreshes, the black untouched); with the pulse the white and the black hold through any number
+/// of refreshes, and its full waveform ends the darker and the whiter for it. None if the waveform
+/// read back has no groups (the read failed) or no room.
+fn with_hold(mut w: [u8; WAVEFORM]) -> Option<[u8; WAVEFORM]> {
+    let mut frames = 0u32;
+    for g in 0..12 {
+        let t = &w[TIMING + g * 7..TIMING + g * 7 + 7];
+        if t.iter().any(|&b| b != 0) {
+            frames += (t[0] as u32 + t[1] as u32 + t[3] as u32 + t[4] as u32) * (t[6] as u32 + 1);
+            continue;
+        }
+        if frames == 0 {
+            return None;
+        }
+        for (i, v) in HOLD.iter().enumerate() {
+            w[i * 12 + g] = *v;
+        }
+        w[TIMING + g * 7] = frames.div_ceil(15) as u8;
+        return Some(w);
+    }
+    None
 }
 
 /// A 1-bit frame in the controller's layout (bit 7 leftmost, 1 = white), drawn turned as
@@ -105,11 +148,32 @@ enum Mode {
 }
 
 pub struct Epaper<'d> {
-    pub spi: Spi<'d, Blocking>,
-    pub cs: Output<'d>,
-    pub dc: Output<'d>,
-    pub reset: Output<'d>,
-    pub busy: Input<'d>,
+    spi: Spi<'d, Blocking>,
+    cs: Output<'d>,
+    dc: Output<'d>,
+    reset: Output<'d>,
+    busy: Input<'d>,
+}
+
+/// The screen on its pins (SCK 3, data 2, CS 4, DC 5, RST 6, BUSY 7), drawn by its own task from
+/// what [`SCREEN`] is given.
+#[allow(clippy::too_many_arguments)]
+pub fn start(
+    spawner: Spawner, spi: SPI3<'static>, sck: GPIO3<'static>, data: GPIO2<'static>, cs: GPIO4<'static>,
+    dc: GPIO5<'static>, reset: GPIO6<'static>, busy: GPIO7<'static>,
+) {
+    let spi = Spi::new(spi, SpiConfig::default().with_frequency(Rate::from_mhz(4)).with_mode(SpiMode::_0))
+        .unwrap()
+        .with_sck(sck)
+        .with_sio0(data);
+    let io = Epaper {
+        spi,
+        cs: Output::new(cs, Level::High, OutputConfig::default()),
+        dc: Output::new(dc, Level::High, OutputConfig::default()),
+        reset: Output::new(reset, Level::High, OutputConfig::default()),
+        busy: Input::new(busy, InputConfig::default().with_pull(Pull::None)),
+    };
+    spawner.spawn(task(io).unwrap());
 }
 
 struct Driver<'d> {
@@ -140,15 +204,45 @@ impl<'d> Driver<'d> {
         };
     }
 
+    /// Over the one data line, which the controller also answers on (its 3-wire mode).
     fn command(&mut self, cmd: u8, data: &[u8]) {
         self.io.cs.set_low();
         self.io.dc.set_low();
-        let _ = self.io.spi.write(&[cmd]);
+        let _ = self.io.spi.half_duplex_write(DataMode::Single, Command::None, Address::None, 0, &[cmd]);
         if !data.is_empty() {
             self.io.dc.set_high();
-            let _ = self.io.spi.write(data);
+            let _ = self.io.spi.half_duplex_write(DataMode::Single, Command::None, Address::None, 0, data);
         }
         self.io.cs.set_high();
+    }
+
+    /// Reads what `cmd` answers into `out`.
+    fn read(&mut self, cmd: u8, out: &mut [u8]) {
+        self.io.cs.set_low();
+        self.io.dc.set_low();
+        let _ = self.io.spi.half_duplex_write(DataMode::Single, Command::None, Address::None, 0, &[cmd]);
+        self.io.dc.set_high();
+        let _ = self.io.spi.half_duplex_read(DataMode::Single, Command::None, Address::None, 0, out);
+        self.io.cs.set_high();
+    }
+
+    /// SSD1682: loads the panel's own waveform for its temperature (the colder, the longer: 15
+    /// frames for a partial refresh at 25 °C, 36 at 10 °C and below), with [`HOLD`] appended.
+    /// Whether it is in the register: if not, the refresh loads the panel's own as it is.
+    async fn load_waveform(&mut self, mode: Mode) -> bool {
+        // clock on, the temperature and the waveform of display mode 1 (full) or 2, clock off
+        self.command(0x22, &[if mode == Mode::Full { 0xB1 } else { 0xB9 }]);
+        self.command(0x20, &[]);
+        self.wait_idle().await;
+        let mut w = [0u8; WAVEFORM];
+        self.read(0x33, &mut w);
+        match with_hold(w) {
+            Some(w) => {
+                self.command(0x32, &w);
+                true
+            }
+            None => false,
+        }
     }
 
     /// A hardware reset and the controller set up for `mode` (heltec-eink-modules' `reset`,
@@ -204,7 +298,8 @@ impl<'d> Driver<'d> {
         }
     }
 
-    async fn refresh(&mut self, mode: Mode) {
+    /// `own`: the SSD1682's waveform register holds [`load_waveform`](Self::load_waveform)'s.
+    async fn refresh(&mut self, mode: Mode, own: bool) {
         match self.panel {
             Panel::Fc1 => {
                 self.command(0x04, &[]); // power on
@@ -214,7 +309,15 @@ impl<'d> Driver<'d> {
                 self.command(0x02, &[]); // power off
             }
             Panel::Ssd1682 => {
-                self.command(0x22, &[if mode == Mode::Full { 0xF7 } else { 0xFF }]);
+                // clock and voltages on, [the temperature and the waveform loaded], display mode 1
+                // (full) or 2, voltages and clock off
+                let seq = match (mode, own) {
+                    (Mode::Full, true) => 0xC7,
+                    (Mode::Fast, true) => 0xCF,
+                    (Mode::Full, false) => 0xF7,
+                    (Mode::Fast, false) => 0xFF,
+                };
+                self.command(0x22, &[seq]);
                 self.command(0x20, &[]);
                 self.wait_idle().await;
             }
@@ -227,11 +330,12 @@ impl<'d> Driver<'d> {
         if self.mode != Some(mode) {
             self.setup(mode).await;
         }
+        let own = self.panel == Panel::Ssd1682 && self.load_waveform(mode).await;
         self.write(frame, true);
         if full {
             self.write(frame, false);
         }
-        self.refresh(mode).await;
+        self.refresh(mode, own).await;
         if !full {
             // the base of the next fast refresh
             self.write(frame, false);
@@ -254,11 +358,11 @@ fn now_ms() -> u64 {
 }
 
 #[embassy_executor::task]
-pub async fn task(mut io: Epaper<'static>) {
+async fn task(mut io: Epaper<'static>) {
     let panel = io.detect().await;
     log::info!("e-paper: {panel:?}");
     let mut epd = Driver { io, panel, mode: None };
-    let mut policy = Policy::ghosting();
+    let mut policy = Policy::default();
     loop {
         let next = match policy.clean_at() {
             Some(at) => with_deadline(Instant::from_millis(at), SCREEN.wait()).await.ok(),
@@ -290,7 +394,7 @@ pub async fn task(mut io: Epaper<'static>) {
         epd.show(&render(&view), full).await;
         policy.drawn(view, full, now_ms());
         if off {
-            crate::companion::OFF_DRAWN.signal(());
+            OFF_DRAWN.signal(());
         }
     }
 }

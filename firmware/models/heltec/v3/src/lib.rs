@@ -6,15 +6,10 @@
 #![no_std]
 
 use embassy_executor::Spawner;
-use embassy_time::Timer;
-use esp_hal::Blocking;
 use esp_hal::gpio::{Input, InputConfig, Level, Pull};
 use esp_hal::peripherals::GPIO37;
-use esp_hal::rtc_cntl::{WakeupSource, wakeup_cause};
-use esp_hal::uart::{Config, UartRx, WakeupConfig};
-use heltec_shared::console::ConsoleRx;
+use esp_hal::uart::{Config, UartRx};
 use heltec_shared::{ConsolePins, FemPins, FrontEnd, Variant};
-use log::warn;
 use meshcore_fw::companion_app::Serial;
 
 pub struct HeltecV3;
@@ -38,15 +33,11 @@ impl Variant for HeltecV3 {
 
     /// The USB port is a CP2102 bridge to UART0 (TX 43, RX 44); input on it wakes the chip.
     fn start_console(spawner: Spawner, pins: ConsolePins) {
-        let mut rx = UartRx::new(pins.uart0, Config::default()).unwrap().with_rx(pins.rx);
-        if let Err(e) = rx.enable_wakeup(&WakeupConfig::default()) {
-            warn!("console: no wake from sleep: {e}");
-        }
-        spawner.spawn(console(Uart0(rx)).unwrap());
+        heltec_shared::console::start_uart0(spawner, pins.uart0, pins.rx);
     }
 
     fn console_woke() -> bool {
-        wakeup_cause().contains(WakeupSource::Uart0)
+        heltec_shared::console::uart0_woke()
     }
 
     /// Over the CP2102 too: the chip's own USB port leads nowhere on the V3.
@@ -74,24 +65,4 @@ impl FrontEnd for NoFem {
     fn set_lna(&mut self, _on: bool) {}
 
     fn power_off(&mut self) {}
-}
-
-/// The console's UART, polled: its FIFO holds what came while the task slept.
-struct Uart0(UartRx<'static, Blocking>);
-
-impl ConsoleRx for Uart0 {
-    async fn read(&mut self, buf: &mut [u8]) -> usize {
-        loop {
-            let n = self.0.read_buffered(buf).unwrap_or(0);
-            if n > 0 {
-                return n;
-            }
-            Timer::after_millis(20).await;
-        }
-    }
-}
-
-#[embassy_executor::task]
-async fn console(rx: Uart0) {
-    heltec_shared::console::run(rx).await
 }

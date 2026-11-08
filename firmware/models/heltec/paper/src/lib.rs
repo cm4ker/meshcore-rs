@@ -12,5 +12,7 @@
 
 extern crate alloc;
 
+pub mod battery;
 pub mod companion;
 pub mod epaper;
+pub mod repeater;

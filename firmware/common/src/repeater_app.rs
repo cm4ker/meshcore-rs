@@ -223,6 +223,11 @@ pub trait RepeaterBoard {
     fn gps_latest(&self) -> Option<GpsReading>;
 
     // ---- screen (a no-op board reports `has_screen() == false` and need not implement these)
+    /// A screen that keeps its image unpowered (e-paper): it never goes dark, and the board decides
+    /// when to redraw what [`screen_show`](Self::screen_show) hands it.
+    fn always_on(&self) -> bool {
+        false
+    }
     fn screen_is_on(&self) -> bool {
         false
     }
@@ -755,7 +760,10 @@ where
         (true, Some(_)) => PAGES,
         (true, None) => PAGES_SINGLE_SLOT,
     };
-    let mut ui = Ui::new(pages).with_screen_timeout(SCREEN_ON_MS, now_ms()).with_home_action(Action::PowerOff);
+    let mut ui = Ui::new(pages).with_home_action(Action::PowerOff);
+    if !board.always_on() {
+        ui = ui.with_screen_timeout(SCREEN_ON_MS, now_ms());
+    }
     let mut ui_button = if board.button_down() { Button::held() } else { Button::default() };
     let mut screen = ScreenPolicy::default();
     let (mut next_view, mut next_oled_try, mut oled_failures) = (0u64, 0u64, 0u8);

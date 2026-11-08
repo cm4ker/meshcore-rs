@@ -4,8 +4,14 @@
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
-use embassy_time::Instant;
+use embassy_executor::Spawner;
+use embassy_time::{Instant, Timer};
+use esp_hal::Blocking;
+use esp_hal::peripherals::{GPIO44, UART0};
+use esp_hal::rtc_cntl::{WakeupSource, wakeup_cause};
+use esp_hal::uart::{Config, UartRx, WakeupConfig};
 use esp_println::print;
+use log::warn;
 use meshcore_fw::repeater_app::{CLI_LINES, CONSOLE_WOKE_MS};
 
 /// Input closer than this to the wake, or to the input before it, is the rest of the cut line.
@@ -23,6 +29,41 @@ impl ConsoleRx for meshcore_fw::usb::Input {
     async fn read(&mut self, buf: &mut [u8]) -> usize {
         meshcore_fw::usb::Input::read(self, buf).await
     }
+}
+
+/// UART0 (RX 44) behind a CP2102 bridge, the console of the boards whose USB port is one (the V3,
+/// the Wireless Paper): polled, its FIFO holds what came while the task slept.
+struct Uart0(UartRx<'static, Blocking>);
+
+impl ConsoleRx for Uart0 {
+    async fn read(&mut self, buf: &mut [u8]) -> usize {
+        loop {
+            let n = self.0.read_buffered(buf).unwrap_or(0);
+            if n > 0 {
+                return n;
+            }
+            Timer::after_millis(20).await;
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn uart0_console(rx: Uart0) {
+    run(rx).await
+}
+
+/// The console on UART0; input on it wakes the chip from light sleep ([`uart0_woke`]).
+pub fn start_uart0(spawner: Spawner, uart0: UART0<'static>, rx: GPIO44<'static>) {
+    let mut rx = UartRx::new(uart0, Config::default()).unwrap().with_rx(rx);
+    if let Err(e) = rx.enable_wakeup(&WakeupConfig::default()) {
+        warn!("console: no wake from sleep: {e}");
+    }
+    spawner.spawn(uart0_console(Uart0(rx)).unwrap());
+}
+
+/// Input on UART0 woke the chip.
+pub fn uart0_woke() -> bool {
+    wakeup_cause().contains(WakeupSource::Uart0)
 }
 
 /// Read the console, echo, and hand complete lines to the main loop.

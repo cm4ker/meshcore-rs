@@ -6,6 +6,10 @@ rust-version.workspace = true
 version.workspace      = true
 
 [[bin]]
+name = "heltec-paper-repeater"
+path = "./src/bin/repeater.rs"
+
+[[bin]]
 name = "heltec-paper-companion"
 path = "./src/bin/companion.rs"
 
