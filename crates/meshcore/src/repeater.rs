@@ -1846,9 +1846,9 @@ impl Repeater {
     }
 
     /// `gps …` CLI (upstream `CommonCLI`, `#if ENV_INCLUDE_GPS`). `gps advert` is a bare preference
-    /// and answers without a receiver; the rest need one (`board.has_gps`). Snapshot-only: a
-    /// repeater is a fixed node, so `setloc` and `sync` act once on the latest fix rather than
-    /// tracking the GPS continuously.
+    /// and answers without a receiver; the rest need one (`board.has_gps`). `setloc` acts once on
+    /// the latest fix (a repeater is a fixed node); the firmware already sets the clock from the
+    /// GPS now and then, and `sync` forces the latest fix's time in.
     fn gps_command(&mut self, ctx: &mut MeshCtx, arg: &str) -> String {
         if let Some(rest) = arg.strip_prefix("advert") {
             let rest = rest.trim();
@@ -1878,12 +1878,12 @@ impl Repeater {
                 self.save_prefs();
                 "ok".into()
             }
-            "sync" => match self.board.gps.and_then(|g| g.time) {
-                Some(t) if t > ctx.current_time() => {
+            // the receiver's clock is only right once it has a fix; then it wins either way
+            "sync" => match self.board.gps.filter(|g| g.valid).and_then(|g| g.time) {
+                Some(t) => {
                     ctx.set_current_time(t);
                     "ok".into()
                 }
-                Some(_) => "ERR: clock cannot go backwards".into(),
                 None => "no fix".into(),
             },
             "setloc" => match self.board.gps.filter(|g| g.valid) {
@@ -1898,7 +1898,10 @@ impl Repeater {
             "diag" => {
                 let req = self.prefs.gps_enabled as u8;
                 match self.board.gps {
-                    Some(g) => format!("req:{req} fix:{} sats:{} inview:{}", g.valid as u8, g.satellites, g.in_view),
+                    Some(g) => format!(
+                        "req:{req} fix:{} sats:{} inview:{} heard:{} snr:{}",
+                        g.valid as u8, g.satellites, g.in_view, g.heard, g.best_snr
+                    ),
                     None => format!("req:{req} no reading"),
                 }
             }

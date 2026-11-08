@@ -73,6 +73,10 @@ const OTA_IDLE_MS: u64 = 300_000;
 const TRIAL_HEALTHY_MS: u64 = 120_000;
 /// Wear-friendly: two sectors alternate, ~24 erases per sector per day.
 const CLOCK_SAVE_INTERVAL_MS: u64 = 30 * 60 * 1000;
+/// The clock follows the GPS this often while it has a fix (upstream `TIME_SYNC_INTERVAL`).
+const GPS_TIME_SYNC_MS: u64 = 30 * 60 * 1000;
+/// A fix that has held this long is trusted for the time (upstream waits out three checks).
+const GPS_FIX_SETTLE_MS: u64 = 3000;
 
 /// The screen's pages; the update page only with two firmware slots.
 const PAGES: &[Page] = &[
@@ -766,6 +770,7 @@ where
     let mut next_agc_reset = 0u64;
     let mut next_clock_save = now_ms() + CLOCK_SAVE_INTERVAL_MS;
     let mut last_clock = mesh.ctx.current_time();
+    let (mut gps_fix_since, mut next_gps_time) = (None::<u64>, 0u64);
     let mut reboot_at: Option<u64> = None;
     let mut power_off_at: Option<u64> = None;
     let mut ble_until: Option<u64> = None;
@@ -949,6 +954,24 @@ where
         mesh.app.board.gps = gps_reading;
         if let Some(r) = room.as_mut() {
             r.app.board.gps = gps_reading;
+        }
+        // the clock from the GPS, either way, once a fix has held for a moment, and again every
+        // half hour (upstream `MicroNMEALocationProvider::loop`)
+        match gps_reading.filter(|g| g.valid) {
+            Some(g) => {
+                let since = *gps_fix_since.get_or_insert(now);
+                if now >= since + GPS_FIX_SETTLE_MS
+                    && now >= next_gps_time
+                    && let Some(t) = g.time
+                {
+                    next_gps_time = now + GPS_TIME_SYNC_MS;
+                    if t.abs_diff(mesh.ctx.current_time()) > 2 {
+                        info!("GPS: clock set to {t}");
+                        mesh.ctx.set_current_time(t);
+                    }
+                }
+            }
+            None => gps_fix_since = None,
         }
 
         // periodic receiver reset against a stuck AGC (`agc.reset.interval`, off by default)

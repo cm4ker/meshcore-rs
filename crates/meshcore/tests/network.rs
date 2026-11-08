@@ -221,15 +221,34 @@ fn gps_cli_on_a_repeater() {
     assert!(m.app.prefs.gps_enabled && m.app.effects.gps);
     assert_eq!(cli(&mut m, "gps"), "on, active, no fix, 0 sats");
     assert_eq!(cli(&mut m, "gps setloc"), "no fix");
+    // the receiver's own clock before a fix is not to be trusted
+    let no_fix = GpsReading { in_view: 13, heard: 4, best_snr: 23, time: Some(2_000_000_000), ..Default::default() };
+    m.app.board.gps = Some(no_fix);
+    assert_eq!(cli(&mut m, "gps sync"), "no fix");
+    assert_eq!(cli(&mut m, "gps diag"), "req:1 fix:0 sats:0 inview:13 heard:4 snr:23");
 
-    m.app.board.gps =
-        Some(GpsReading { valid: true, lat: 55_000_000, lon: 37_000_000, alt_mm: 100_000, satellites: 7, in_view: 9, time: Some(2_000_000_000) });
+    let fix = GpsReading {
+        valid: true,
+        lat: 55_000_000,
+        lon: 37_000_000,
+        alt_mm: 100_000,
+        satellites: 7,
+        in_view: 9,
+        heard: 8,
+        best_snr: 41,
+        time: Some(2_000_000_000),
+    };
+    m.app.board.gps = Some(fix);
     assert_eq!(cli(&mut m, "gps"), "on, active, fix, 7 sats");
     assert_eq!(cli(&mut m, "gps setloc"), "ok");
     assert!((m.app.prefs.node_lat - 55.0).abs() < 1e-6);
     assert!((m.app.prefs.node_lon - 37.0).abs() < 1e-6);
     assert_eq!(cli(&mut m, "gps sync"), "ok");
     assert_eq!(m.ctx.current_time(), 2_000_000_000);
+    // a clock that ran ahead comes back too
+    m.app.board.gps = Some(GpsReading { time: Some(1_900_000_000), ..fix });
+    assert_eq!(cli(&mut m, "gps sync"), "ok");
+    assert_eq!(m.ctx.current_time(), 1_900_000_000);
 
     assert_eq!(cli(&mut m, "gps off"), "ok");
     assert!(!m.app.prefs.gps_enabled);

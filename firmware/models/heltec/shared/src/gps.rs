@@ -74,6 +74,8 @@ pub fn latest() -> Option<meshcore::gps::GpsReading> {
         alt_mm: f.alt_mm,
         satellites: f.satellites,
         in_view: f.in_view,
+        heard: f.heard,
+        best_snr: f.best_snr,
         time: f.time,
     })
 }

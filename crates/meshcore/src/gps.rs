@@ -17,6 +17,10 @@ pub struct GpsReading {
     pub satellites: u8,
     /// Seen, of all constellations.
     pub in_view: u8,
+    /// In view and heard: the receiver reports a signal-to-noise ratio for them.
+    pub heard: u8,
+    /// The strongest of those signals, in dB-Hz (0: none heard).
+    pub best_snr: u8,
     /// UTC in seconds since 1970, once a sentence has carried the date.
     pub time: Option<u32>,
 }

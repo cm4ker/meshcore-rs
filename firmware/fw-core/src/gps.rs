@@ -26,8 +26,25 @@ pub struct Fix {
     pub satellites: u8,
     /// Seen, of all constellations.
     pub in_view: u8,
+    /// In view and heard: the receiver reports a signal-to-noise ratio for them.
+    pub heard: u8,
+    /// The strongest of those signals, in dB-Hz (0: none heard).
+    pub best_snr: u8,
     /// UTC in seconds since 1970, once a sentence has carried the date.
     pub time: Option<u32>,
+}
+
+/// One constellation's satellites, from its GSV sentences.
+#[derive(Clone, Copy)]
+struct Sky {
+    talker: [u8; 2],
+    in_view: u8,
+    /// Heard, and the strongest signal, over the latest complete round of sentences.
+    heard: u8,
+    best_snr: u8,
+    /// The round under way: GSV lists four satellites a sentence.
+    heard_now: u8,
+    best_now: u8,
 }
 
 /// Turns the receiver's bytes into readings, from the sentences that carry the position and
@@ -40,8 +57,8 @@ pub struct Nmea {
     days: Option<u32>,
     /// Seconds since midnight, from the latest GGA or RMC.
     day_secs: Option<u32>,
-    /// Satellites in view by constellation (talker), from the latest GSV of each.
-    in_view: [([u8; 2], u8); 6],
+    /// Satellites by constellation (talker), from the GSV sentences of each.
+    sky: [Sky; 6],
 }
 
 impl Default for Nmea {
@@ -55,10 +72,10 @@ impl Nmea {
         Self {
             line: [0; LINE_MAX],
             len: 0,
-            fix: Fix { valid: false, lat: 0, lon: 0, alt_mm: 0, satellites: 0, in_view: 0, time: None },
+            fix: Fix { valid: false, lat: 0, lon: 0, alt_mm: 0, satellites: 0, in_view: 0, heard: 0, best_snr: 0, time: None },
             days: None,
             day_secs: None,
-            in_view: [([0; 2], 0); 6],
+            sky: [Sky { talker: [0; 2], in_view: 0, heard: 0, best_snr: 0, heard_now: 0, best_now: 0 }; 6],
         }
     }
 
@@ -100,7 +117,7 @@ impl Nmea {
         let mut fields = body.split(|&c| c == b',');
         let id = fields.next().unwrap_or_default();
         let (talker, kind) = id.split_at(id.len().saturating_sub(3));
-        let mut f: [&[u8]; 12] = [&[]; 12];
+        let mut f: [&[u8]; 20] = [&[]; 20];
         for (slot, field) in f.iter_mut().zip(fields) {
             *slot = field;
         }
@@ -124,22 +141,35 @@ impl Nmea {
                 self.position(f[2], f[3], f[4], f[5]);
                 self.days = date(f[8]).or(self.days);
             }
-            // messages, this message, satellites in view, ...
+            // messages, this message, satellites in view, then per satellite: id, elevation,
+            // azimuth, SNR (empty while not heard); NMEA 4.1 adds a signal id at the end
             b"GSV" => {
                 let (Ok(talker), Some(n)) = (<[u8; 2]>::try_from(talker), number(f[2], 0)) else {
                     return false;
                 };
-                let n = n.clamp(0, 255) as u8;
-                match self.in_view.iter_mut().find(|(t, _)| *t == talker) {
-                    Some(slot) => slot.1 = n,
-                    None => {
-                        if let Some(slot) = self.in_view.iter_mut().find(|(t, _)| *t == [0; 2]) {
-                            *slot = (talker, n);
-                        }
+                let slot = match self.sky.iter().position(|s| s.talker == talker) {
+                    Some(i) => Some(i),
+                    None => self.sky.iter().position(|s| s.talker == [0; 2]),
+                };
+                if let Some(i) = slot {
+                    let s = &mut self.sky[i];
+                    s.talker = talker;
+                    s.in_view = n.clamp(0, 255) as u8;
+                    if f[1] == b"1" {
+                        (s.heard_now, s.best_now) = (0, 0);
+                    }
+                    for snr in f[3..].chunks(4).filter_map(|sat| number(sat.get(3)?, 0)).filter(|&snr| snr > 0) {
+                        s.heard_now = s.heard_now.saturating_add(1);
+                        s.best_now = s.best_now.max(snr.min(99) as u8);
+                    }
+                    if f[1] == f[0] {
+                        (s.heard, s.best_snr) = (s.heard_now, s.best_now);
                     }
                 }
-                let total: u32 = self.in_view.iter().map(|(_, n)| *n as u32).sum();
-                self.fix.in_view = total.min(255) as u8;
+                let sum = |by: fn(&Sky) -> u8| self.sky.iter().map(|s| by(s) as u32).sum::<u32>().min(255) as u8;
+                self.fix.in_view = sum(|s| s.in_view);
+                self.fix.heard = sum(|s| s.heard);
+                self.fix.best_snr = self.sky.iter().map(|s| s.best_snr).max().unwrap_or(0);
             }
             _ => return false,
         }
@@ -278,6 +308,24 @@ mod tests {
         let gps = "$GPGSV,1,1,04,10,63,137,17,07,61,098,15,05,59,290,20,08,54,157,30*70
 ";
         assert_eq!(feed(&mut n, &with_checksum(gps)).map(|f| f.in_view), Some(7));
+    }
+
+    #[test]
+    fn heard_satellites_count_once_a_round_is_complete() {
+        let mut n = Nmea::new();
+        // in view but not heard: no SNR
+        let fix = feed(&mut n, &with_checksum("$GLGSV,1,1,02,65,40,083,,66,17,308,*00")).unwrap();
+        assert_eq!((fix.in_view, fix.heard, fix.best_snr), (2, 0, 0));
+        // two sentences, the second with NMEA 4.1's signal id after the satellites
+        let first = with_checksum("$GPGSV,2,1,07,01,40,083,46,02,17,308,,03,07,344,,04,22,228,*00");
+        let fix = feed(&mut n, &first).unwrap();
+        assert_eq!((fix.in_view, fix.heard), (9, 0), "a round half read counts nothing yet");
+        let fix = feed(&mut n, &with_checksum("$GPGSV,2,2,07,05,54,157,30,06,10,100,,07,05,050,,1*00")).unwrap();
+        assert_eq!((fix.in_view, fix.heard, fix.best_snr), (9, 2, 46));
+        // the next round starts afresh
+        feed(&mut n, &with_checksum("$GPGSV,1,1,02,01,40,083,21,05,54,157,*00"));
+        assert_eq!(n.fix.heard, 1);
+        assert_eq!(n.fix.best_snr, 21);
     }
 
     /// The sentence with its checksum recomputed.

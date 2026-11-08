@@ -1291,12 +1291,12 @@ impl Companion {
                 self.effects.save_prefs = true;
                 "ok".into()
             }
-            "sync" => match self.board.gps.and_then(|g| g.time) {
-                Some(t) if t > ctx.current_time() => {
+            // the receiver's clock is only right once it has a fix; then it wins either way
+            "sync" => match self.board.gps.filter(|g| g.valid).and_then(|g| g.time) {
+                Some(t) => {
                     ctx.set_current_time(t);
                     "ok".into()
                 }
-                Some(_) => "ERR: clock cannot go backwards".into(),
                 None => "no fix".into(),
             },
             "setloc" => match self.board.gps.filter(|g| g.valid) {
@@ -1310,7 +1310,10 @@ impl Companion {
             "diag" => {
                 let req = self.prefs.gps_enabled as u8;
                 match self.board.gps {
-                    Some(g) => format!("req:{req} fix:{} sats:{} inview:{}", g.valid as u8, g.satellites, g.in_view),
+                    Some(g) => format!(
+                        "req:{req} fix:{} sats:{} inview:{} heard:{} snr:{}",
+                        g.valid as u8, g.satellites, g.in_view, g.heard, g.best_snr
+                    ),
                     None => format!("req:{req} no reading"),
                 }
             }

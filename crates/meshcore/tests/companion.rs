@@ -1124,14 +1124,31 @@ fn gps_cli_on_a_companion() {
     assert_eq!(cli(&mut a, "gps"), "on, active, no fix, 0 sats");
     assert_eq!(cli(&mut a, "gps setloc"), "no fix");
 
-    a.app.board.gps =
-        Some(GpsReading { valid: true, lat: 55_000_000, lon: -33_500_000, alt_mm: 120_500, satellites: 8, in_view: 11, time: Some(2_000_000_000) });
+    a.app.board.gps = Some(GpsReading { in_view: 11, time: Some(2_000_000_000), ..Default::default() });
+    assert_eq!(cli(&mut a, "gps sync"), "no fix");
+
+    let fix = GpsReading {
+        valid: true,
+        lat: 55_000_000,
+        lon: -33_500_000,
+        alt_mm: 120_500,
+        satellites: 8,
+        in_view: 11,
+        heard: 9,
+        best_snr: 38,
+        time: Some(2_000_000_000),
+    };
+    a.app.board.gps = Some(fix);
     assert_eq!(cli(&mut a, "gps"), "on, active, fix, 8 sats");
+    assert_eq!(cli(&mut a, "gps diag"), "req:1 fix:1 sats:8 inview:11 heard:9 snr:38");
     assert_eq!(cli(&mut a, "gps setloc"), "ok");
     assert!((a.app.prefs.node_lat - 55.0).abs() < 1e-6);
     assert!((a.app.prefs.node_lon + 33.5).abs() < 1e-6);
     assert_eq!(cli(&mut a, "gps sync"), "ok");
     assert_eq!(a.ctx.current_time(), 2_000_000_000);
+    a.app.board.gps = Some(GpsReading { time: Some(1_900_000_000), ..fix });
+    assert_eq!(cli(&mut a, "gps sync"), "ok");
+    assert_eq!(a.ctx.current_time(), 1_900_000_000);
 
     assert_eq!(cli(&mut a, "gps bogus"), "error");
     assert_eq!(cli(&mut a, "gps off"), "ok");
