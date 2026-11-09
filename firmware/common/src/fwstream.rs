@@ -6,15 +6,15 @@
 //! session checks the release's signatures before it takes any of the patch.
 //!
 //! The fetch runs in its own task. It reads the file's head first, for the release it carries,
-//! then keeps at most [`BUFFER`] bytes ahead of what the session took: the server waits for the
-//! rest on the connection meanwhile.
+//! then keeps at most [`BUFFER`] bytes ahead of what the session took (`meshcore::fwshare::Stream`):
+//! the server waits for the rest on the connection meanwhile.
 
-use alloc::collections::VecDeque;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use critical_section::Mutex;
 use embassy_net::Stack;
@@ -22,7 +22,7 @@ use embassy_net::tcp::TcpSocket;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
-use meshcore::fwshare::{DeltaHeader, FwQuery, FwStore, HeaderSize, Offer};
+use meshcore::fwshare::{DeltaHeader, FwQuery, FwStore, HeaderSize, Offer, Stream};
 
 use crate::fwstore::{Key, request};
 
@@ -43,9 +43,8 @@ const ASK_RETRY_SECS: u16 = 2;
 /// A server that sends nothing this long while the file is not whole has given up.
 const SILENT_SECS: u64 = 30;
 
-/// The file the server answered with.
+/// The release the server's file carries.
 struct File {
-    len: u32,
     id: u32,
     counter: u32,
     version: String,
@@ -55,9 +54,9 @@ enum Job {
     Idle,
     /// The server is asked about `key`.
     Asking { key: Key },
-    /// The server's file for `key`: `data` holds the bytes from `taken` on that came and were
-    /// not taken yet; `moved` is when the session last took some (seconds of uptime).
-    Open { key: Key, file: File, taken: u32, data: VecDeque<u8>, moved: u64 },
+    /// The server's file for `key`, as it comes; `moved` is when the session last took some of it
+    /// (seconds of uptime).
+    Open { key: Key, file: File, stream: Stream, moved: u64 },
 }
 
 struct State {
@@ -68,16 +67,30 @@ struct State {
     /// (image, release asked from, until): the server had nothing newer.
     misses: Vec<(Key, u32, u64)>,
     failed_until: u64,
+    /// What the server last said, for people.
+    status: String,
 }
 
-static STATE: Mutex<RefCell<State>> =
-    Mutex::new(RefCell::new(State { server: String::new(), fetch_no: 0, job: Job::Idle, misses: Vec::new(), failed_until: 0 }));
+static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
+    server: String::new(),
+    fetch_no: 0,
+    job: Job::Idle,
+    misses: Vec::new(),
+    failed_until: 0,
+    status: String::new(),
+}));
 static ONLINE: AtomicBool = AtomicBool::new(false);
+static STATUS_GEN: AtomicU32 = AtomicU32::new(0);
 /// What to fetch: the image's key, the release it runs, the fetch's number.
 static REQUEST: Signal<CriticalSectionRawMutex, (Key, u32, u32)> = Signal::new();
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     critical_section::with(|cs| f(&mut STATE.borrow_ref_mut(cs)))
+}
+
+fn set_status(s: &mut State, text: String) {
+    s.status = text;
+    STATUS_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
 fn secs() -> u64 {
@@ -94,6 +107,15 @@ pub fn sync(online: bool, server: &str) {
     });
 }
 
+/// What the server last said, the third line of `fw`, when it changed since `seen` (updated).
+pub fn status_if_changed(seen: &mut u32) -> Option<String> {
+    let g = STATUS_GEN.load(Ordering::Relaxed);
+    (g != *seen).then(|| {
+        *seen = g;
+        with(|s| s.status.clone())
+    })
+}
+
 /// The companion's view of the server ([`FwStore`]): an offer once the file's head is in, its
 /// bytes in order as they come.
 pub struct StreamFwStore;
@@ -105,8 +127,9 @@ impl FwStore for StreamFwStore {
         with(|s| {
             match &s.job {
                 // just in, nothing taken of it yet: it starts from its first byte
-                Job::Open { key: k, file, taken: 0, moved, .. } if *k == key && now < moved + STALL_SECS => {
-                    return Offer::Ready { len: file.len, id: file.id, counter: file.counter, version: file.version.clone() };
+                Job::Open { key: k, file, stream, moved } if *k == key && stream.taken() == 0 && now < moved + STALL_SECS => {
+                    let (len, id, counter, version) = (stream.file_len(), file.id, file.counter, file.version.clone());
+                    return Offer::Ready { len, id, counter, version };
                 }
                 Job::Asking { key: k } if *k == key => return Offer::Fetching { retry_secs: ASK_RETRY_SECS },
                 _ => {}
@@ -126,26 +149,20 @@ impl FwStore for StreamFwStore {
         })
     }
 
-    /// All of `buf`, or nothing (0) while those bytes are still on the way.
     fn read(&mut self, id: u32, offset: u32, buf: &mut [u8]) -> Option<usize> {
         with(|s| {
-            let Job::Open { file, taken, data, moved, .. } = &mut s.job else { return None };
-            if file.id != id || *taken != offset {
+            let Job::Open { file, stream, moved, .. } = &mut s.job else { return None };
+            if file.id != id {
                 return None;
             }
-            let n = buf.len();
-            if data.len() < n {
-                return Some(0);
+            let got = stream.read(offset, buf);
+            if got.is_some_and(|n| n > 0) {
+                *moved = secs();
+                if stream.done() {
+                    s.job = Job::Idle;
+                }
             }
-            for (b, d) in buf.iter_mut().zip(data.drain(..n)) {
-                *b = d;
-            }
-            *taken += n as u32;
-            *moved = secs();
-            if *taken >= file.len {
-                s.job = Job::Idle;
-            }
-            Some(n)
+            got
         })
     }
 
@@ -183,11 +200,15 @@ pub async fn fetch_task(stack: Stack<'static>) {
             }
             match got {
                 Ok(Fetched::Done) => return,
-                Ok(Fetched::NoUpdate) => s.misses.push((key, counter, now + MISS_SECS)),
-                Ok(Fetched::Stalled) => {}
+                Ok(Fetched::NoUpdate) => {
+                    s.misses.push((key, counter, now + MISS_SECS));
+                    set_status(s, format!("{server}: nothing newer"));
+                }
+                Ok(Fetched::Stalled) => set_status(s, format!("{server}: the update stopped taking it")),
                 Err(e) => {
                     log::warn!("fw: fetching from {server} failed: {e}");
                     s.failed_until = now + FAIL_SECS;
+                    set_status(s, format!("{server}: failed, {e}"));
                 }
             }
             s.job = Job::Idle;
@@ -219,17 +240,16 @@ async fn fetch(stack: Stack<'static>, server: &str, key: Key, counter: u32, fetc
         head.extend_from_slice(&buf[..n]);
     };
     let m = &header.envelope.manifest;
-    let file = File {
-        len,
-        id: u32::from_le_bytes(m.image_sha256[..4].try_into().unwrap()) ^ len,
-        counter: m.counter,
-        version: m.version.clone(),
-    };
-    let mut received = head.len() as u32;
+    let id = u32::from_le_bytes(m.image_sha256[..4].try_into().unwrap()) ^ len;
+    let file = File { id, counter: m.counter, version: m.version.clone() };
+    let mut stream = Stream::new(len);
+    stream.push(&head);
+    let mut received = stream.received();
     let open = with(|s| {
         let current = s.fetch_no == fetch_no;
         if current {
-            s.job = Job::Open { key, file, taken: 0, data: VecDeque::from(head), moved: secs() };
+            set_status(s, format!("{server}: {} #{}, {} KB", file.version, file.counter, len.div_ceil(1024)));
+            s.job = Job::Open { key, file, stream, moved: secs() };
         }
         current
     });
@@ -240,7 +260,7 @@ async fn fetch(stack: Stack<'static>, server: &str, key: Key, counter: u32, fetc
     // the rest, no further ahead of the session than the buffer
     while received < len {
         let room = with(|s| match &s.job {
-            Job::Open { data, moved, .. } if s.fetch_no == fetch_no => Some((BUFFER.saturating_sub(data.len()), *moved)),
+            Job::Open { stream, moved, .. } if s.fetch_no == fetch_no => Some((BUFFER.saturating_sub(stream.held()), *moved)),
             _ => None,
         });
         let Some((room, moved)) = room else {
@@ -257,9 +277,9 @@ async fn fetch(stack: Stack<'static>, server: &str, key: Key, counter: u32, fetc
         let n = read(&mut socket, &mut buf[..want]).await?;
         with(|s| {
             if s.fetch_no == fetch_no
-                && let Job::Open { data, .. } = &mut s.job
+                && let Job::Open { stream, .. } = &mut s.job
             {
-                data.extend(&buf[..n]);
+                stream.push(&buf[..n]);
             }
         });
         received += n as u32;

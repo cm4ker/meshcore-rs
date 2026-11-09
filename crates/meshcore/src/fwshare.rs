@@ -28,6 +28,7 @@
 //!   update then, and the file carries that signature.
 //! - `FW_GET [id u32][offset u32][len u8]` -> `[status][offset u32][data]`
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -324,6 +325,80 @@ impl Loader {
 /// Envelope pieces fed to the update session.
 const ENVELOPE_PIECE: usize = 128;
 
+/// A delta file as it comes from a server, in order, read by a [`Loader`]: what came and was not
+/// taken yet, and the last [`Stream::BEHIND`] bytes taken. The loader asks for its pieces in order,
+/// except once: the patch starts again at its own offset when the header is in, up to a piece
+/// back.
+pub struct Stream {
+    len: u32,
+    /// The file's offset of `data[0]`.
+    start: u32,
+    data: VecDeque<u8>,
+    /// Where what was taken ends.
+    taken: u32,
+}
+
+impl Stream {
+    /// Bytes kept behind what was taken.
+    pub const BEHIND: u32 = FW_PIECE as u32;
+
+    /// A file of `len` bytes, none of them here yet.
+    pub fn new(len: u32) -> Self {
+        Self { len, start: 0, data: VecDeque::new(), taken: 0 }
+    }
+
+    pub fn file_len(&self) -> u32 {
+        self.len
+    }
+
+    /// Where what was taken ends: 0 before the first read.
+    pub fn taken(&self) -> u32 {
+        self.taken
+    }
+
+    /// Bytes held: what came and was not taken, and what is kept behind it.
+    pub fn held(&self) -> usize {
+        self.data.len()
+    }
+
+    /// How much of the file came.
+    pub fn received(&self) -> u32 {
+        self.start + self.data.len() as u32
+    }
+
+    /// The next bytes of the file (past its end: dropped).
+    pub fn push(&mut self, bytes: &[u8]) {
+        let room = self.len.saturating_sub(self.received()) as usize;
+        self.data.extend(&bytes[..bytes.len().min(room)]);
+    }
+
+    /// All of `buf` from `offset`, or 0 while those bytes are still on the way; `None` for an
+    /// offset before what is kept or past what was taken (the file can't be read there).
+    pub fn read(&mut self, offset: u32, buf: &mut [u8]) -> Option<usize> {
+        let n = buf.len() as u32;
+        if offset < self.start || offset > self.taken {
+            return None;
+        }
+        if offset + n > self.received() {
+            return Some(0);
+        }
+        let at = (offset - self.start) as usize;
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = self.data[at + i];
+        }
+        self.taken = self.taken.max(offset + n);
+        let drop = self.taken.saturating_sub(Self::BEHIND).saturating_sub(self.start) as usize;
+        self.data.drain(..drop);
+        self.start += drop as u32;
+        Some(n as usize)
+    }
+
+    /// The whole file was taken.
+    pub fn done(&self) -> bool {
+        self.taken >= self.len
+    }
+}
+
 /// What a repeater can offer for a query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Offer {
@@ -505,6 +580,35 @@ mod tests {
         let sig = root.sign(&Envelope::signed_message(&env.manifest));
         env.add_signature(*root.pub_key(), sig);
         env.to_bytes()
+    }
+
+    #[test]
+    fn a_stream_is_read_in_order_and_a_piece_back() {
+        let file: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+        let mut s = Stream::new(file.len() as u32);
+        let mut buf = [0u8; FW_PIECE];
+        assert_eq!(s.read(0, &mut buf), Some(0), "nothing came yet");
+        s.push(&file[..400]);
+        assert_eq!(s.read(0, &mut buf), Some(FW_PIECE));
+        assert_eq!(s.read(156, &mut buf), Some(FW_PIECE));
+        assert_eq!(s.read(400, &mut buf), None, "past what was taken");
+        // the patch starts where the header ended, inside the piece just taken
+        assert_eq!(s.read(200, &mut buf), Some(FW_PIECE));
+        assert_eq!(&buf[..], &file[200..356]);
+        assert_eq!(s.read(10, &mut buf), None, "more than a piece back");
+        assert_eq!(s.read(356, &mut buf), Some(0), "not here yet");
+        s.push(&file[400..]);
+        s.push(b"past the end");
+        assert_eq!(s.received(), 1000);
+        let mut at = 356;
+        while at < 1000 {
+            let n = FW_PIECE.min(1000 - at as usize);
+            assert_eq!(s.read(at, &mut buf[..n]), Some(n));
+            assert_eq!(&buf[..n], &file[at as usize..at as usize + n]);
+            at += n as u32;
+        }
+        assert!(s.done());
+        assert!(s.held() <= FW_PIECE, "only a piece behind is kept");
     }
 
     #[test]

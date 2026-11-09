@@ -217,6 +217,10 @@ pub trait Platform {
     fn poll_network(&mut self, _fw_server: &str) -> (Option<u32>, Option<String>) {
         (None, None)
     }
+    /// What the release server last said, for `fw` (see [`Self::fw_store`]), when it changed.
+    fn fw_status(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Defaults of this board build and the build stamp.
@@ -730,6 +734,9 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         }
         if links.tcp {
             mesh.app.board.wifi_ip = ip;
+        }
+        if let Some(s) = platform.fw_status() {
+            mesh.app.board.fw_store = s;
         }
 
         // GPS: the node's position, and now and then the clock, once the fix has held for a few

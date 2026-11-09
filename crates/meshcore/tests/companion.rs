@@ -1692,26 +1692,31 @@ fn a_dev_release_reaches_only_the_nodes_that_follow_dev() {
 }
 
 /// The release server as a companion on Wi-Fi sees it: asked first, it fetches; then the file
-/// comes as the server sends it, its next bytes not always there yet.
-struct FetchesFirst {
+/// comes in order as the server sends it, a little at a time, at most 4 KB ahead of the reader
+/// (as the firmware's `fwstream`), and can't be read anywhere else.
+struct Streamed {
     inner: meshcore::fwshare::MemStore,
-    fetched: bool,
-    reads: u32,
+    stream: Option<meshcore::fwshare::Stream>,
 }
 
-impl meshcore::fwshare::FwStore for FetchesFirst {
+impl meshcore::fwshare::FwStore for Streamed {
     fn offer(&mut self, q: &meshcore::fwshare::FwQuery) -> meshcore::fwshare::Offer {
-        if !std::mem::replace(&mut self.fetched, true) {
+        if self.stream.is_none() {
+            self.stream = Some(meshcore::fwshare::Stream::new(self.inner.file.len() as u32));
             return meshcore::fwshare::Offer::Fetching { retry_secs: 2 };
         }
         self.inner.offer(q)
     }
     fn read(&mut self, id: u32, offset: u32, buf: &mut [u8]) -> Option<usize> {
-        self.reads += 1;
-        if self.reads % 3 == 0 {
-            return Some(0); // on the way
+        let s = self.stream.as_mut()?;
+        if id != self.inner.id {
+            return None;
         }
-        self.inner.read(id, offset, buf)
+        // 100 more bytes came since the last read
+        let at = s.received() as usize;
+        let more = 100.min(4096 - s.held().min(4096)).min(self.inner.file.len() - at);
+        s.push(&self.inner.file[at..at + more]);
+        s.read(offset, buf)
     }
 }
 
@@ -1722,7 +1727,7 @@ fn a_companion_on_wifi_takes_its_update_from_the_release_server() {
     let image = esp_image(&[6u8; 4100]);
     let file = delta_release(&root, 5, &base, &image);
     let (mut c, slot) = pulling_companion(&root, &base);
-    c.app.fw_store = Some(Box::new(FetchesFirst { inner: meshcore::fwshare::MemStore::new(file.clone(), 9), fetched: false, reads: 0 }));
+    c.app.fw_store = Some(Box::new(Streamed { inner: meshcore::fwshare::MemStore::new(file.clone(), 9), stream: None }));
     let cli = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
 
     assert_eq!(cli(&mut c, "get fw.server"), "> nw.ommesh.ru");

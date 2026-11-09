@@ -461,6 +461,9 @@ pub struct Board {
     pub fw_rollback: bool,
     /// The release this node was rolled back from: not installed by itself again (0 = none).
     pub fw_skip: u32,
+    /// What the release server last said, on a node that asks it over Wi-Fi: the third line of
+    /// `fw` (empty: none yet).
+    pub fw_store: String,
 }
 
 impl Default for Board {
@@ -483,6 +486,7 @@ impl Default for Board {
             fw_prev: String::new(),
             fw_rollback: false,
             fw_skip: 0,
+            fw_store: String::new(),
         }
     }
 }

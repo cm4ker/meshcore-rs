@@ -177,13 +177,19 @@ impl Companion {
         self.fw_state().line()
     }
 
-    /// `fw`: the release that runs, the channel and mode, and where its update stands.
+    /// `fw`: the release that runs, the channel and mode, and where its update stands; on Wi-Fi,
+    /// what the release server last said.
     pub fn fw_reply(&self, now: u64) -> String {
-        alloc::format!(
+        let mut s = alloc::format!(
             "{}\n{}",
             fwstate::head(&self.board.build_date, self.prefs.fw_channel, self.prefs.fw_mode),
             self.fw_line(now)
-        )
+        );
+        if self.fw_store.is_some() && !self.board.fw_store.is_empty() {
+            s.push('\n');
+            s.push_str(&self.board.fw_store);
+        }
+        s
     }
 
     /// Check now (`fw check`, `fw update`, the device's button): the reply says whom it asks. An

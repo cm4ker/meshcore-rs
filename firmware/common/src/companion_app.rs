@@ -60,6 +60,8 @@ struct Esp {
     wifi: Option<WIFI<'static>>,
     bt: Option<BT<'static>>,
     station: Option<Stack<'static>>,
+    /// The release server's status last handed on.
+    fw_seen: u32,
 }
 
 impl Platform for Esp {
@@ -175,6 +177,10 @@ impl Platform for Esp {
         }
         (net::TIME_SYNC.try_take(), ip)
     }
+
+    fn fw_status(&mut self) -> Option<String> {
+        fwstream::status_if_changed(&mut self.fw_seen)
+    }
 }
 
 pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, board: B, cfg: Config) -> ! {
@@ -193,6 +199,7 @@ pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, boar
         wifi: Some(wifi),
         bt: Some(bt),
         station: None,
+        fw_seen: 0,
     };
     companion::run(spawner, platform, radio, store, entropy, board, cfg).await
 }
