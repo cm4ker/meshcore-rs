@@ -110,6 +110,10 @@ pub trait Board {
     async fn sensor_lpp(&mut self) -> Vec<u8> {
         Vec::new()
     }
+    /// What the scan of the sensor bus found at boot (`sensor scan`); empty without such a bus.
+    fn sensor_scan(&self) -> String {
+        String::new()
+    }
     fn button_down(&mut self) -> bool {
         false
     }
@@ -400,7 +404,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             let mut p = CompanionPrefs { radio: cfg.radio, tx_power_dbm: cfg.tx_power_dbm, ..Default::default() };
             // first start after the repeater firmware: join the mesh it was set up for
             if let Some(d) = store.as_ref().and_then(|s| s.borrow_mut().load(Blob::Prefs)) {
-                let rp = NodePrefs::deserialize(&String::from_utf8_lossy(&d));
+                let rp = NodePrefs::radio_settings(&String::from_utf8_lossy(&d));
                 p.radio = rp.radio;
                 p.tx_power_dbm = rp.tx_power_dbm;
                 p.rx_boosted_gain = rp.rx_boosted_gain;
@@ -471,6 +475,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         has_gps: board.has_gps(),
         adc_multiplier: board.adc_multiplier(),
         fem_lna_controllable: board.lna_controllable(),
+        sensor_scan: board.sensor_scan(),
         ..Default::default()
     };
     let mut mesh = Mesh::new(ctx, Companion::new(prefs, info));

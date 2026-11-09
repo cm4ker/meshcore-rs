@@ -40,6 +40,10 @@ impl Sht4x {
         None
     }
 
+    pub fn addr(&self) -> u8 {
+        self.addr
+    }
+
     /// Take one high-precision measurement and decode it. `None` on a bus error or a failed CRC.
     pub async fn read<I: I2c>(&self, i2c: &mut I) -> Option<Reading> {
         if !matches!(with_timeout(TIMEOUT, i2c.write(self.addr, &[CMD_MEAS_HIGH])).await, Ok(Ok(()))) {

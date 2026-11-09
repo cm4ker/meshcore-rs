@@ -940,6 +940,22 @@ fn repeater_powersaving_cli() {
     assert_eq!(cli(&mut r, "powersaving"), "off");
 }
 
+/// `sensor scan` says what the firmware found on the I2C at boot, on a repeater and a companion (#8).
+#[test]
+fn sensor_scan_tells_what_answers_on_the_bus() {
+    let mut r = repeater(4);
+    let rcli = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
+    assert_eq!(rcli(&mut r, "sensor scan"), "> no sensor bus on this board");
+    r.app.board.sensor_scan = "ch2 BMP280 0x77, not known: 0x38".into();
+    assert_eq!(rcli(&mut r, "sensor scan"), "> ch2 BMP280 0x77, not known: 0x38");
+
+    let mut c = companion(1, "Alice");
+    let ccli = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
+    assert_eq!(ccli(&mut c, "sensor scan"), "> no sensor bus on this board");
+    c.app.board.sensor_scan = "nothing answers on the I2C".into();
+    assert_eq!(ccli(&mut c, "sensor scan"), "> nothing answers on the I2C");
+}
+
 /// `set tx` beyond what the radio chip gives is refused with the reason, rather than cut to 22 (#1).
 #[test]
 fn repeater_tx_power_out_of_range_is_an_error() {

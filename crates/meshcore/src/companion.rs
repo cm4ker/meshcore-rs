@@ -453,6 +453,9 @@ pub struct Board {
     /// `EnvironmentSensorManager`), kept by the firmware; telemetry carries them to whoever may see
     /// the environment.
     pub sensor_lpp: Vec<u8>,
+    /// What the firmware's scan of the sensor bus found at boot, for `sensor scan`; empty on a
+    /// board without one.
+    pub sensor_scan: String,
     /// While the firmware runs on trial after an update: when it is kept (uptime, ms).
     pub fw_trial_until: Option<u64>,
     /// The firmware in the other slot, `fw rollback` goes back to it (empty if not known).
@@ -482,6 +485,7 @@ impl Default for Board {
             fem_lna_controllable: false,
             altitude_m: 0.0,
             sensor_lpp: Vec::new(),
+            sensor_scan: String::new(),
             fw_trial_until: None,
             fw_prev: String::new(),
             fw_rollback: false,

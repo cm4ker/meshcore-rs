@@ -258,6 +258,9 @@ pub struct BoardInfo {
     /// Environment sensors as CayenneLPP records (`crate::lpp`; channel 2 on, as upstream numbers
     /// them), kept by the firmware: telemetry carries them to clients allowed environment data.
     pub sensor_lpp: Vec<u8>,
+    /// What the firmware's scan of the sensor bus found at boot, for `sensor scan`; empty on a
+    /// board without one.
+    pub sensor_scan: String,
     /// The UF2 bootloader's version on nRF52 boards (`get bootloader.ver`; empty = not found);
     /// none = the board has no such bootloader.
     pub bootloader_version: Option<String>,
@@ -1749,6 +1752,9 @@ impl Repeater {
             }
             self.effects.save_sensors = true;
             return "OK".into();
+        }
+        if cmd == "sensor scan" {
+            return crate::sensor::scan_reply(&self.board.sensor_scan);
         }
         if cmd.starts_with("sensor list") {
             if self.sensor_descriptors.is_empty() {

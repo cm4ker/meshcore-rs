@@ -184,6 +184,10 @@ impl Board for ProMicro {
         lpp
     }
 
+    fn sensor_scan(&self) -> String {
+        self.sensors.scan.clone()
+    }
+
     fn button_down(&mut self) -> bool {
         self.button.is_low()
     }

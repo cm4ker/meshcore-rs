@@ -10,11 +10,21 @@ pub mod ahtx0;
 pub mod bme280;
 pub mod bmp280;
 pub mod descriptor;
+pub mod sht3x;
 pub mod sht4x;
 pub mod shtc3;
 
+/// `sensor scan`: what the firmware's scan of the I2C bus found at boot (`scan`), or that the
+/// board has no such bus (empty).
+pub fn scan_reply(scan: &str) -> alloc::string::String {
+    match scan {
+        "" => "> no sensor bus on this board".into(),
+        s => alloc::format!("> {s}"),
+    }
+}
+
 /// Sensirion CRC-8 (poly `0x31`, init `0xFF`), over the two-byte word that precedes each check
-/// byte in an SHTC3 / SHT4X reply. Returns the CRC the sensor should have appended.
+/// byte in an SHTC3 / SHT3X / SHT4X reply. Returns the CRC the sensor should have appended.
 pub(crate) fn sensirion_crc8(data: &[u8]) -> u8 {
     let mut crc: u8 = 0xFF;
     for &b in data {

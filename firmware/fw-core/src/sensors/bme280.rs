@@ -58,6 +58,10 @@ impl Bme280 {
         None
     }
 
+    pub fn addr(&self) -> u8 {
+        self.addr
+    }
+
     /// Take one forced measurement and compensate it, or `None` if the bus misbehaves.
     pub async fn read<I: I2c>(&self, i2c: &mut I) -> Option<Reading> {
         if !write_reg(i2c, self.addr, REG_CTRL_MEAS, CTRL_MEAS_FORCED_X1).await {

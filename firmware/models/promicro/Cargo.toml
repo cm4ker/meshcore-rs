@@ -5,9 +5,9 @@ rust-version = "1.88"
 version      = "0.1.0"
 
 [features]
-# AHTX0 / SHTC3 / SHT4X hand drivers. Off by default: the Pro Micro's UF2 region is at its
-# ceiling with INA219 + BME280 + BMP280 + the descriptor engine, so these opt in on a board (or a
-# trimmed build) that has the room. Linear sensors need no feature — add them with `sensor add`.
+# SHTC3 / SHT4X hand drivers. Off by default: the Pro Micro's UF2 region is at its ceiling with
+# AHTX0 + BME280 + BMP280 + INA219 + SHT3X + the descriptor engine, so these opt in on a board (or
+# a trimmed build) that has the room. Linear sensors need no feature — add them with `sensor add`.
 extra-sensors = ["meshcore-fw-core/extra-sensors"]
 
 [lib]

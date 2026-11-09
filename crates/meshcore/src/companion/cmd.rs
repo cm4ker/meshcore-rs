@@ -1425,6 +1425,8 @@ impl Companion {
             format!("> {}", p.wifi_enabled as u8)
         } else if cmd == "get wifi.status" {
             format!("> {}", if self.board.wifi_ip.is_some() { "connected" } else { "disconnected" })
+        } else if cmd == "sensor scan" {
+            crate::sensor::scan_reply(&self.board.sensor_scan)
         } else if cmd == "get wifi.ip" {
             format!("> {}", self.board.wifi_ip.as_deref().unwrap_or("(not connected)"))
         } else if cmd == "board" {

@@ -392,11 +392,66 @@ impl NodePrefs {
         p.sanitize();
         p
     }
+
+    /// The radio settings alone from saved prefs, as [`Self::deserialize`] reads them: what a
+    /// companion takes over from the repeater firmware on its first start, without the code for
+    /// the rest (several KB a Pro Micro companion has no room for).
+    pub fn radio_settings(text: &str) -> RadioSettings {
+        // the defaults are `NodePrefs::default()`'s
+        let mut r = RadioSettings { radio: RadioParams::default(), tx_power_dbm: 10, rx_boosted_gain: true, radio_fem_rxgain: false };
+        for (k, v) in text.lines().filter_map(|l| l.split_once('=')) {
+            match k {
+                "freq" => r.radio.freq_mhz = atof(v) as f32,
+                "bw" => r.radio.bw_khz = atof(v) as f32,
+                "sf" => r.radio.sf = atoi(v).min(255) as u8,
+                "cr" => r.radio.cr = atoi(v).min(255) as u8,
+                "tx" => r.tx_power_dbm = atoi_signed(v).clamp(-128, 127) as i8,
+                "rxgain" => r.rx_boosted_gain = atoi(v) != 0,
+                "fem_rxgain" => r.radio_fem_rxgain = atoi(v) != 0,
+                _ => {}
+            }
+        }
+        r.radio.freq_mhz = r.radio.freq_mhz.clamp(150.0, 2500.0);
+        r.radio.bw_khz = r.radio.bw_khz.clamp(7.8, 500.0);
+        r.radio.sf = r.radio.sf.clamp(5, 12);
+        r.radio.cr = r.radio.cr.clamp(5, 8);
+        r.tx_power_dbm = r.tx_power_dbm.clamp(-9, 22);
+        r
+    }
+}
+
+/// The radio part of [`NodePrefs`] ([`NodePrefs::radio_settings`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RadioSettings {
+    pub radio: RadioParams,
+    pub tx_power_dbm: i8,
+    pub rx_boosted_gain: bool,
+    pub radio_fem_rxgain: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn radio_settings_read_as_the_whole_prefs_do() {
+        let mut p = NodePrefs { tx_power_dbm: 17, rx_boosted_gain: false, radio_fem_rxgain: true, ..Default::default() };
+        p.radio.freq_mhz = 868.731;
+        p.radio.bw_khz = 62.5;
+        p.radio.sf = 7;
+        p.radio.cr = 7;
+        for text in [p.serialize(), String::new(), "freq=9999\nsf=40\ntx=30\n".into()] {
+            let whole = NodePrefs::deserialize(&text);
+            let r = NodePrefs::radio_settings(&text);
+            let want = RadioSettings {
+                radio: whole.radio,
+                tx_power_dbm: whole.tx_power_dbm,
+                rx_boosted_gain: whole.rx_boosted_gain,
+                radio_fem_rxgain: whole.radio_fem_rxgain,
+            };
+            assert_eq!(r, want, "{text:?}");
+        }
+    }
 
     #[test]
     fn roundtrip() {

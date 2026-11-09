@@ -383,6 +383,7 @@ async fn main(spawner: Spawner) {
         adc_multiplier: Some(board::BATT_MV_PER_LSB),
         bootloader_version: Some(board::bootloader_version()),
         ble_ota_name: sd::present().then(|| ota_name(&prefs.node_name)),
+        sensor_scan: sensors.scan.clone(),
         ..Default::default()
     };
     if sd::present() {
