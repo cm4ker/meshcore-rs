@@ -1691,20 +1691,26 @@ fn a_dev_release_reaches_only_the_nodes_that_follow_dev() {
     assert!(c.app.take_effects().reboot);
 }
 
-/// A store that fetches what it is first asked for from its server, as the firmware's does.
+/// The release server as a companion on Wi-Fi sees it: asked first, it fetches; then the file
+/// comes as the server sends it, its next bytes not always there yet.
 struct FetchesFirst {
     inner: meshcore::fwshare::MemStore,
     fetched: bool,
+    reads: u32,
 }
 
 impl meshcore::fwshare::FwStore for FetchesFirst {
     fn offer(&mut self, q: &meshcore::fwshare::FwQuery) -> meshcore::fwshare::Offer {
         if !std::mem::replace(&mut self.fetched, true) {
-            return meshcore::fwshare::Offer::Fetching { retry_secs: 30 };
+            return meshcore::fwshare::Offer::Fetching { retry_secs: 2 };
         }
         self.inner.offer(q)
     }
     fn read(&mut self, id: u32, offset: u32, buf: &mut [u8]) -> Option<usize> {
+        self.reads += 1;
+        if self.reads % 3 == 0 {
+            return Some(0); // on the way
+        }
         self.inner.read(id, offset, buf)
     }
 }
@@ -1716,7 +1722,7 @@ fn a_companion_on_wifi_takes_its_update_from_the_release_server() {
     let image = esp_image(&[6u8; 4100]);
     let file = delta_release(&root, 5, &base, &image);
     let (mut c, slot) = pulling_companion(&root, &base);
-    c.app.fw_store = Some(Box::new(FetchesFirst { inner: meshcore::fwshare::MemStore::new(file.clone(), 9), fetched: false }));
+    c.app.fw_store = Some(Box::new(FetchesFirst { inner: meshcore::fwshare::MemStore::new(file.clone(), 9), fetched: false, reads: 0 }));
     let cli = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
 
     assert_eq!(cli(&mut c, "get fw.server"), "> nw.ommesh.ru");

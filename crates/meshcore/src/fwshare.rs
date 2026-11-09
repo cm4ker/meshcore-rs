@@ -360,7 +360,9 @@ pub trait FwStore {
     /// The newest release for `q`'s board and role with a delta from `q`'s image, if the store
     /// holds it; a store that can fetch it starts doing so and answers `Fetching`.
     fn offer(&mut self, q: &FwQuery) -> Offer;
-    /// Bytes of file `id` from `offset` into `buf`; `None` if the store holds another file now.
+    /// Bytes of file `id` from `offset` into `buf`; `None` if the store holds another file now. A
+    /// store that hands the file on as it comes from the server reads all of `buf` or nothing (0)
+    /// while those bytes are still on the way.
     fn read(&mut self, id: u32, offset: u32, buf: &mut [u8]) -> Option<usize>;
     /// Someone asked for an update by hand: forget that the server had nothing newer for `q`'s
     /// image (or failed), so the next [`FwStore::offer`] asks it again.

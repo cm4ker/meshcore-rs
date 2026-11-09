@@ -11,6 +11,7 @@ pub mod broker;
 pub mod clock_cell;
 pub mod espnow;
 pub mod fwstore;
+pub mod fwstream;
 pub mod companion_app;
 pub mod frames;
 pub mod net;

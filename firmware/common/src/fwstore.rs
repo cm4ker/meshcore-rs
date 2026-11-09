@@ -1,5 +1,4 @@
-//! The updates a repeater hands on to its neighbours (`set fw.serve on`, see `meshcore::fwshare`),
-//! and the ones a node on Wi-Fi installs itself (a repeater's `fw.auto`, a companion's):
+//! The updates a repeater hands on to its neighbours (`set fw.serve on`, see `meshcore::fwshare`):
 //! delta files fetched over plain HTTP from the release server (`fw.server`) into the last
 //! [`CACHE_SIZE`] bytes of the running firmware's slot, past its image (an update of this node
 //! writes the other slot), and read from there for the neighbours' FW_GET. What is served is
@@ -57,7 +56,7 @@ const FETCH_RETRY_SECS: u16 = 30;
 
 /// The board, role and image a delta is for, and the owner key that must have signed it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Key {
+pub(crate) struct Key {
     board: u8,
     role: u8,
     base_len: u32,
@@ -271,66 +270,20 @@ pub async fn fetch_task(stack: Stack<'static>, store: SharedStore<'static>, regi
 async fn fetch(
     stack: Stack<'static>, server: &str, key: Key, counter: u32, store: &SharedStore<'static>, region: u32,
 ) -> Result<Option<File>, &'static str> {
-    let (host, port) = match server.rsplit_once(':') {
-        Some((h, p)) if p.parse::<u16>().is_ok() => (h, p.parse().unwrap()),
-        _ => (server, 80),
-    };
-    let addr = stack.dns_query(host, DnsQueryType::A).await.ok().and_then(|a| a.first().copied()).ok_or("no address")?;
     let (mut rx, mut tx) = (vec![0u8; SECTOR], vec![0u8; 512]);
     let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
     socket.set_timeout(Some(Duration::from_secs(30)));
-    if !matches!(with_timeout(Duration::from_secs(10), socket.connect((addr, port))).await, Ok(Ok(()))) {
-        return Err("no connection");
-    }
-    let mut path = format!(
-        "/fw/next/{}/{}/{}?counter={counter}&channel={}",
-        release::board_name(key.board),
-        release::role_name(key.role),
-        to_hex(&key.base_sha8).to_ascii_lowercase(),
-        release::channel_name(key.channel)
-    );
-    if key.owner8 != FwQuery::NO_OWNER {
-        // only a release that owner signed, with the signature in it
-        path.push_str(&format!("&owner={}", to_hex(&key.owner8).to_ascii_lowercase()));
-    }
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: meshcore-rs\r\nConnection: close\r\n\r\n");
-    socket.write_all(request.as_bytes()).await.map_err(|_| "request not sent")?;
-
-    // the head, and whatever of the body came with it
-    let mut head = Vec::new();
-    let body_at = loop {
-        let mut buf = [0u8; 512];
-        let n = socket.read(&mut buf).await.map_err(|_| "no answer")?;
-        if n == 0 {
-            return Err("no answer");
-        }
-        head.extend_from_slice(&buf[..n]);
-        if let Some(i) = head.windows(4).position(|w| w == b"\r\n\r\n") {
-            break i + 4;
-        }
-        if head.len() > 2048 {
-            return Err("bad answer");
-        }
+    let Some((len, first)) = request(stack, &mut socket, server, key, counter).await? else {
+        return Ok(None);
     };
-    let text = core::str::from_utf8(&head[..body_at]).map_err(|_| "bad answer")?;
-    match text.split(' ').nth(1) {
-        Some("200") => {}
-        Some("404") => return Ok(None),
-        _ => return Err("server error"),
-    }
-    let len: u32 = text
-        .lines()
-        .find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("content-length")).map(|(_, v)| v.trim()))
-        .and_then(|v| v.parse().ok())
-        .ok_or("no length")?;
     if len == 0 || len > SLOT_SIZE {
         return Err("too large");
     }
 
     // the body, a sector at a time: erased, then written
     let mut sector = vec![0xFFu8; SECTOR];
-    let mut fill = (head.len() - body_at).min(len as usize);
-    sector[..fill].copy_from_slice(&head[body_at..body_at + fill]);
+    let mut fill = first.len();
+    sector[..fill].copy_from_slice(&first);
     let (mut received, mut written) = (fill as u32, 0u32);
     loop {
         if fill == SECTOR || received == len {
@@ -374,4 +327,64 @@ async fn fetch(
     }
     let id = u32::from_le_bytes(m.image_sha256[..4].try_into().unwrap()) ^ len;
     Ok(Some(File { key, len, id, counter: m.counter, version: m.version.clone(), used: secs(), fresh_until: 0 }))
+}
+
+/// Ask `server` (`host` or `host:port`) on `socket` for the newest delta for `key` newer than
+/// `counter`: the file's length and what of it came with the answer's head, or `None` if the
+/// server has none. The rest of the file follows on the socket.
+pub(crate) async fn request(
+    stack: Stack<'static>, socket: &mut TcpSocket<'_>, server: &str, key: Key, counter: u32,
+) -> Result<Option<(u32, Vec<u8>)>, &'static str> {
+    let (host, port) = match server.rsplit_once(':') {
+        Some((h, p)) if p.parse::<u16>().is_ok() => (h, p.parse().unwrap()),
+        _ => (server, 80),
+    };
+    let addr = stack.dns_query(host, DnsQueryType::A).await.ok().and_then(|a| a.first().copied()).ok_or("no address")?;
+    if !matches!(with_timeout(Duration::from_secs(10), socket.connect((addr, port))).await, Ok(Ok(()))) {
+        return Err("no connection");
+    }
+    let mut path = format!(
+        "/fw/next/{}/{}/{}?counter={counter}&channel={}",
+        release::board_name(key.board),
+        release::role_name(key.role),
+        to_hex(&key.base_sha8).to_ascii_lowercase(),
+        release::channel_name(key.channel)
+    );
+    if key.owner8 != FwQuery::NO_OWNER {
+        // only a release that owner signed, with the signature in it
+        path.push_str(&format!("&owner={}", to_hex(&key.owner8).to_ascii_lowercase()));
+    }
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: meshcore-rs\r\nConnection: close\r\n\r\n");
+    socket.write_all(request.as_bytes()).await.map_err(|_| "request not sent")?;
+
+    // the head, and whatever of the body came with it
+    let mut head = Vec::new();
+    let body_at = loop {
+        let mut buf = [0u8; 512];
+        let read = with_timeout(Duration::from_secs(30), socket.read(&mut buf)).await;
+        let n = read.map_err(|_| "no answer")?.map_err(|_| "no answer")?;
+        if n == 0 {
+            return Err("no answer");
+        }
+        head.extend_from_slice(&buf[..n]);
+        if let Some(i) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+        if head.len() > 2048 {
+            return Err("bad answer");
+        }
+    };
+    let text = core::str::from_utf8(&head[..body_at]).map_err(|_| "bad answer")?;
+    match text.split(' ').nth(1) {
+        Some("200") => {}
+        Some("404") => return Ok(None),
+        _ => return Err("server error"),
+    }
+    let len: u32 = text
+        .lines()
+        .find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("content-length")).map(|(_, v)| v.trim()))
+        .and_then(|v| v.parse().ok())
+        .ok_or("no length")?;
+    let first = head[body_at..].iter().take(len as usize).copied().collect();
+    Ok(Some((len, first)))
 }

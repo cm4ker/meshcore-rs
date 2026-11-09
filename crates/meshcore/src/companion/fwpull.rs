@@ -1,6 +1,6 @@
 //! Pulling a firmware update (`fw.auto`, see [`crate::fwshare`]). A companion that pins a root
-//! key asks for a delta from the image it runs: on Wi-Fi, the release server (`fw.server`) through
-//! its update store, as a repeater updates itself, so the update takes no air time; connected to
+//! key asks for a delta from the image it runs: on Wi-Fi, the release server (`fw.server`), whose
+//! answer comes in pieces as the server sends it, so the update takes no air time; connected to
 //! nothing, or with the server out of reach, the repeater it hears best directly, a piece at a
 //! time over LoRa. Either way the delta goes into its update slot through the same session an
 //! app's update uses, and is installed when its user says so (`fw.auto download`, then
@@ -34,6 +34,8 @@ const HEARD_RECENTLY_SECS: u32 = 2 * 86_400;
 const PIECES_PER_PASS: usize = 8;
 /// The store came to hold another file while this one loaded: asked again after this long.
 const STORE_CHANGED_MS: u64 = 60_000;
+/// The next bytes of the file are still on their way from the server: looked for again after this.
+const BYTES_WAIT_MS: u64 = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Step {
@@ -392,9 +394,11 @@ impl Companion {
         self.fw_query(ctx);
     }
 
-    /// Pieces of the store's file `id` from `offset`, fed to the update session a few per pass.
+    /// Pieces of the store's file `id` from `offset`, fed to the update session a few per pass, as
+    /// they come from the server.
     fn fw_load(&mut self, ctx: &mut MeshCtx, id: u32, mut offset: u32) {
         let mut buf = [0u8; FW_PIECE];
+        let mut wait = 0;
         for _ in 0..PIECES_PER_PASS {
             let (Some(store), Some(loader)) = (self.fw_store.as_deref_mut(), self.fwpull.loader.as_mut()) else {
                 return self.fw_pull_fail(ctx, "no update file".into());
@@ -407,6 +411,10 @@ impl Companion {
                 self.fwpull.by_hand = by_hand;
                 return;
             };
+            if n < want {
+                wait = BYTES_WAIT_MS; // still on the way
+                break;
+            }
             match loader.feed(&mut self.ota, offset, &buf[..n]) {
                 Ok(Some(next)) => offset = next,
                 Ok(None) => return self.fw_loaded(),
@@ -414,7 +422,7 @@ impl Companion {
             }
         }
         self.fwpull.step = Step::Load { id, offset };
-        self.fwpull.at = ctx.now;
+        self.fwpull.at = ctx.now + wait;
         if let FwState::Downloading { done, .. } = &mut self.fwpull.state {
             *done = offset;
         }

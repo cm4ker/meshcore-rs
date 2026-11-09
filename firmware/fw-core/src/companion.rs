@@ -207,9 +207,9 @@ pub trait Platform {
         true
     }
     /// Updates from the release server, on a platform whose network is up after
-    /// [`Self::start_links`]: kept in flash beside the running image (`image_len` bytes), if it
-    /// has the room.
-    fn fw_store(&mut self, _spawner: &Spawner, _image_len: u32) -> Option<Box<dyn FwStore>> {
+    /// [`Self::start_links`]: their bytes as they come, fed to the update session as pieces
+    /// over LoRa are.
+    fn fw_store(&mut self, _spawner: &Spawner) -> Option<Box<dyn FwStore>> {
         None
     }
     /// Network time (SNTP) and the LAN address, if the platform has a network; `fw_server` is
@@ -509,10 +509,8 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         if links.tcp { ", TCP 5000" } else { "" }
     );
     // on Wi-Fi, updates come from the release server rather than over the air
-    if links.tcp
-        && let Some((image_len, _)) = mesh.app.ota.running()
-    {
-        mesh.app.fw_store = platform.fw_store(&spawner, image_len);
+    if links.tcp {
+        mesh.app.fw_store = platform.fw_store(&spawner);
     }
     // from here on the USB port carries companion frames only
     log::set_max_level(log::LevelFilter::Off);

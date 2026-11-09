@@ -1,7 +1,8 @@
 //! The companion radio on an ESP32: the chip side of `meshcore_fw_core::companion` (BLE, Wi-Fi
 //! and TCP, the serial link, firmware slots, watchdog). Its data lives in the `companion`
 //! partition, apart from the repeater firmware's; firmware updates go over the app link
-//! (`tools/ota-app`), and on Wi-Fi come from the release server ([`fwstore`]), as a repeater's.
+//! (`tools/ota-app`), and on Wi-Fi come from the release server as they do over LoRa
+//! ([`fwstream`]).
 //!
 //! The board crate creates the radio driver and a [`Board`] (front end, LED, screen, button,
 //! battery), then hands over to [`run`].
@@ -26,7 +27,7 @@ pub use meshcore_fw_core::companion::{Board, Config};
 
 use crate::ota::{self, SharedStore, Slots};
 use crate::radio::LoraRadio;
-use crate::{ble, clock_cell, frames, fwstore, net, reset, usb};
+use crate::{ble, clock_cell, frames, fwstream, net, reset, usb};
 
 /// The peripherals the companion loop owns.
 pub struct Hardware<R> {
@@ -161,19 +162,16 @@ impl Platform for Esp {
         }
     }
 
-    fn fw_store(&mut self, spawner: &Spawner, image_len: u32) -> Option<Box<dyn FwStore>> {
-        let (Some(stack), Some(store), Some(slots)) = (self.station, &self.store, self.slots) else {
-            return None;
-        };
-        let region = fwstore::region(&slots, image_len)?;
-        spawner.spawn(fwstore::fetch_task(stack, store.clone(), region).unwrap());
-        Some(Box::new(fwstore::FlashFwStore::new(store.clone(), region)))
+    fn fw_store(&mut self, spawner: &Spawner) -> Option<Box<dyn FwStore>> {
+        let stack = self.station?;
+        spawner.spawn(fwstream::fetch_task(stack).unwrap());
+        Some(Box::new(fwstream::StreamFwStore))
     }
 
     fn poll_network(&mut self, fw_server: &str) -> (Option<u32>, Option<String>) {
         let ip = self.station.and_then(|s| net::ipv4(&s));
         if self.station.is_some() {
-            fwstore::sync(net::WIFI_UP.load(Ordering::Relaxed) && ip.is_some(), fw_server);
+            fwstream::sync(net::WIFI_UP.load(Ordering::Relaxed) && ip.is_some(), fw_server);
         }
         (net::TIME_SYNC.try_take(), ip)
     }

@@ -568,8 +568,7 @@ pub struct Companion {
     pub messages_received: u32,
     /// The latest nodes heard advertising, most recent first.
     pub heard: VecDeque<HeardNode>,
-    /// Updates from the release server, on a board with a network (Wi-Fi) and room in flash to
-    /// keep one; set by the firmware.
+    /// Updates from the release server, on a board with a network (Wi-Fi); set by the firmware.
     pub fw_store: Option<Box<dyn FwStore>>,
     /// Firmware updates pulled from the release server or a neighbouring repeater (`fw.auto`).
     fwpull: fwpull::FwPull,
