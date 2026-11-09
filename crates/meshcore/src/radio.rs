@@ -2,6 +2,27 @@
 
 use crate::MAX_TRANS_UNIT;
 
+/// The lowest `set tx` takes, in dBm (the SX1262's and the LR2021's floor).
+pub const TX_POWER_MIN: i8 = -9;
+
+/// `set tx`'s value: dBm out of the radio chip itself, from [`TX_POWER_MIN`] to `max`, as
+/// upstream's (its RadioLib refuses anything else, after the CLI has said OK). An `amplified` board
+/// (Heltec V4's front end) adds its gain after the chip, which the error tells.
+pub fn parse_tx_power(v: &str, max: i8, amplified: bool) -> Result<i8, alloc::string::String> {
+    let range = alloc::format!("{TX_POWER_MIN} to {max} dBm");
+    let Ok(dbm) = v.trim().parse::<i32>() else {
+        return Err(alloc::format!("Error: a number, {range}"));
+    };
+    if (TX_POWER_MIN as i32..=max as i32).contains(&dbm) {
+        return Ok(dbm as i8);
+    }
+    let mut e = alloc::format!("Error: {dbm} dBm is out of range: the radio chip gives {range}");
+    if amplified {
+        e.push_str("; the amplifier after it adds about 12 dB (tx 16 gives about 28 dBm)");
+    }
+    Err(e)
+}
+
 /// Link margins (dB above the demodulation floor) for dynamic coding rate.
 pub const DYN_CR_STRONG_MARGIN_DB: f32 = 15.0;
 pub const DYN_CR_WEAK_MARGIN_DB: f32 = 7.0;

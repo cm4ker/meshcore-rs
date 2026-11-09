@@ -1984,10 +1984,16 @@ impl Repeater {
         } else if cmd == "get tx" || cmd.starts_with("get tx ") {
             format!("> {}", p.tx_power_dbm)
         } else if let Some(v) = cmd.strip_prefix("set tx ") {
-            p.tx_power_dbm = atoi_signed(v).clamp(-9, 22) as i8;
-            self.effects.tx_power = Some(p.tx_power_dbm);
-            self.save_prefs();
-            "OK".into()
+            let amplified = self.ota.build.board == release::board::HELTEC_V4;
+            match crate::radio::parse_tx_power(v, 22, amplified) {
+                Ok(dbm) => {
+                    p.tx_power_dbm = dbm;
+                    self.effects.tx_power = Some(dbm);
+                    self.save_prefs();
+                    "OK".into()
+                }
+                Err(e) => e,
+            }
         } else if cmd == "get rxdelay" {
             format!("> {}", ftoa(p.rx_delay_base as f64, 3))
         } else if let Some(v) = cmd.strip_prefix("set rxdelay ") {

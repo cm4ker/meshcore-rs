@@ -616,8 +616,18 @@ fn cli_settings_signing_and_keys() {
     assert_eq!(cli(&mut a, "get radio"), "> 869.618,62.5,8,5");
     assert_eq!(cli(&mut a, "set name Alice2"), "OK");
     assert_eq!(cli(&mut a, "01|get name"), "01|> Alice2");
-    assert_eq!(cli(&mut a, "set tx 30"), "OK");
-    assert_eq!(cli(&mut a, "get tx"), "> 22");
+    // above the chip's limit: said so, and nothing changes
+    assert_eq!(cli(&mut a, "set tx 30"), "Error: 30 dBm is out of range: the radio chip gives -9 to 22 dBm");
+    assert_eq!(cli(&mut a, "set tx high"), "Error: a number, -9 to 22 dBm");
+    assert_eq!(cli(&mut a, "set tx 17"), "OK");
+    assert_eq!(cli(&mut a, "get tx"), "> 17");
+    // on a Heltec V4 the amplifier after the chip is named too
+    a.app.ota.build.board = meshcore::release::board::HELTEC_V4;
+    assert_eq!(
+        cli(&mut a, "set tx 28"),
+        "Error: 28 dBm is out of range: the radio chip gives -9 to 22 dBm; the amplifier after it adds about 12 dB (tx 16 gives about 28 dBm)"
+    );
+    assert_eq!(cli(&mut a, "get tx"), "> 17");
     assert_eq!(cli(&mut a, "bogus"), "Unknown command");
     assert!(a.app.take_effects().save_prefs);
     // a key prefix whose hex half ends inside a letter of two bytes: an error, not a panic
@@ -928,6 +938,25 @@ fn repeater_powersaving_cli() {
     assert_eq!(cli(&mut r, "powersaving stats"), "> asleep 50%");
     assert_eq!(cli(&mut r, "powersaving off"), "off");
     assert_eq!(cli(&mut r, "powersaving"), "off");
+}
+
+/// `set tx` beyond what the radio chip gives is refused with the reason, rather than cut to 22 (#1).
+#[test]
+fn repeater_tx_power_out_of_range_is_an_error() {
+    let mut r = repeater(4);
+    r.app.ota.build.board = meshcore::release::board::HELTEC_V4;
+    let cli = |r: &mut Mesh<Repeater>, c: &str| r.app.handle_command(&mut r.ctx, 0, c);
+    assert_eq!(cli(&mut r, "set tx 16"), "OK");
+    assert_eq!(r.app.take_effects().tx_power, Some(16));
+    assert_eq!(
+        cli(&mut r, "set tx 25"),
+        "Error: 25 dBm is out of range: the radio chip gives -9 to 22 dBm; the amplifier after it adds about 12 dB (tx 16 gives about 28 dBm)"
+    );
+    assert_eq!(cli(&mut r, "set tx -10"), "Error: -10 dBm is out of range: the radio chip gives -9 to 22 dBm; the amplifier after it adds about 12 dB (tx 16 gives about 28 dBm)");
+    assert_eq!(r.app.take_effects().tx_power, None, "the radio is left as it was");
+    assert_eq!(cli(&mut r, "get tx"), "> 16");
+    assert_eq!(cli(&mut r, "set tx 22"), "OK");
+    assert_eq!(cli(&mut r, "get tx"), "> 22");
 }
 
 /// `fw.root`: an admin may pin the first root (an admin could install any firmware until then);

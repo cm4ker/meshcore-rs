@@ -4,7 +4,7 @@ use alloc::format;
 
 use super::*;
 use crate::fwstate::{self, FwState};
-use crate::util::{atof, atoi, atoi_signed, ftoa};
+use crate::util::{atof, atoi, ftoa};
 use crate::ota::{OtaEndpoint, OtaOutcome};
 use crate::{FIRMWARE_VERSION, MAX_GROUP_DATA_LENGTH, SIGNATURE_SIZE};
 
@@ -1506,9 +1506,15 @@ impl Companion {
         } else if cmd == "get tx" || cmd.starts_with("get tx ") {
             format!("> {}", p.tx_power_dbm)
         } else if let Some(v) = cmd.strip_prefix("set tx ") {
-            p.tx_power_dbm = atoi_signed(v).clamp(-9, self.board.max_tx_power_dbm as i32) as i8;
-            self.effects.tx_power = Some(p.tx_power_dbm);
-            "OK".into()
+            let amplified = self.ota.build.board == release::board::HELTEC_V4;
+            match crate::radio::parse_tx_power(v, self.board.max_tx_power_dbm, amplified) {
+                Ok(dbm) => {
+                    p.tx_power_dbm = dbm;
+                    self.effects.tx_power = Some(dbm);
+                    "OK".into()
+                }
+                Err(e) => e,
+            }
         } else if cmd == "get rxdelay" {
             format!("> {}", ftoa(p.rx_delay_base as f64, 3))
         } else if let Some(v) = cmd.strip_prefix("set rxdelay ") {
