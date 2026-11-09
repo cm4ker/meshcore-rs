@@ -1691,6 +1691,97 @@ fn a_dev_release_reaches_only_the_nodes_that_follow_dev() {
     assert!(c.app.take_effects().reboot);
 }
 
+/// A store that fetches what it is first asked for from its server, as the firmware's does.
+struct FetchesFirst {
+    inner: meshcore::fwshare::MemStore,
+    fetched: bool,
+}
+
+impl meshcore::fwshare::FwStore for FetchesFirst {
+    fn offer(&mut self, q: &meshcore::fwshare::FwQuery) -> meshcore::fwshare::Offer {
+        if !std::mem::replace(&mut self.fetched, true) {
+            return meshcore::fwshare::Offer::Fetching { retry_secs: 30 };
+        }
+        self.inner.offer(q)
+    }
+    fn read(&mut self, id: u32, offset: u32, buf: &mut [u8]) -> Option<usize> {
+        self.inner.read(id, offset, buf)
+    }
+}
+
+#[test]
+fn a_companion_on_wifi_takes_its_update_from_the_release_server() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&[5u8; 4000]);
+    let image = esp_image(&[6u8; 4100]);
+    let file = delta_release(&root, 5, &base, &image);
+    let (mut c, slot) = pulling_companion(&root, &base);
+    c.app.fw_store = Some(Box::new(FetchesFirst { inner: meshcore::fwshare::MemStore::new(file.clone(), 9), fetched: false }));
+    let cli = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
+
+    assert_eq!(cli(&mut c, "get fw.server"), "> nw.ommesh.ru");
+    assert_eq!(cli(&mut c, "set fw.server a b"), "Error: a host name, or host:port");
+    assert_eq!(cli(&mut c, "set fw.server server.lan:8095"), "OK - release server server.lan:8095");
+    assert_eq!(c.app.prefs.fw_server, "server.lan:8095");
+    assert_eq!(cli(&mut c, "set fw.auto install"), "OK - installs stable releases by itself, from server.lan:8095 or a repeater nearby");
+    assert_eq!(
+        cli(&mut c, "set fw.source auto"),
+        "OK - updates from server.lan:8095, or from the best repeater heard directly without it"
+    );
+    assert_eq!(cli(&mut c, "set fw.auto download"), "OK - downloads stable releases by itself; fw install installs them");
+
+    // no repeater anywhere: the store fetches it from the server, the node loads it from there
+    assert_eq!(cli(&mut c, "fw check"), "OK - asking server.lan:8095, see fw");
+    let mut air = Air::new();
+    air.run(&mut [&mut c], 1_000);
+    assert_eq!(c.app.fw_line(c.ctx.now), "asking server.lan:8095");
+    air.run(&mut [&mut c], 40_000);
+    let kb = (file.len() as u32).div_ceil(1024);
+    assert_eq!(c.app.fw_line(c.ctx.now), format!("0.5.2 #5 ready ({kb} KB): fw install"));
+    assert!(!slot.borrow().1, "fw.auto download: nothing installed until the user says so");
+    assert_eq!(cli(&mut c, "fw install"), "OK - installing 0.5.2 #5: restarting");
+    assert!(slot.borrow().1 && c.app.take_effects().reboot);
+    assert_eq!(&slot.borrow().0[..image.len()], &image[..]);
+}
+
+#[test]
+fn a_companion_whose_server_is_out_of_reach_asks_a_repeater() {
+    let root = LocalIdentity::from_seed(&[42; 32]);
+    let base = esp_image(&[5u8; 4000]);
+    let image = esp_image(&[6u8; 4100]);
+    let file = delta_release(&root, 5, &base, &image);
+    let cli = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
+
+    // Wi-Fi down and no repeater heard: both said
+    let (mut c, _) = pulling_companion(&root, &base);
+    c.app.fw_store = Some(Box::new(Offline));
+    assert_eq!(cli(&mut c, "fw check"), "OK - asking nw.ommesh.ru, see fw");
+    Air::new().run(&mut [&mut c], 5_000);
+    let line = c.app.fw_line(c.ctx.now);
+    assert!(line.starts_with("failed: nw.ommesh.ru not reachable, no repeater heard directly; one with fw.serve on is needed"), "{line}");
+
+    // with a repeater that hands updates on, the update comes over LoRa
+    let mut r = serving_repeater(file);
+    let (mut c, slot) = pulling_companion(&root, &base);
+    c.app.fw_store = Some(Box::new(Offline));
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000);
+    let _ = c.app.fw_check_now(&c.ctx, true);
+    air.run(&mut [&mut r, &mut c], 120_000);
+    assert!(slot.borrow().1 && c.app.take_effects().reboot, "{}", c.app.fw_line(c.ctx.now));
+
+    // a repeater named in fw.source is asked over LoRa even with the server at hand
+    let mut r = serving_repeater(Vec::new());
+    let (mut c, _) = pulling_companion(&root, &base);
+    c.app.fw_store = Some(Box::new(meshcore::fwshare::MemStore::new(Vec::new(), 9)));
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000);
+    let name = r.app.prefs.node_name.clone();
+    assert_eq!(cli(&mut c, &format!("set fw.source {name}")), format!("OK - updates from {name} ({}) over LoRa", meshcore::util::to_hex(&pub_key(&r)[..4])));
+    assert_eq!(cli(&mut c, "fw check"), format!("OK - asking {name}, see fw"));
+}
 
 /// A store whose server had nothing newer when it last asked, and which believes that until it is
 /// told to ask again.

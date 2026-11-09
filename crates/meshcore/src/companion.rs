@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 
 use crate::advert::*;
 use crate::crypto::{self, Secret};
+use crate::fwshare::FwStore;
 use crate::gps::GpsReading;
 use crate::identity::Identity;
 use crate::mesh::{GroupChannel, MeshApp, MeshCtx};
@@ -567,7 +568,10 @@ pub struct Companion {
     pub messages_received: u32,
     /// The latest nodes heard advertising, most recent first.
     pub heard: VecDeque<HeardNode>,
-    /// Firmware updates pulled from a neighbouring repeater (`fw.auto`).
+    /// Updates from the release server, on a board with a network (Wi-Fi) and room in flash to
+    /// keep one; set by the firmware.
+    pub fw_store: Option<Box<dyn FwStore>>,
+    /// Firmware updates pulled from the release server or a neighbouring repeater (`fw.auto`).
     fwpull: fwpull::FwPull,
     /// What the last `fw_do` did, for the custom variable's value.
     fw_done: String,
@@ -624,6 +628,7 @@ impl Companion {
             recent: VecDeque::new(),
             messages_received: 0,
             heard: VecDeque::new(),
+            fw_store: None,
             fwpull: fwpull::FwPull::default(),
             fw_done: String::new(),
             contacts: Vec::new(),

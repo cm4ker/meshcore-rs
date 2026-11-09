@@ -1,4 +1,5 @@
-//! The updates a repeater hands on to its neighbours (`set fw.serve on`, see `meshcore::fwshare`):
+//! The updates a repeater hands on to its neighbours (`set fw.serve on`, see `meshcore::fwshare`),
+//! and the ones a node on Wi-Fi installs itself (a repeater's `fw.auto`, a companion's):
 //! delta files fetched over plain HTTP from the release server (`fw.server`) into the last
 //! [`CACHE_SIZE`] bytes of the running firmware's slot, past its image (an update of this node
 //! writes the other slot), and read from there for the neighbours' FW_GET. What is served is

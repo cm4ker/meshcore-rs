@@ -1,15 +1,17 @@
-//! Pulling a firmware update from a neighbouring repeater (`fw.auto`, see [`crate::fwshare`]).
-//! Connected to nothing, a companion that pins a root key asks the repeater it hears best directly
-//! for a delta from the image it runs, fetches it a piece at a time into its update slot (through
-//! the same session an app's update uses), and installs it when its user says so (`fw.auto
-//! download`, then `fw install` or a button on the device) or by itself (`fw.auto install`).
-//! Where it stands: `fw` and `fw_status` ([`crate::fwstate`]).
+//! Pulling a firmware update (`fw.auto`, see [`crate::fwshare`]). A companion that pins a root
+//! key asks for a delta from the image it runs: on Wi-Fi, the release server (`fw.server`) through
+//! its update store, as a repeater updates itself, so the update takes no air time; connected to
+//! nothing, or with the server out of reach, the repeater it hears best directly, a piece at a
+//! time over LoRa. Either way the delta goes into its update slot through the same session an
+//! app's update uses, and is installed when its user says so (`fw.auto download`, then
+//! `fw install` or a button on the device) or by itself (`fw.auto install`). Where it stands: `fw`
+//! and `fw_status` ([`crate::fwstate`]).
 
 use alloc::string::ToString;
 
 use super::*;
 use crate::FIRMWARE_VERSION;
-use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, status};
+use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, Offer, status};
 use crate::fwstate::{self, FwState, mode};
 use crate::ota::{OtaOutcome, REQ_TYPE_OTA_ABORT, REQ_TYPE_OTA_COMMIT};
 
@@ -18,6 +20,8 @@ const FIRST_CHECK_MS: u64 = 10 * 60_000;
 const CHECK_EVERY_MS: u64 = 12 * 3_600_000;
 /// After a failure or with no repeater to ask.
 const RETRY_LATER_MS: u64 = 3_600_000;
+/// While an update over the app link is under way.
+const BUSY_RETRY_MS: u64 = 10 * 60_000;
 /// A request and its answer take well under a second on air; past this it is asked again.
 const ANSWER_WAIT_MS: u64 = 8_000;
 const TRIES: u8 = 6;
@@ -25,10 +29,18 @@ const TRIES: u8 = 6;
 const PIECE_GAP_MS: u64 = 1_200;
 /// Repeaters heard directly within this long are asked.
 const HEARD_RECENTLY_SECS: u32 = 2 * 86_400;
+/// Pieces fed from the store per pass of the main loop: it keeps serving the radio and the app
+/// meanwhile.
+const PIECES_PER_PASS: usize = 8;
+/// The store came to hold another file while this one loaded: asked again after this long.
+const STORE_CHANGED_MS: u64 = 60_000;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Step {
     Sleep,
+    /// From the store, the piece at `offset` of its file `id` next.
+    Load { id: u32, offset: u32 },
+    /// Over LoRa: waiting for the repeater's answer to a query, or to the request for a piece.
     Query,
     Get { offset: u32 },
     Ready,
@@ -57,6 +69,8 @@ pub struct FwPull {
     by_hand: Option<Hand>,
     /// The next query was asked for by hand: the repeater should not answer from what it knew.
     fresh: bool,
+    /// The store said the server can't be reached: that is why a repeater is asked.
+    server_down: bool,
 }
 
 impl Default for FwPull {
@@ -73,6 +87,7 @@ impl Default for FwPull {
             loader: None,
             by_hand: None,
             fresh: false,
+            server_down: false,
         }
     }
 }
@@ -130,10 +145,8 @@ impl Companion {
             return;
         }
         match self.fwpull.step {
-            Step::Sleep => {
-                self.fwpull.tries = 0;
-                self.fw_query(ctx);
-            }
+            Step::Sleep => self.fw_check(ctx),
+            Step::Load { id, offset } => self.fw_load(ctx, id, offset),
             Step::Query | Step::Get { .. } if self.fwpull.tries >= TRIES => {
                 let name = self.fw_repeater_name();
                 self.fw_pull_fail(ctx, alloc::format!("no answer from {name}"));
@@ -191,9 +204,19 @@ impl Companion {
         self.fwpull.by_hand = Some(if update { Hand::Update } else { Hand::Check });
         self.fwpull.at = ctx.now;
         self.fwpull.fresh = true; // asked by hand
-        let whom = match self.fw_repeater(ctx) {
-            Some(idx) => self.contacts[idx].name_lossy(),
-            None => "the repeaters heard".into(),
+        let whom = if self.fw_from_store() {
+            // not what the store last heard from the server
+            if let Some(q) = self.fw_own_query()
+                && let Some(store) = self.fw_store.as_deref_mut()
+            {
+                store.refresh(&q);
+            }
+            self.prefs.fw_server.clone()
+        } else {
+            match self.fw_repeater(ctx) {
+                Some(idx) => self.contacts[idx].name_lossy(),
+                None => "the repeaters heard".into(),
+            }
         };
         Ok(match update {
             true => alloc::format!("asking {whom}; if there is an update the device installs it and restarts"),
@@ -295,6 +318,108 @@ impl Companion {
         if self.fwpull.by_hand == Some(Hand::Update) { room } else { room.min(fwshare::MAX_LORA_FILE) }
     }
 
+    /// The release server is asked first: the node has a store, and `fw.source` names no repeater.
+    fn fw_from_store(&self) -> bool {
+        self.prefs.fw_source.is_empty() && self.fw_store.is_some()
+    }
+
+    /// What this node asks for: an update from the image it runs.
+    fn fw_own_query(&mut self) -> Option<FwQuery> {
+        let (base_len, base_sha) = self.ota.running()?;
+        Some(FwQuery {
+            board: self.ota.build.board,
+            role: self.ota.build.role,
+            counter: self.ota.build.counter,
+            base_len,
+            base_sha8: base_sha[..8].try_into().unwrap(),
+            channel: self.prefs.fw_channel,
+            fresh: false,
+            owner8: FwQuery::owner_of(&self.ota.owners),
+            max_file: self.fw_max_file(),
+        })
+    }
+
+    /// The release `counter` was rolled back on this node before: only a check by hand takes it.
+    fn fw_skipped(&self, counter: u32) -> bool {
+        counter == self.board.fw_skip && self.fwpull.by_hand.is_none()
+    }
+
+    /// A check: the release server through the store while the node is on Wi-Fi, else a
+    /// repeater over LoRa.
+    fn fw_check(&mut self, ctx: &mut MeshCtx) {
+        if self.ota.busy() {
+            // an update over the app link is under way
+            self.fwpull.at = ctx.now + BUSY_RETRY_MS;
+            return;
+        }
+        self.fwpull.tries = 0;
+        self.fwpull.server_down = false;
+        if self.fw_from_store() {
+            let Some(q) = self.fw_own_query() else {
+                return self.fw_pull_fail(ctx, "can't read this firmware's image".into());
+            };
+            let Some(store) = self.fw_store.as_deref_mut() else { return };
+            let offer = store.offer(&q);
+            let server = self.prefs.fw_server.clone();
+            match offer {
+                Offer::Ready { counter, version, .. } if counter > q.counter && self.fw_skipped(counter) => {
+                    let release = fwstate::Release::new(&version, counter);
+                    return self.fw_sleep(ctx, CHECK_EVERY_MS, FwState::Skipped { release });
+                }
+                Offer::Ready { len, id, counter, version } if counter > q.counter => {
+                    let release = fwstate::Release::new(&version, counter);
+                    let p = &mut self.fwpull;
+                    p.step = Step::Load { id, offset: 0 };
+                    p.loader = Some(Loader::new(len, self.prefs.fw_channel));
+                    p.state = FwState::Downloading { release: release.clone(), from: server, done: 0, total: len };
+                    p.release = release;
+                    p.at = ctx.now;
+                    return;
+                }
+                Offer::Fetching { retry_secs } => {
+                    self.fwpull.state = FwState::Asking { whom: server };
+                    self.fwpull.at = ctx.now + retry_secs as u64 * 1000;
+                    return;
+                }
+                Offer::Ready { .. } | Offer::NoUpdate => {
+                    let at = ctx.current_time();
+                    return self.fw_sleep(ctx, CHECK_EVERY_MS, FwState::UpToDate { whom: server, at });
+                }
+                // no link to the server now: a repeater nearby may have one
+                Offer::Unavailable => self.fwpull.server_down = true,
+            }
+        }
+        self.fw_query(ctx);
+    }
+
+    /// Pieces of the store's file `id` from `offset`, fed to the update session a few per pass.
+    fn fw_load(&mut self, ctx: &mut MeshCtx, id: u32, mut offset: u32) {
+        let mut buf = [0u8; FW_PIECE];
+        for _ in 0..PIECES_PER_PASS {
+            let (Some(store), Some(loader)) = (self.fw_store.as_deref_mut(), self.fwpull.loader.as_mut()) else {
+                return self.fw_pull_fail(ctx, "no update file".into());
+            };
+            let want = loader.want(offset);
+            let Some(n) = store.read(id, offset, &mut buf[..want]) else {
+                // the store holds another file now: asked again, the way it was asked
+                let (by_hand, whom) = (self.fwpull.by_hand, self.prefs.fw_server.clone());
+                self.fw_sleep(ctx, STORE_CHANGED_MS, FwState::Asking { whom });
+                self.fwpull.by_hand = by_hand;
+                return;
+            };
+            match loader.feed(&mut self.ota, offset, &buf[..n]) {
+                Ok(Some(next)) => offset = next,
+                Ok(None) => return self.fw_loaded(),
+                Err(why) => return self.fw_pull_fail(ctx, why.into()),
+            }
+        }
+        self.fwpull.step = Step::Load { id, offset };
+        self.fwpull.at = ctx.now;
+        if let FwState::Downloading { done, .. } = &mut self.fwpull.state {
+            *done = offset;
+        }
+    }
+
     /// The repeater to ask: the one set (`fw.source`), else the best heard directly lately.
     fn fw_repeater(&self, ctx: &MeshCtx) -> Option<usize> {
         if !self.prefs.fw_source.is_empty() {
@@ -342,28 +467,22 @@ impl Companion {
     fn fw_query(&mut self, ctx: &mut MeshCtx) {
         if self.fwpull.tries == 0 {
             let Some(idx) = self.fw_repeater(ctx) else {
+                let server = match self.fwpull.server_down {
+                    true => alloc::format!("{} not reachable, ", self.prefs.fw_server),
+                    false => String::new(),
+                };
                 let why = match self.prefs.fw_source.is_empty() {
-                    true => "no repeater heard directly; one with fw.serve on is needed".into(),
+                    true => alloc::format!("{server}no repeater heard directly; one with fw.serve on is needed"),
                     false => alloc::format!("{} is not a contact", crate::util::to_hex(&self.prefs.fw_source)),
                 };
                 return self.fw_pull_fail(ctx, why);
             };
             self.fwpull.repeater = self.contacts[idx].id.pub_key;
         }
-        let Some((base_len, base_sha)) = self.ota.running() else {
+        let Some(mut q) = self.fw_own_query() else {
             return self.fw_pull_fail(ctx, "can't read this firmware's image".into());
         };
-        let q = FwQuery {
-            board: self.ota.build.board,
-            role: self.ota.build.role,
-            counter: self.ota.build.counter,
-            base_len,
-            base_sha8: base_sha[..8].try_into().unwrap(),
-            channel: self.prefs.fw_channel,
-            fresh: core::mem::take(&mut self.fwpull.fresh),
-            owner8: FwQuery::owner_of(&self.ota.owners),
-            max_file: self.fw_max_file(),
-        };
+        q.fresh = core::mem::take(&mut self.fwpull.fresh);
         self.fwpull.step = Step::Query;
         if !matches!(self.fwpull.state, FwState::Fetching { .. }) {
             self.fwpull.state = FwState::Asking { whom: self.fw_repeater_name() };
@@ -408,8 +527,7 @@ impl Companion {
                 let counter = read_u32(body, 8);
                 let vlen = (body[12] as usize).min(body.len() - 13);
                 let release = fwstate::Release::new(&String::from_utf8_lossy(&body[13..13 + vlen]), counter);
-                // rolled back from before: only a check by hand takes it
-                if counter == self.board.fw_skip && self.fwpull.by_hand.is_none() {
+                if self.fw_skipped(counter) {
                     self.fw_sleep(ctx, CHECK_EVERY_MS, FwState::Skipped { release });
                     return true;
                 }
@@ -461,12 +579,19 @@ impl Companion {
         if let FwState::Downloading { done, .. } = &mut self.fwpull.state {
             *done = next.unwrap_or(len);
         }
-        if let Some(next) = next {
-            self.fwpull.step = Step::Get { offset: next };
-            self.fwpull.at = ctx.now + PIECE_GAP_MS;
-            return Ok(());
+        match next {
+            Some(next) => {
+                self.fwpull.step = Step::Get { offset: next };
+                self.fwpull.at = ctx.now + PIECE_GAP_MS;
+            }
+            None => self.fw_loaded(),
         }
-        // the whole patch is in the session: wait for the word to install (or install now)
+        Ok(())
+    }
+
+    /// The whole patch is in the session: wait for the word to install (or install now).
+    fn fw_loaded(&mut self) {
+        let len = self.fwpull.loader.as_ref().map_or(0, |l| l.file_len());
         let install = self.prefs.fw_mode == mode::INSTALL || self.fwpull.by_hand == Some(Hand::Update);
         self.fwpull.step = Step::Ready;
         self.fwpull.by_hand = None;
@@ -474,6 +599,5 @@ impl Companion {
         if install {
             let _ = self.fw_install();
         }
-        Ok(())
     }
 }

@@ -1118,8 +1118,8 @@ impl Companion {
     }
 
     /// Updates, as on a repeater: `fw` (where it all stands), `fw check`, `fw update`,
-    /// `fw install`, `fw rollback`, and `get|set fw.auto`, `fw.channel`, `fw.source`, `fw.root`
-    /// (the keys a release must be signed by), `fw.owner`. The keys are never set by a `remote`
+    /// `fw install`, `fw rollback`, and `get|set fw.auto`, `fw.channel`, `fw.source`, `fw.server`,
+    /// `fw.root` (the keys a release must be signed by), `fw.owner`. The keys are never set by a `remote`
     /// contact: a companion takes no firmware over the mesh until a root is pinned, and pinning
     /// one is what lets a repeater hand it firmware.
     fn handle_fw_command(&mut self, ctx: &MeshCtx, remote: bool, cmd: &str) -> Option<String> {
@@ -1150,9 +1150,10 @@ impl Companion {
             "get fw.channel" => format!("> {}", release::channel_name(self.prefs.fw_channel)),
             "get fw.source" if self.prefs.fw_source.is_empty() => "> auto".into(),
             "get fw.source" => format!("> {}", self.fw_source_label()),
+            "get fw.server" => format!("> {}", self.prefs.fw_server),
             _ => {
                 let (name, value) = cmd.strip_prefix("set fw.")?.split_once(' ')?;
-                if !["root", "owner", "auto", "channel", "source"].contains(&name) {
+                if !["root", "owner", "auto", "channel", "source", "server"].contains(&name) {
                     return None;
                 }
                 reply(self.fw_setting(ctx, remote, &format!("fw_{name}"), value.trim()))
@@ -1210,6 +1211,9 @@ impl Companion {
                     (fwstate::mode::OFF, _) => "no updates by itself".into(),
                     (_, Some(s @ (FwState::NoRoot | FwState::NoSlot))) => format!("but {}", s.line()),
                     (fwstate::mode::DOWNLOAD, _) => format!("downloads {ch} releases by itself; fw install installs them"),
+                    _ if self.fw_store.is_some() => {
+                        format!("installs {ch} releases by itself, from {} or a repeater nearby", self.prefs.fw_server)
+                    }
                     _ => format!("installs {ch} releases by itself, from a repeater nearby"),
                 })
             }
@@ -1234,10 +1238,19 @@ impl Companion {
                 };
                 self.prefs.fw_source = key;
                 save(self);
-                Ok(match self.prefs.fw_source.is_empty() {
-                    true => "updates from the best repeater heard directly".into(),
-                    false => format!("updates from {}", self.fw_source_label()),
+                Ok(match (self.prefs.fw_source.is_empty(), self.fw_store.is_some()) {
+                    (true, true) => format!("updates from {}, or from the best repeater heard directly without it", self.prefs.fw_server),
+                    (true, false) => "updates from the best repeater heard directly".into(),
+                    (false, _) => format!("updates from {} over LoRa", self.fw_source_label()),
                 })
+            }
+            "fw_server" => {
+                if value.is_empty() || value.len() > 63 || value.contains(char::is_whitespace) {
+                    return Err(FwError::Value("a host name, or host:port".into()));
+                }
+                self.prefs.fw_server = value.into();
+                save(self);
+                Ok(format!("release server {value}"))
             }
             "fw_do" => {
                 let r = match value {

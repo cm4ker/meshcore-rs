@@ -23,7 +23,7 @@ pub enum Page {
     Update,
     /// The node's contact as a QR code.
     Contact,
-    /// A companion's firmware update, pulled from a neighbouring repeater (`fw_pull`).
+    /// A companion's firmware update, pulled from the release server or a neighbouring repeater (`fw.auto`).
     Pull,
 }
 
@@ -37,7 +37,7 @@ pub enum Action {
     /// The repeater's update window over BLE: open it (the PIN goes on the screen), or close it
     /// if no phone is connected.
     ToggleUpdate,
-    /// Install the update pulled from a neighbouring repeater, or ask for one now.
+    /// Install the update pulled from the release server or a neighbouring repeater, or ask for one now.
     Pull,
 }
 
@@ -220,7 +220,7 @@ pub struct OtaWindow {
     pub mins_left: u32,
 }
 
-/// A companion's update pulled from a neighbouring repeater, in words for the screen.
+/// A companion's update pulled from the release server or a neighbouring repeater, in words for the screen.
 #[derive(Clone, PartialEq, Debug)]
 pub struct PullInfo {
     /// Where it stands, a few words ("Обновлений нет", "0.5.2 готова").

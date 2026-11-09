@@ -20,6 +20,7 @@ use embassy_time::{Instant, Timer};
 use embedded_storage::nor_flash::NorFlash;
 use log::{error, info, warn};
 use meshcore::companion::{BlobStore, Board as BoardInfo, Companion, CompanionPrefs, RecentMessage};
+use meshcore::fwshare::FwStore;
 use meshcore::fwstate::FwState;
 use meshcore::crypto;
 use meshcore::identity::LocalIdentity;
@@ -205,8 +206,15 @@ pub trait Platform {
     fn usb_has_room(&self) -> bool {
         true
     }
-    /// Network time (SNTP) and the LAN address, if the platform has a network.
-    fn poll_network(&mut self) -> (Option<u32>, Option<String>) {
+    /// Updates from the release server, on a platform whose network is up after
+    /// [`Self::start_links`]: kept in flash beside the running image (`image_len` bytes), if it
+    /// has the room.
+    fn fw_store(&mut self, _spawner: &Spawner, _image_len: u32) -> Option<Box<dyn FwStore>> {
+        None
+    }
+    /// Network time (SNTP) and the LAN address, if the platform has a network; `fw_server` is
+    /// the release server its update store asks.
+    fn poll_network(&mut self, _fw_server: &str) -> (Option<u32>, Option<String>) {
         (None, None)
     }
 }
@@ -255,8 +263,8 @@ async fn battery_mv<B: Board>(board: &mut B, set: f32) -> u16 {
     }
 }
 
-/// The update page: where pulling an update from a neighbouring repeater stands, in the same
-/// words as `fw` (in Russian).
+/// The update page: where pulling an update from the release server or a neighbouring repeater
+/// stands, in the same words as `fw` (in Russian).
 fn pull_info(app: &Companion, now: u64) -> PullInfo {
     let version = meshcore::release::running_label(&app.board.build_date);
     let state = app.fw_state();
@@ -500,6 +508,12 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         if links.ble { ", BLE" } else { "" },
         if links.tcp { ", TCP 5000" } else { "" }
     );
+    // on Wi-Fi, updates come from the release server rather than over the air
+    if links.tcp
+        && let Some((image_len, _)) = mesh.app.ota.running()
+    {
+        mesh.app.fw_store = platform.fw_store(&spawner, image_len);
+    }
     // from here on the USB port carries companion frames only
     log::set_max_level(log::LevelFilter::Off);
 
@@ -709,8 +723,8 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             }
         }
 
-        // network: SNTP time, address for `get wifi.*`
-        let (time, ip) = platform.poll_network();
+        // network: SNTP time, address for `get wifi.*`, the release server for the update store
+        let (time, ip) = platform.poll_network(&mesh.app.prefs.fw_server);
         if let Some(t) = time
             && t.abs_diff(mesh.ctx.current_time()) > 2
         {

@@ -84,10 +84,15 @@ pub struct CompanionPrefs {
     /// Fingerprints of the owner keys one of which must sign a release too (`fw.owner`, custom
     /// variable `fw_owner`); none = the root's signature is enough.
     pub ota_owners: Vec<Fingerprint>,
-    /// What this node does about updates from a neighbouring repeater by itself (`fw.auto`, see
-    /// [`crate::fwshare`] and `crate::fwstate::mode`). Only with a pinned root. Off by default.
+    /// What this node does about updates by itself (`fw.auto`, see [`crate::fwshare`] and
+    /// `crate::fwstate::mode`): from the release server over Wi-Fi, else from a neighbouring
+    /// repeater. Only with a pinned root. Off by default.
     pub fw_mode: u8,
-    /// Public key prefix of the repeater to ask; empty = the best one heard directly.
+    /// Host of the release server, asked while the node is on Wi-Fi (plain HTTP: what it serves
+    /// is signed).
+    pub fw_server: String,
+    /// Public key prefix of the repeater to ask, over LoRa even with Wi-Fi; empty = the release
+    /// server, else the best repeater heard directly.
     pub fw_source: Vec<u8>,
     /// The release channel followed (`release::channel`): stable by default.
     pub fw_channel: u8,
@@ -137,6 +142,7 @@ impl Default for CompanionPrefs {
             ota_roots: crate::release::default_roots(),
             ota_owners: Vec::new(),
             fw_mode: crate::fwstate::mode::OFF,
+            fw_server: "nw.ommesh.ru".into(),
             fw_source: Vec::new(),
             fw_channel: 0,
         }
@@ -215,6 +221,7 @@ impl CompanionPrefs {
         let _ = writeln!(s, "ota_root={}", join_fingerprints(&self.ota_roots, ","));
         let _ = writeln!(s, "ota_owner={}", join_fingerprints(&self.ota_owners, ","));
         let _ = writeln!(s, "fw_mode={}", self.fw_mode);
+        let _ = writeln!(s, "fw_server={}", escape(&self.fw_server));
         let _ = writeln!(s, "fw_source={}", crate::util::to_hex(&self.fw_source));
         let _ = writeln!(s, "fw_channel={}", self.fw_channel);
         s
@@ -279,6 +286,7 @@ impl CompanionPrefs {
                 // `fw_pull` before the rename, with the same numbers (on = download, auto = install)
                 "fw_mode" | "fw_pull" => p.fw_mode = u8v().min(crate::fwstate::mode::INSTALL),
                 "fw_channel" => p.fw_channel = u8v().min(1),
+                "fw_server" => p.fw_server = unescape(v),
                 "fw_source" => {
                     let mut key = alloc::vec![0u8; (v.len() / 2).min(32)];
                     let hex = &v[..key.len() * 2];
@@ -305,6 +313,7 @@ mod tests {
             default_scope_name: "omsk".into(),
             default_scope_key: [7; 16],
             tz_offset: -5,
+            fw_server: "server.lan:8095".into(),
             ..Default::default()
         };
         p.radio.freq_mhz = 869.525;
