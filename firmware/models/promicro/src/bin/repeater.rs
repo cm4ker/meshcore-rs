@@ -52,7 +52,7 @@ use meshcore_fw_core::storage::{Blob, SharedStore, Store};
 use meshcore_fw_core::sx1262::Sx1262;
 use promicro::board::{self, Battery};
 use promicro::flash::Flash;
-use promicro::sensors::Sensors;
+use meshcore_fw_core::sensors::Sensors;
 use promicro::{DATA_OVERFLOW, DATA_REGION, ble, console, ota, println, sd};
 use static_cell::StaticCell;
 
@@ -571,7 +571,7 @@ async fn main(spawner: Spawner) {
             let mut channel = sensors.read_lpp(&mut lpp).await;
             // text-described sensors (`sensor add`): each takes the next channel, in list order
             for d in &mesh.app.sensor_descriptors {
-                meshcore_fw_core::sensor::read_descriptor(d, &mut sensors.i2c, channel, &mut lpp).await;
+                meshcore_fw_core::sensors::read_descriptor(d, &mut sensors.i2c, channel, &mut lpp).await;
                 channel += 1;
             }
             let _ = channel;

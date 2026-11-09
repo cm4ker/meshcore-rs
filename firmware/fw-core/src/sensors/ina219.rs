@@ -1,11 +1,15 @@
 //! An INA219 current sensor on the board's I2C (upstream `ENV_INCLUDE_INA219`): bus voltage,
 //! current and power for telemetry, set up as Adafruit_INA219's `begin()` does (32 V / 2 A
 //! calibration, for the 0.1 Ω shunt of the usual breakout boards).
+//!
+//! The current is signed, as the chip and upstream report it: positive when it flows into the
+//! shunt at VIN+ and out at VIN-, negative the other way. Which way is "charging" depends on how
+//! the shunt is wired; the bus voltage is measured at VIN-.
 
 use alloc::vec::Vec;
 
-use embassy_nrf::twim::Twim;
 use embassy_time::{Duration, with_timeout};
+use embedded_hal_async::i2c::I2c;
 use meshcore::lpp;
 
 /// Upstream `TELEM_INA219_ADDRESS`.
@@ -47,12 +51,12 @@ pub struct Ina219;
 
 impl Ina219 {
     /// The sensor set up, or `None` if nothing answers at its address.
-    pub async fn probe(i2c: &mut Twim<'static>) -> Option<Self> {
+    pub async fn probe<I: I2c>(i2c: &mut I) -> Option<Self> {
         (write(i2c, REG_CALIBRATION, CALIBRATION_32V_2A).await && write(i2c, REG_CONFIG, CONFIG_32V_2A).await)
             .then_some(Self)
     }
 
-    pub async fn read(&self, i2c: &mut Twim<'static>) -> Option<Reading> {
+    pub async fn read<I: I2c>(&self, i2c: &mut I) -> Option<Reading> {
         let bus = register(i2c, REG_BUS_VOLTAGE).await?;
         // a sharp load can reset the chip and its calibration with it: Adafruit's driver writes
         // the calibration again before reading current or power
@@ -68,12 +72,12 @@ impl Ina219 {
     }
 }
 
-async fn write(i2c: &mut Twim<'static>, reg: u8, value: u16) -> bool {
+async fn write<I: I2c>(i2c: &mut I, reg: u8, value: u16) -> bool {
     let [hi, lo] = value.to_be_bytes();
     matches!(with_timeout(TIMEOUT, i2c.write(ADDRESS, &[reg, hi, lo])).await, Ok(Ok(())))
 }
 
-async fn register(i2c: &mut Twim<'static>, reg: u8) -> Option<u16> {
+async fn register<I: I2c>(i2c: &mut I, reg: u8) -> Option<u16> {
     let mut buf = [0u8; 2];
     matches!(with_timeout(TIMEOUT, i2c.write_read(ADDRESS, &[reg], &mut buf)).await, Ok(Ok(())))
         .then(|| u16::from_be_bytes(buf))

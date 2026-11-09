@@ -16,10 +16,8 @@ pub mod board;
 pub mod companion;
 pub mod console;
 pub mod flash;
-pub mod ina219;
 pub mod ota;
 pub mod sd;
-pub mod sensors;
 pub mod usb_frames;
 
 /// The node's data in the internal flash (`meshcore_fw_core::storage`, the 64 KiB layout

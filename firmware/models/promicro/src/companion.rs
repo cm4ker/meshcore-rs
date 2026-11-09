@@ -10,15 +10,16 @@ use core::sync::atomic::Ordering;
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Output};
 use embassy_nrf::temp::Temp;
+use embassy_nrf::twim::Twim;
 use embassy_nrf::wdt::WatchdogHandle;
 use meshcore::companion::CompanionPrefs;
 use meshcore::ota::FirmwareTarget;
 use meshcore_fw_core::companion::{BleSetup, Board, Links, Platform};
+use meshcore_fw_core::sensors::Sensors;
 use meshcore_fw_core::storage::SharedStore;
 
 use crate::board::{self, Battery};
 use crate::flash::Flash;
-use crate::sensors::Sensors;
 use crate::usb_frames::{USB_HOST, USB_OUT};
 use crate::{ble, ota, sd};
 
@@ -132,7 +133,7 @@ pub struct ProMicro {
     pub battery: Battery,
     /// Read while the SoftDevice is off; it has the TEMP peripheral while it runs.
     pub temp: Temp<'static>,
-    pub sensors: Sensors,
+    pub sensors: Sensors<Twim<'static>>,
 }
 
 impl Board for ProMicro {

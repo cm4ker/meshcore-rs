@@ -42,7 +42,7 @@ use meshcore_fw_core::sx1262::Sx1262;
 use promicro::board::{self, Battery};
 use promicro::companion::{Nrf, ProMicro};
 use promicro::flash::Flash;
-use promicro::sensors::Sensors;
+use meshcore_fw_core::sensors::Sensors;
 use promicro::{COMPANION_ASIDE, COMPANION_REGION, COMPANION_REGION_BEFORE, DATA_REGION, console, ota, sd, usb_frames};
 use static_cell::StaticCell;
 

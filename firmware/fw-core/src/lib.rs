@@ -8,9 +8,6 @@
 
 extern crate alloc;
 
-pub mod ahtx0;
-pub mod bme280;
-pub mod bmp280;
 pub mod companion;
 pub mod frames;
 pub mod fwtext;
@@ -19,9 +16,7 @@ pub mod links;
 pub mod lr2021;
 pub mod noise;
 pub mod radio;
-pub mod sensor;
-pub mod sht4x;
-pub mod shtc3;
+pub mod sensors;
 pub mod storage;
 pub mod sx1262;
 
