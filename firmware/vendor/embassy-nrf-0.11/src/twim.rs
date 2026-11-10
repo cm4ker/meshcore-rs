@@ -373,6 +373,18 @@ impl<'d> Twim<'d> {
             if r.events_error().read() != 0 {
                 r.events_error().write_value(0);
                 r.tasks_stop().write_value(1);
+                // meshcore-rs: the STOPPED that follows is waited for, as the blocking waits do.
+                // Left behind, it came during the next transfer and ended it before it began:
+                // after an address nobody answered, the next transfer "succeeded" with nothing
+                // on the bus (a scan saw every other address answer; sensors probed after an
+                // absent one were not found). It takes microseconds; bounded, as a bus held low
+                // never sends it.
+                for _ in 0..100_000 {
+                    if r.events_stopped().read() != 0 {
+                        break;
+                    }
+                }
+                r.events_stopped().write_value(0);
                 if let Err(e) = self.check_errorsrc() {
                     return Poll::Ready(Err(e));
                 } else {
