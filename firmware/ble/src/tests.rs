@@ -654,6 +654,35 @@ fn the_signalling_channel_and_the_short_interval() {
 }
 
 #[test]
+fn switched_off_and_on() {
+    let mut sim = Sim::new(config(None, vec![]), (251, 12));
+    sim.connect(1, Phone::new(1).address);
+    sim.commands.clear();
+    // off: no advertising, and the phone is dropped, to no new advertising
+    sim.host.enable(false);
+    sim.host.enable(false);
+    sim.run();
+    assert_eq!(sim.commands, [(LE_SET_ADVERTISING_ENABLE, vec![0]), (DISCONNECT, vec![0x41, 0, 0x13])]);
+    assert_eq!(sim.take_events(), [Event::Connected, Event::Disconnected(0x16)]);
+    // a phone that got in just before is dropped as well
+    sim.connect(1, Phone::new(1).address);
+    assert_eq!(sim.take_events(), [Event::Connected, Event::Disconnected(0x16)]);
+    sim.commands.clear();
+    sim.host.enable(true);
+    sim.run();
+    let opcodes: Vec<u16> = sim.commands.iter().map(|c| c.0).collect();
+    assert_eq!(opcodes, [0x2006, 0x2008, 0x2009, 0x200A]);
+    assert_eq!(sim.commanded(LE_SET_ADVERTISING_ENABLE), Some(&[1][..]));
+    // on with a phone connected: no advertising until it leaves
+    sim.connect(1, Phone::new(1).address);
+    sim.host.enable(false);
+    sim.host.enable(true);
+    sim.commands.clear();
+    sim.run();
+    assert_eq!(sim.commands.last().unwrap(), &(LE_SET_ADVERTISING_ENABLE, vec![1]), "after the disconnect");
+}
+
+#[test]
 fn bonds_as_stored() {
     let bond = |n: u8| Bond { kind: n & 1, address: [n; 6], ltk: [n; 16], irk: [n ^ 0xFF; 16], authenticated: n != 2, bonded: true };
     let mut stored = bonds_to_bytes(&[bond(1), Bond { bonded: false, ..bond(7) }, bond(2)]);

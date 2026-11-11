@@ -234,6 +234,8 @@ pub struct Host {
     kept_cccd: Option<(Bond, u16)>,
     /// A signalling request's identifier: any but zero.
     identifier: u8,
+    /// Phones are wanted: advertise for one (see [`Host::enable`]).
+    enabled: bool,
     now: u32,
 }
 
@@ -280,6 +282,7 @@ impl Host {
             connection: None,
             kept_cccd: None,
             identifier: 0,
+            enabled: true,
             now: 0,
         };
         host.command(RESET, &[]);
@@ -309,6 +312,9 @@ impl Host {
 
     /// Advertise, connectable by anyone: the service, and the name for those who ask.
     fn advertise(&mut self) {
+        if !self.enabled || self.connection.is_some() {
+            return;
+        }
         // every 160 ms on all three channels, from the random address
         self.command(LE_SET_ADVERTISING_PARAMETERS, &[0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x07, 0x00]);
         let mut data = [0u8; 32];
@@ -400,6 +406,21 @@ impl Host {
             let handle = handle.to_le_bytes();
             // remote user terminated connection
             self.command(DISCONNECT, &[handle[0], handle[1], 0x13]);
+        }
+    }
+
+    /// Take phones or not: off, the device stops advertising and drops the phone it has. A host is
+    /// on until told otherwise.
+    pub fn enable(&mut self, on: bool) {
+        if self.enabled == on {
+            return;
+        }
+        self.enabled = on;
+        if on {
+            self.advertise();
+        } else {
+            self.command(LE_SET_ADVERTISING_ENABLE, &[0]);
+            self.disconnect();
         }
     }
 
@@ -519,6 +540,9 @@ impl Host {
             incoming: Vec::new(),
         });
         self.out.event(Event::Connected);
+        if !self.enabled {
+            self.disconnect(); // it came in as advertising was being switched off
+        }
     }
 
     fn disconnected(&mut self, handle: u16, reason: u8) {

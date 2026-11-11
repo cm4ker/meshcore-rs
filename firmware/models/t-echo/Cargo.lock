@@ -1272,6 +1272,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "meshcore-ble"
+version = "0.1.0"
+dependencies = [
+ "aes 0.9.3",
+ "p256",
+]
+
+[[package]]
 name = "meshcore-fw-core"
 version = "0.1.0"
 dependencies = [
@@ -1866,6 +1874,7 @@ dependencies = [
  "heapless 0.9.3",
  "log",
  "meshcore",
+ "meshcore-ble",
  "meshcore-fw-core",
  "meshcore-ui",
  "nrf-mpsl",

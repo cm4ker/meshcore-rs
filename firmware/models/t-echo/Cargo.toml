@@ -4,6 +4,11 @@ name         = "t-echo"
 rust-version = "1.88"
 version      = "0.1.0"
 
+[features]
+# BLE over trouble-host (src/ble_trouble.rs) in place of meshcore-ble (src/ble.rs), to compare the
+# two on a phone that does not get on with the new host
+ble-trouble = ["dep:trouble-host"]
+
 [lib]
 test = false
 bench = false
@@ -33,7 +38,10 @@ embedded-storage = "0.3"
 meshcore = { path = "../../../crates/meshcore" }
 meshcore-fw-core = { version = "0.1.0", path = "../../fw-core" }
 meshcore-ui = { version = "0.1.0", path = "../../ui" }
-trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "derive", "security", "default-packet-pool-mtu-255", "log"] }
+# the BLE host (src/ble.rs)
+meshcore-ble = { version = "0.1.0", path = "../../ble" }
+# the BLE host before it, for `ble-trouble`
+trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "derive", "security", "default-packet-pool-mtu-255", "log"], optional = true }
 nrf-sdc = { version = "0.4.0", default-features = false, features = ["nrf52840", "peripheral"] }
 nrf-mpsl = { version = "0.4.0", default-features = false, features = ["critical-section-impl"] }
 
