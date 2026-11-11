@@ -273,6 +273,16 @@ jobs:
           set -euo pipefail
           sign=target/release/ota-sign
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
+          # GitHub answers a download with HTTP 500 now and then; one of the thirty or so here
+          # failed whole releases (0.8.7-dev.16, twice): asked again, after a pause
+          fetch() {
+            for try in 1 2 3 4; do
+              gh release download "$@" && return 0
+              echo "::warning::download of $* failed (try $try)"
+              sleep $((try * 10))
+            done
+            gh release download "$@"
+          }
           # What a node takes over LoRa by itself: at most meshcore::fwshare::MAX_LORA_FILE, and on a Pro Micro
           # running release #62 or before what its staging area (0x7B000..0xD9000,
           # firmware/models/promicro/src/ota.rs) holds next to the image the delta rebuilds (later
@@ -312,7 +322,7 @@ jobs:
             for tag in $bases; do
               base=$(printf '%s\n' "${assets[$tag]}" | grep -E "^$name-.*\.mcfw$" | head -1 || true)
               mkdir -p "prev/$tag"
-              gh release download "$tag" -p "$base" -D "prev/$tag" --clobber
+              fetch "$tag" -p "$base" -D "prev/$tag" --clobber
               delta=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.from-${tag##*-}.mcfd
               $sign delta "prev/$tag/$base" "$mcfw" -o "$delta"
               $sign verify "$delta" --root "$root" --base "prev/$tag/$base"
