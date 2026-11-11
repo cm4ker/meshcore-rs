@@ -9,7 +9,7 @@ use core::fmt::Write;
 
 use crate::radio::RadioParams;
 use crate::release::{Fingerprint, join_fingerprints, parse_fingerprints};
-use crate::util::{atof, atoi, atoi_signed, truncate_str};
+use crate::util::{Shortest, atof, atoi, atoi_signed, truncate_str};
 
 pub const ADVERT_LOC_NONE: u8 = 0;
 pub const ADVERT_LOC_SHARE: u8 = 1;
@@ -246,23 +246,23 @@ impl NodePrefs {
     pub fn serialize(&self) -> String {
         let mut s = String::new();
         let b = |v: bool| if v { 1 } else { 0 };
-        let _ = writeln!(s, "af={}", self.airtime_factor);
+        let _ = writeln!(s, "af={}", Shortest(self.airtime_factor));
         let _ = writeln!(s, "name={}", escape(&self.node_name));
-        let _ = writeln!(s, "lat={}", self.node_lat);
-        let _ = writeln!(s, "lon={}", self.node_lon);
+        let _ = writeln!(s, "lat={}", Shortest(self.node_lat));
+        let _ = writeln!(s, "lon={}", Shortest(self.node_lon));
         let _ = writeln!(s, "password={}", escape(&self.password));
         let _ = writeln!(s, "guest_password={}", escape(&self.guest_password));
-        let _ = writeln!(s, "freq={}", self.radio.freq_mhz);
-        let _ = writeln!(s, "bw={}", self.radio.bw_khz);
+        let _ = writeln!(s, "freq={}", Shortest(self.radio.freq_mhz));
+        let _ = writeln!(s, "bw={}", Shortest(self.radio.bw_khz));
         let _ = writeln!(s, "sf={}", self.radio.sf);
         let _ = writeln!(s, "cr={}", self.radio.cr);
         let _ = writeln!(s, "tx={}", self.tx_power_dbm);
         let _ = writeln!(s, "disable_fwd={}", b(self.disable_fwd));
         let _ = writeln!(s, "advert_interval={}", self.advert_interval);
         let _ = writeln!(s, "flood_advert_interval={}", self.flood_advert_interval);
-        let _ = writeln!(s, "rxdelay={}", self.rx_delay_base);
-        let _ = writeln!(s, "f_txdelay={}", self.tx_delay_factor);
-        let _ = writeln!(s, "d_txdelay={}", self.direct_tx_delay_factor);
+        let _ = writeln!(s, "rxdelay={}", Shortest(self.rx_delay_base));
+        let _ = writeln!(s, "f_txdelay={}", Shortest(self.tx_delay_factor));
+        let _ = writeln!(s, "d_txdelay={}", Shortest(self.direct_tx_delay_factor));
         let _ = writeln!(s, "allow_read_only={}", b(self.allow_read_only));
         let _ = writeln!(s, "multi_ack={}", self.multi_acks);
         let _ = writeln!(s, "flood_max={}", self.flood_max);
@@ -280,7 +280,7 @@ impl NodePrefs {
         let _ = writeln!(s, "discovery_mod_ts={}", self.discovery_mod_timestamp);
         let _ = writeln!(s, "powersaving={}", b(self.powersaving_enabled));
         let _ = writeln!(s, "gps={}", b(self.gps_enabled));
-        let _ = writeln!(s, "adc_mult={}", self.adc_multiplier);
+        let _ = writeln!(s, "adc_mult={}", Shortest(self.adc_multiplier));
         let _ = writeln!(s, "dyn_cr={}", b(self.dynamic_cr));
         let _ = writeln!(s, "wifi_ssid={}", escape(&self.wifi_ssid));
         let _ = writeln!(s, "wifi_pwd={}", escape(&self.wifi_pwd));

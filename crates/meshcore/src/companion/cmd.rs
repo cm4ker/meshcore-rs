@@ -4,7 +4,7 @@ use alloc::format;
 
 use super::*;
 use crate::fwstate::{self, FwState};
-use crate::util::{atof, atoi, ftoa};
+use crate::util::{Fixed, atof, atoi, ftoa};
 use crate::ota::{OtaEndpoint, OtaOutcome};
 use crate::{FIRMWARE_VERSION, MAX_GROUP_DATA_LENGTH, SIGNATURE_SIZE};
 
@@ -1002,7 +1002,7 @@ impl Companion {
             vars.push(String::from(if self.prefs.gps_enabled { "gps:1" } else { "gps:0" }));
         }
         if let Some(m) = self.adc_multiplier() {
-            vars.push(alloc::format!("adc_multiplier:{m:.3}"));
+            vars.push(alloc::format!("adc_multiplier:{}", Fixed(m as f64, 3)));
         }
         if self.board.fem_lna_controllable {
             vars.push(alloc::format!("fem_rxgain:{}", self.prefs.radio_fem_rxgain as u8));
@@ -1030,7 +1030,7 @@ impl Companion {
         self.effects.save_prefs = true;
         Some(match self.prefs.adc_multiplier == 0.0 {
             true => "OK - using default board multiplier".into(),
-            false => format!("OK - multiplier set to {:.3}", self.prefs.adc_multiplier),
+            false => format!("OK - multiplier set to {}", Fixed(self.prefs.adc_multiplier as f64, 3)),
         })
     }
 
@@ -1350,7 +1350,7 @@ impl Companion {
             return Some(r);
         }
         if cmd == "get adc.multiplier" {
-            return Some(self.adc_multiplier().map_or("Error: unsupported".into(), |m| format!("> {m:.3}")));
+            return Some(self.adc_multiplier().map_or("Error: unsupported".into(), |m| format!("> {}", Fixed(m as f64, 3))));
         }
         if let Some(v) = cmd.strip_prefix("set adc.multiplier ") {
             return Some(self.set_adc_multiplier(v).unwrap_or_else(|| "Error: unsupported".into()));
@@ -1480,14 +1480,14 @@ impl Companion {
                 "OK".into()
             }
         } else if cmd == "get dutycycle" {
-            format!("> {:.1}%", 100.0 / (p.airtime_factor + 1.0))
+            format!("> {}%", Fixed((100.0 / (p.airtime_factor + 1.0)) as f64, 1))
         } else if let Some(v) = cmd.strip_prefix("set dutycycle ") {
             let dc = atof(v) as f32;
             if !(1.0..=100.0).contains(&dc) {
                 "ERROR: dutycycle must be 1-100".into()
             } else {
                 p.airtime_factor = 100.0 / dc - 1.0;
-                format!("OK - {:.1}%", 100.0 / (p.airtime_factor + 1.0))
+                format!("OK - {}%", Fixed((100.0 / (p.airtime_factor + 1.0)) as f64, 1))
             }
         } else if cmd == "get int.thresh" {
             format!("> {}", p.interference_threshold)

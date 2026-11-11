@@ -25,6 +25,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::lpp;
+use crate::util::Shortest;
 
 /// Longest descriptor line accepted, so a malformed prefs blob can't force a huge allocation.
 pub const MAX_LEN: usize = 160;
@@ -229,10 +230,10 @@ impl fmt::Display for Field {
             f.write_str("p")?;
         }
         if self.mult != 1.0 {
-            write!(f, "*{}", self.mult)?;
+            write!(f, "*{}", Shortest(self.mult))?;
         }
         if self.off != 0.0 {
-            write!(f, "+{}", self.off)?;
+            write!(f, "+{}", Shortest(self.off))?;
         }
         Ok(())
     }

@@ -124,13 +124,143 @@ pub fn atof(s: &str) -> f64 {
     if !seen_digit {
         return 0.0;
     }
-    s[..end].parse::<f64>().unwrap_or(0.0)
+    // The digits as one integer over a power of ten, divided exactly: as `str::parse` rounds, up
+    // to 19 digits. core's float parser is 14 KB of tables and code on the firmware.
+    let (mut mantissa, mut exponent) = (0u64, 0i32);
+    let mut in_fraction = false;
+    for &b in &bytes[..end] {
+        match b {
+            b'.' => in_fraction = true,
+            b'0'..=b'9' if mantissa <= (u64::MAX - 9) / 10 => {
+                mantissa = mantissa * 10 + (b - b'0') as u64;
+                exponent -= in_fraction as i32;
+            }
+            // digits past what a u64 takes: beyond what an f64 holds
+            b'0'..=b'9' => exponent += !in_fraction as i32,
+            _ => {}
+        }
+    }
+    let v = match exponent {
+        -18..=0 => ratio(mantissa, 10u64.pow(exponent.unsigned_abs())),
+        // longer than anyone types: within a rounding or two
+        _ => {
+            let mut scale = 1.0f64;
+            for _ in 0..exponent.unsigned_abs().min(400) {
+                scale *= 10.0;
+            }
+            if exponent < 0 { mantissa as f64 / scale } else { mantissa as f64 * scale }
+        }
+    };
+    if bytes[0] == b'-' { -v } else { v }
+}
+
+/// `n / unit` as the nearest f64 (ties to even), for a unit up to 10^18: a long division in
+/// integers, rounded once.
+fn ratio(n: u64, unit: u64) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+    // n at the top of 128 bits, so the quotient has more bits than an f64 keeps
+    let lift = n.leading_zeros();
+    let dividend = ((n << lift) as u128) << 64;
+    let (mut quotient, mut rest) = (0u128, 0u128);
+    for bit in (0..128).rev() {
+        rest = rest << 1 | (dividend >> bit) & 1;
+        quotient <<= 1;
+        if rest >= unit as u128 {
+            rest -= unit as u128;
+            quotient |= 1;
+        }
+    }
+    // its top 64 bits, the lowest standing for all that was cut off: enough to round by
+    let cut = 64 - quotient.leading_zeros();
+    let inexact = rest != 0 || quotient & ((1 << cut) - 1) != 0;
+    let top = (quotient >> cut) as u64 | inexact as u64;
+    let exponent = cut as i32 - 64 - lift as i32; // -127..=0
+    top as f64 * f64::from_bits(((1023 + exponent) as u64) << 52)
+}
+
+/// A float with a fixed number of decimals, as `{:.N}` prints it (half to even), without core's
+/// float formatting: 9 KB of code and tables on the firmware.
+pub struct Fixed(pub f64, pub usize);
+
+impl core::fmt::Display for Fixed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Fixed(v, decimals) = *self;
+        if v.is_nan() {
+            return f.write_str("NaN");
+        }
+        if v.is_sign_negative() {
+            f.write_str("-")?;
+        }
+        if v.is_infinite() {
+            return f.write_str("inf");
+        }
+        let decimals = decimals.min(MAX_DECIMALS);
+        let (n, unit) = in_units(v, decimals);
+        write!(f, "{}", n / unit)?;
+        if decimals > 0 {
+            write!(f, ".{:0decimals$}", n % unit)?;
+        }
+        Ok(())
+    }
+}
+
+/// The most decimals [`Fixed`] prints: their unit still fits a `u64`.
+const MAX_DECIMALS: usize = 18;
+
+/// `|v|` as a whole number of units of its last decimal (rounded half to even, at most `u64::MAX`),
+/// and how many of those units make one.
+fn in_units(v: f64, decimals: usize) -> (u64, u64) {
+    let unit = 10u64.pow(decimals as u32);
+    // v = mantissa * 2^exponent, so in units it is `scaled` shifted: exact integer arithmetic,
+    // rounded once
+    let bits = v.to_bits();
+    let (fraction, biased) = (bits & ((1 << 52) - 1), (bits >> 52) as i32 & 0x7FF);
+    let (mantissa, exponent) = if biased == 0 { (fraction, -1074) } else { (fraction | 1 << 52, biased - 1075) };
+    let scaled = mantissa as u128 * unit as u128; // below 2^113
+    let n = match exponent {
+        0..15 => scaled << exponent,
+        15.. => u128::MAX,
+        -127..0 => {
+            let (whole, rest) = (scaled >> -exponent, scaled & ((1 << -exponent) - 1));
+            let half = 1u128 << (-exponent - 1);
+            whole + (rest > half || (rest == half && whole % 2 == 1)) as u128
+        }
+        _ => 0,
+    };
+    (n.min(u64::MAX as u128) as u64, unit)
+}
+
+/// A float in the fewest decimals that [`atof`] reads back as the same value, as `{}` prints it:
+/// what goes into the stored settings.
+pub struct Shortest<T>(pub T);
+
+impl core::fmt::Display for Shortest<f64> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let reads_back = |d: &usize| {
+            let (n, unit) = in_units(self.0, *d);
+            ratio(n, unit) == self.0.abs()
+        };
+        Fixed(self.0, (0..MAX_DECIMALS).find(reads_back).unwrap_or(MAX_DECIMALS)).fmt(f)
+    }
+}
+
+impl core::fmt::Display for Shortest<f32> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let v = self.0 as f64;
+        let reads_back = |d: &usize| {
+            let (n, unit) = in_units(v, *d);
+            ratio(n, unit) as f32 == self.0.abs()
+        };
+        Fixed(v, (0..MAX_DECIMALS).find(reads_back).unwrap_or(MAX_DECIMALS)).fmt(f)
+    }
 }
 
 /// Format a float like upstream `StrHelper::ftoa` (trailing zeros trimmed).
 pub fn ftoa(v: f64, decimals: usize) -> String {
     let mut s = String::new();
-    let _ = write!(s, "{v:.decimals$}");
+    let _ = write!(s, "{}", Fixed(v, decimals));
     if s.contains('.') {
         while s.ends_with('0') {
             s.pop();
@@ -225,6 +355,58 @@ mod tests {
         assert_eq!(ftoa(869.618, 3), "869.618");
         assert_eq!(ftoa(62.5, 3), "62.5");
         assert_eq!(ftoa(10.0, 3), "10");
+    }
+
+    /// `atof` and [`Fixed`] against core's float parsing and formatting, which they stand in for.
+    #[test]
+    fn floats_as_core_does_them() {
+        for s in ["0", "-0.5", "+3", "869.525", "433.92", "55.751244", "-37.618423", "0.000001", "62.5", ".5", "7."] {
+            assert_eq!(atof(s), s.parse::<f64>().unwrap(), "{s}");
+        }
+        // more digits than an f64 holds: as close as two roundings get
+        for s in ["123456789012345678901234567890", "0.1234567890123456789012345"] {
+            let (v, exact) = (atof(s), s.parse::<f64>().unwrap());
+            assert!((v - exact).abs() <= exact * 1e-15, "{s}");
+        }
+        assert_eq!(atof("-"), 0.0);
+
+        // a walk over values of every size, as an f32 (most of the firmware's) and as an f64
+        let (mut x, mut ties) = (0x2545_F491_4F6C_DD1Du64, 0);
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let v = (x >> 40) as f64 / 1000.0 - 8000.0;
+            for d in 0..=6 {
+                assert_eq!(alloc::format!("{}", Fixed(v, d)), alloc::format!("{v:.d$}"), "{v} to {d}");
+                let w = v as f32;
+                assert_eq!(alloc::format!("{}", Fixed(w as f64, d)), alloc::format!("{w:.d$}"), "{w} to {d}");
+            }
+            // The stored form: as short as core's and read back as the same value. The digits are
+            // core's too, but for a value halfway between two of them (core takes the upper).
+            let w = v as f32;
+            for u in [v, v / 7.0, (x >> 40) as f64 / 1000.0] {
+                let (ours, cores) = (alloc::format!("{}", Shortest(u)), alloc::format!("{u}"));
+                assert_eq!(ours.len(), cores.len(), "{ours} for {cores}");
+                assert_eq!(atof(&ours), u, "{ours}");
+                ties += (ours != cores) as u32;
+            }
+            for u in [w, w / 7.0] {
+                let (ours, cores) = (alloc::format!("{}", Shortest(u)), alloc::format!("{u}"));
+                assert_eq!(ours.len(), cores.len(), "{ours} for {cores}");
+                assert_eq!(atof(&ours) as f32, u, "{ours}");
+                ties += (ours != cores) as u32;
+            }
+        }
+        assert!(ties < 20, "{ties} of 100000 differ from core");
+        assert_eq!(alloc::format!("{}", Shortest(0.0f32)), "0");
+        assert_eq!(alloc::format!("{}", Shortest(f32::NAN)), "NaN");
+        for (v, d, s) in [(0.125, 2, "0.12"), (0.375, 2, "0.38"), (2.5, 0, "2"), (-0.04, 1, "-0.0"), (99.96, 1, "100.0")] {
+            assert_eq!(alloc::format!("{}", Fixed(v, d)), s);
+            assert_eq!(alloc::format!("{v:.d$}"), s);
+        }
+        assert_eq!(alloc::format!("{}", Fixed(f64::NAN, 1)), "NaN");
+        assert_eq!(alloc::format!("{}", Fixed(f64::NEG_INFINITY, 1)), "-inf");
     }
 
     #[test]

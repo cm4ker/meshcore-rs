@@ -13,7 +13,7 @@ use core::fmt::Write;
 
 use crate::identity::LocalIdentity;
 use crate::packet::Packet;
-use crate::util::{epoch_to_datetime, to_hex};
+use crate::util::{Fixed, epoch_to_datetime, to_hex};
 
 /// Tokens are only minted once the clock is plausible (2025-01-01).
 pub const MIN_TOKEN_TIME: u32 = 1_735_689_600;
@@ -73,7 +73,7 @@ pub struct Observer<'a> {
 }
 
 pub fn radio_string(freq_mhz: f32, bw_khz: f32, sf: u8, cr: u8) -> String {
-    format!("{:.6},{:.1},{},{}", freq_mhz, bw_khz, sf, cr)
+    format!("{},{},{},{}", Fixed(freq_mhz as f64, 6), Fixed(bw_khz as f64, 1), sf, cr)
 }
 
 /// A packet reception (`rx`) or transmission (`tx`); `score_duration` only for RX.
@@ -85,7 +85,7 @@ pub fn packet_json(
     let mut j = format!(
         "{{\"origin\":\"{}\",\"origin_id\":\"{}\",\"timestamp\":\"{}\",\"type\":\"PACKET\",\"direction\":\"{}\",\
 \"time\":\"{h:02}:{mi:02}:{s:02}\",\"date\":\"{d:02}/{mo:02}/{y:04}\",\"len\":\"{}\",\"packet_type\":\"{}\",\
-\"route\":\"{}\",\"payload_len\":\"{}\",\"raw\":\"{}\",\"SNR\":\"{:.1}\",\"RSSI\":\"{}\"",
+\"route\":\"{}\",\"payload_len\":\"{}\",\"raw\":\"{}\",\"SNR\":\"{}\",\"RSSI\":\"{}\"",
         origin(obs.name, obs.device_id),
         obs.device_id,
         iso_timestamp(now),
@@ -95,7 +95,7 @@ pub fn packet_json(
         if pkt.is_route_direct() { "D" } else { "F" },
         pkt.payload_len,
         to_hex(raw),
-        snr,
+        Fixed(snr as f64, 1),
         rssi as i32,
     );
     if let Some((score, duration)) = score_duration {

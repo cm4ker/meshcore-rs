@@ -71,9 +71,20 @@ pub fn quarter_signed(v: i16) -> String {
     if v > 0 { format!("+{}", quarter(v)) } else { quarter(v) }
 }
 
+/// `v` to at most `decimals` decimals (up to 8), trailing zeros dropped. By hand: core's float
+/// formatting is 9 KB on the firmware.
 pub fn trim_float(v: f32, decimals: usize) -> String {
-    let s = format!("{v:.decimals$}");
-    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').into() } else { s }
+    let unit = 10u64.pow(decimals as u32);
+    // exact: an f32 times such a power of ten fits an f64
+    let scaled = v.abs() as f64 * unit as f64;
+    let mut n = scaled as u64;
+    let rest = scaled - n as f64;
+    if rest > 0.5 || (rest == 0.5 && n % 2 == 1) {
+        n += 1;
+    }
+    let sign = if v < 0.0 { "-" } else { "" };
+    let s = format!("{sign}{}.{:0decimals$}", n / unit, n % unit);
+    s.trim_end_matches('0').trim_end_matches('.').into()
 }
 
 pub fn micro_deg(v: i32) -> String {
@@ -113,6 +124,12 @@ mod tests {
         assert_eq!(quarter_signed(33), "+8.2");
         assert_eq!(quarter_signed(-11), "-2.7");
         assert_eq!(permille(12), "1.2%");
+        assert_eq!(trim_float(869.525, 3), "869.525");
+        assert_eq!(trim_float(868.0, 3), "868");
+        assert_eq!(trim_float(62.5, 1), "62.5");
+        assert_eq!(trim_float(250.0, 1), "250");
+        assert_eq!(trim_float(-0.26, 1), "-0.3");
+        assert_eq!(trim_float(7.8125, 3), "7.812");
         assert_eq!(clean("PKIO🎃 Ёлка"), "PKIO Елка");
         assert_eq!(coarse_minutes(3 * 3600 + 59), 180);
     }

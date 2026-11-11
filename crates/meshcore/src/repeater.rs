@@ -29,7 +29,7 @@ use crate::radio::RadioParams;
 use crate::region::{REGION_DENY_FLOOD, RegionMap, TransportKey, is_name_char};
 use crate::rtc::DEFAULT_EPOCH;
 use crate::sensor::descriptor::Descriptor;
-use crate::util::{atof, atoi, atoi_signed, epoch_to_datetime, from_hex, ftoa, parse_key_prefix, to_hex, truncate_str};
+use crate::util::{Fixed, atof, atoi, atoi_signed, epoch_to_datetime, from_hex, ftoa, parse_key_prefix, to_hex, truncate_str};
 use crate::{FIRMWARE_VERSION, MAX_ADVERT_DATA_SIZE, MAX_PACKET_PAYLOAD, MAX_PATH_SIZE, PRV_KEY_SIZE, PUB_KEY_SIZE};
 
 mod autoupdate;
@@ -1831,10 +1831,10 @@ impl Repeater {
         if serial && (cmd == "stats-radio" || cmd.starts_with("stats-radio ")) {
             let s = &ctx.stats;
             return format!(
-                "{{\"noise_floor\":{},\"last_rssi\":{},\"last_snr\":{:.2},\"tx_air_secs\":{},\"rx_air_secs\":{}}}",
+                "{{\"noise_floor\":{},\"last_rssi\":{},\"last_snr\":{},\"tx_air_secs\":{},\"rx_air_secs\":{}}}",
                 s.noise_floor,
                 s.last_rssi as i16,
-                s.last_snr,
+                Fixed(s.last_snr as f64, 2),
                 s.total_air_time_ms / 1000,
                 s.rx_air_time_ms / 1000
             );
@@ -1957,7 +1957,7 @@ impl Repeater {
                 "OK".into()
             }
         } else if cmd == "get dutycycle" {
-            format!("> {:.1}%", 100.0 / (p.airtime_factor + 1.0))
+            format!("> {}%", Fixed((100.0 / (p.airtime_factor + 1.0)) as f64, 1))
         } else if let Some(v) = cmd.strip_prefix("set dutycycle ") {
             let dc = atof(v) as f32;
             if !(1.0..=100.0).contains(&dc) {
@@ -1966,7 +1966,7 @@ impl Repeater {
                 p.airtime_factor = 100.0 / dc - 1.0;
                 let actual = 100.0 / (p.airtime_factor + 1.0);
                 self.save_prefs();
-                format!("OK - {actual:.1}%")
+                format!("OK - {}%", Fixed(actual as f64, 1))
             }
         } else if cmd == "get int.thresh" {
             format!("> {}", p.interference_threshold)
@@ -2176,7 +2176,7 @@ impl Repeater {
             }
         } else if cfg.starts_with("adc.multiplier") {
             match self.adc_multiplier() {
-                Some(m) => format!("> {m:.3}"),
+                Some(m) => format!("> {}", Fixed(m as f64, 3)),
                 None => "Error: unsupported".into(),
             }
         } else if cfg.starts_with("pwrmgt.support") {
@@ -2457,7 +2457,7 @@ impl Repeater {
                 if self.prefs.adc_multiplier == 0.0 {
                     "OK - using default board multiplier".into()
                 } else {
-                    format!("OK - multiplier set to {:.3}", self.prefs.adc_multiplier)
+                    format!("OK - multiplier set to {}", Fixed(self.prefs.adc_multiplier as f64, 3))
                 }
             }
         } else {
