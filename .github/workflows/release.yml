@@ -50,6 +50,9 @@ env:
   # Heltec job's eight).
   ESPFLASH_ZIP: https://github.com/esp-rs/espflash/releases/download/v4.6.0/espflash-x86_64-unknown-linux-musl.zip
   ESPFLASH_SHA256: d515ee13ae44ba913c31a2ca58dc5fd72d3362994ee1d7487a16b289dfbb6e4a
+  # The Xtensa Rust the Heltec images are built with. A newer one changes every image, and with it
+  # what a release carries: taken when this line says so, not when Espressif publishes it.
+  XTENSA_RUST: 1.97.0.0
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -69,15 +72,44 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
-      # espup asks the GitHub API for the newest Xtensa Rust: with the token, not the runners'
-      # shared anonymous limit, which runs out ("rate limit exceeded")
-      - uses: esp-rs/xtensa-toolchain@67649b28a0139171102259d9982f93106aa2b54a # v1.6.0
+      # A push or a pull request takes the toolchain and the built dependencies from an earlier run
+      # (a minute to install, a minute and a half to build, of the job's four). A release takes
+      # neither: what is signed is built from nothing, with nothing an earlier run left behind.
+      - id: toolchain
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup/toolchains/esp
+            ~/.espup
+            ~/exports
+          key: xtensa-rust-${{ env.XTENSA_RUST }}-esp32s3
+      # espup asks the GitHub API for the Xtensa Rust: with the token, not the runners' shared
+      # anonymous limit, which runs out ("rate limit exceeded")
+      - if: steps.toolchain.outputs.cache-hit != 'true'
+        uses: esp-rs/xtensa-toolchain@67649b28a0139171102259d9982f93106aa2b54a # v1.6.0
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           default: true
           buildtargets: esp32s3
+          version: ${{ env.XTENSA_RUST }}
           ldproxy: false
+      # what the action does once it has installed the toolchain
+      - if: steps.toolchain.outputs.cache-hit == 'true'
+        run: |
+          source "$HOME/exports"
+          echo "$PATH" >> "$GITHUB_PATH"
+          echo "LIBCLANG_PATH=${LIBCLANG_PATH:-}" >> "$GITHUB_ENV"
+          rustup default esp
+      - if: github.event_name != 'workflow_dispatch'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            firmware/models/heltec/target
+          key: heltec-${{ env.XTENSA_RUST }}-${{ hashFiles('firmware/models/heltec/Cargo.lock', 'firmware/models/heltec/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
       - name: espflash
         run: |
           curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/espflash.zip" "$ESPFLASH_ZIP"
@@ -318,13 +350,17 @@ jobs:
               *) echo "$lora_max" ;;
             esac
           }
-          printf '| delta | from | size |\n|---|---|---|\n' > deltas.md
           tags=$(gh release list --limit 30 --exclude-drafts --json tagName -q '.[].tagName')
           stable_tags=" $(gh release list --limit 30 --exclude-drafts --exclude-pre-releases --json tagName -q '.[].tagName' | tr '\n' ' ') "
+          # what each of them carries, asked eight at a time, not one after another
+          mkdir -p listed
+          printf '%s\n' $tags | xargs -r -P 8 -I{} bash -euo pipefail -c 'gh release view "$1" --json assets -q ".assets[].name" > "listed/$1"' list {}
           declare -A assets
           for tag in $tags; do
-            assets[$tag]=$(gh release view "$tag" --json assets -q '.assets[].name')
+            assets[$tag]=$(cat "listed/$tag")
           done
+          # the deltas to make, in the table's order: <row> <board>-<role> <release> <its file>
+          : > deltas.txt
           for mcfw in out/*.mcfw; do
             name=$(basename "$mcfw" "-$MCFW_VERSION-r$MCFW_COUNTER.mcfw")   # <board>-<role>
             # the releases to make deltas from: newest first, as said above
@@ -345,22 +381,35 @@ jobs:
             done
             for tag in $bases; do
               base=$(printf '%s\n' "${assets[$tag]}" | grep -E "^$name-.*\.mcfw$" | head -1 || true)
-              mkdir -p "prev/$tag"
-              fetch "$tag" -p "$base" -D "prev/$tag" --clobber
-              delta=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.from-${tag##*-}.mcfd
-              $sign delta "prev/$tag/$base" "$mcfw" -o "$delta"
-              $sign verify "$delta" --root "$root" --base "prev/$tag/$base"
-              size=$(stat -c %s "$delta")
-              room=$(lora_room "$name" "$tag")
-              [ "$room" -le "$lora_max" ] || room=$lora_max
-              mark=""
-              if [ "$size" -gt "$room" ]; then
-                mark=" (over the LoRa limit, $((room / 1024)) KB)"
-                echo "::warning title=Delta over the LoRa limit::$name from $tag is $((size / 1024)) KB, more than $((room / 1024)) KB: nodes on $tag don't take it from a neighbour over LoRa by themselves, only over Wi-Fi, USB or BLE, or by hand (fw update) where $tag has that"
-              fi
-              echo "| $name | $tag | $((size / 1024)) KB$mark |" >> deltas.md
+              printf '%03d %s %s %s\n' "$(wc -l < deltas.txt)" "$name" "$tag" "$base" >> deltas.txt
             done
           done
+          # One of them, and its row of the table in rows/<row>
+          delta() {
+            local row=$1 name=$2 tag=$3 base=$4
+            local mcfw=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.mcfw
+            local mcfd=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.from-${tag##*-}.mcfd
+            mkdir -p "prev/$tag"
+            fetch "$tag" -p "$base" -D "prev/$tag" --clobber
+            $sign delta "prev/$tag/$base" "$mcfw" -o "$mcfd"
+            $sign verify "$mcfd" --root "$root" --base "prev/$tag/$base"
+            local size room mark=""
+            size=$(stat -c %s "$mcfd")
+            room=$(lora_room "$name" "$tag")
+            [ "$room" -le "$lora_max" ] || room=$lora_max
+            if [ "$size" -gt "$room" ]; then
+              mark=" (over the LoRa limit, $((room / 1024)) KB)"
+              echo "::warning title=Delta over the LoRa limit::$name from $tag is $((size / 1024)) KB, more than $((room / 1024)) KB: nodes on $tag don't take it from a neighbour over LoRa by themselves, only over Wi-Fi, USB or BLE, or by hand (fw update) where $tag has that"
+            fi
+            echo "| $name | $tag | $((size / 1024)) KB$mark |" > "rows/$row"
+          }
+          # ota-sign makes a delta on one core, in seconds, and there are thirty or so: as many at
+          # once as there are cores. One that fails fails the step.
+          export -f delta fetch lora_room
+          export sign root lora_max
+          mkdir -p rows
+          xargs -r -P "$(nproc)" -L 1 bash -euo pipefail -c 'delta "$@"' delta < deltas.txt
+          { printf '| delta | from | size |\n|---|---|---|\n'; find rows -type f | sort | xargs -r cat; } > deltas.md
           cat deltas.md >> "$GITHUB_STEP_SUMMARY"
       - name: Publish
         env:
