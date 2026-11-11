@@ -377,6 +377,8 @@ impl Inner {
             .handle_l2cap_command(command, payload, &mut ops, &mut self.rng)
     }
 
+    // meshcore-rust patch: the central's side only with `central`, here and below
+    #[cfg(feature = "central")]
     fn handle_central<P: PacketPool>(
         &mut self,
         bonds: &mut VecView<BondInformation>,
@@ -644,13 +646,18 @@ impl Inner {
                 user_initiated,
             )?);
         } else {
-            self.pairing_sm = Some(Pairing::initiate_central(
-                local_address,
-                peer_address,
-                &mut ops,
-                local_io,
-                user_initiated,
-            )?);
+            #[cfg(feature = "central")]
+            {
+                self.pairing_sm = Some(Pairing::initiate_central(
+                    local_address,
+                    peer_address,
+                    &mut ops,
+                    local_io,
+                    user_initiated,
+                )?);
+            }
+            #[cfg(not(feature = "central"))]
+            return Err(Error::InvalidState);
         }
         Ok(())
     }
@@ -885,6 +892,7 @@ impl<'d> SecurityManager<'d> {
         )
     }
 
+    #[cfg(feature = "central")]
     fn handle_central<P: PacketPool>(
         &self,
         pdu: Pdu<P::Packet>,
@@ -916,7 +924,12 @@ impl<'d> SecurityManager<'d> {
         let result = if role == LeConnRole::Peripheral {
             self.handle_peripheral(pdu, connections, storage)
         } else {
-            self.handle_central(pdu, connections, storage)
+            #[cfg(feature = "central")]
+            {
+                self.handle_central(pdu, connections, storage)
+            }
+            #[cfg(not(feature = "central"))]
+            Err(Error::InvalidState)
         };
 
         {

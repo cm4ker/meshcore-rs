@@ -47,8 +47,11 @@ impl PairingData {
     }
 }
 
+// meshcore-rust patch: the central's side of pairing only with `central` (0.7.0 builds it into a
+// peripheral too, where the connection's role, known only at run time, keeps it from being dropped)
+#[cfg(feature = "central")]
 pub mod central;
-#[cfg(feature = "legacy-pairing")]
+#[cfg(all(feature = "legacy-pairing", feature = "central"))]
 pub mod legacy_central;
 #[cfg(feature = "legacy-pairing")]
 pub mod legacy_peripheral;
@@ -94,9 +97,10 @@ pub trait PairingOps<P: PacketPool> {
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 enum State {
+    #[cfg(feature = "central")]
     Central(central::Pairing),
     Peripheral(peripheral::Pairing),
-    #[cfg(feature = "legacy-pairing")]
+    #[cfg(all(feature = "legacy-pairing", feature = "central"))]
     LegacyCentral(legacy_central::Pairing),
     #[cfg(feature = "legacy-pairing")]
     LegacyPeripheral(legacy_peripheral::Pairing),
@@ -112,14 +116,15 @@ pub struct Pairing {
 impl Pairing {
     pub(crate) fn is_central(&self) -> bool {
         match &self.state {
+            #[cfg(feature = "central")]
             State::Central(_) => true,
-            #[cfg(feature = "legacy-pairing")]
+            #[cfg(all(feature = "legacy-pairing", feature = "central"))]
             State::LegacyCentral(_) => true,
             _ => false,
         }
     }
 
-    #[cfg(feature = "legacy-pairing")]
+    #[cfg(all(feature = "legacy-pairing", feature = "central"))]
     pub(crate) fn is_lesc_central(&self) -> bool {
         matches!(&self.state, State::Central(_))
     }
@@ -131,9 +136,10 @@ impl Pairing {
 
     pub(crate) fn result(&self) -> Option<Result<(), Error>> {
         match &self.state {
+            #[cfg(feature = "central")]
             State::Central(c) => c.result(),
             State::Peripheral(p) => p.result(),
-            #[cfg(feature = "legacy-pairing")]
+            #[cfg(all(feature = "legacy-pairing", feature = "central"))]
             State::LegacyCentral(c) => c.result(),
             #[cfg(feature = "legacy-pairing")]
             State::LegacyPeripheral(p) => p.result(),
@@ -166,9 +172,10 @@ impl Pairing {
         rng: &mut RNG,
     ) -> Result<(), Error> {
         match &mut self.state {
+            #[cfg(feature = "central")]
             State::Central(central) => central.handle_input(input, &mut self.pairing_data, ops, rng),
             State::Peripheral(peripheral) => peripheral.handle_input(input, &mut self.pairing_data, ops, rng),
-            #[cfg(feature = "legacy-pairing")]
+            #[cfg(all(feature = "legacy-pairing", feature = "central"))]
             State::LegacyCentral(central) => central.handle_input(input, &mut self.pairing_data, ops, rng),
             #[cfg(feature = "legacy-pairing")]
             State::LegacyPeripheral(peripheral) => peripheral.handle_input(input, &mut self.pairing_data, ops, rng),
@@ -177,9 +184,10 @@ impl Pairing {
 
     pub(crate) fn security_level(&self) -> SecurityLevel {
         let is_encrypted = match &self.state {
+            #[cfg(feature = "central")]
             State::Central(c) => c.is_encrypted(),
             State::Peripheral(p) => p.is_encrypted(),
-            #[cfg(feature = "legacy-pairing")]
+            #[cfg(all(feature = "legacy-pairing", feature = "central"))]
             State::LegacyCentral(c) => c.is_encrypted(),
             #[cfg(feature = "legacy-pairing")]
             State::LegacyPeripheral(p) => p.is_encrypted(),
@@ -199,6 +207,7 @@ impl Pairing {
         self.pairing_data.bond_information.as_ref()
     }
 
+    #[cfg(feature = "central")]
     pub(crate) fn new_central(local_address: Address, peer_address: Address, local_io: IoCapabilities) -> Pairing {
         Pairing {
             pairing_data: PairingData::new(
@@ -211,6 +220,7 @@ impl Pairing {
         }
     }
 
+    #[cfg(feature = "central")]
     pub(crate) fn initiate_central<P: PacketPool, OPS: PairingOps<P>>(
         local_address: Address,
         peer_address: Address,
@@ -282,7 +292,7 @@ impl Pairing {
     }
 
     /// Switch from a LESC Central to a Legacy Central when the peer doesn't support SC.
-    #[cfg(feature = "legacy-pairing")]
+    #[cfg(all(feature = "legacy-pairing", feature = "central"))]
     pub(crate) fn switch_to_legacy_central(self) -> Result<Pairing, Error> {
         use crate::codec::Encode;
 
@@ -316,6 +326,7 @@ impl Pairing {
 
     pub(crate) fn is_waiting_bonded_encryption(&self) -> bool {
         match &self.state {
+            #[cfg(feature = "central")]
             State::Central(c) => c.is_waiting_bonded_encryption(),
             _ => false,
         }
@@ -339,9 +350,10 @@ impl Pairing {
 
     pub(crate) fn mark_timeout(&mut self) {
         match &mut self.state {
+            #[cfg(feature = "central")]
             State::Central(c) => c.mark_timeout(),
             State::Peripheral(p) => p.mark_timeout(),
-            #[cfg(feature = "legacy-pairing")]
+            #[cfg(all(feature = "legacy-pairing", feature = "central"))]
             State::LegacyCentral(c) => c.mark_timeout(),
             #[cfg(feature = "legacy-pairing")]
             State::LegacyPeripheral(p) => p.mark_timeout(),
@@ -370,7 +382,7 @@ pub enum Event {
     OobDataReceived { local: OobData, peer: OobData },
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "central"))]
 mod tests {
     use rand_chacha::{ChaCha12Core, ChaCha12Rng};
     use rand_core::SeedableRng;

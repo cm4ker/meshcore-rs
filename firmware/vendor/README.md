@@ -2,7 +2,7 @@
 
 ## trouble-host 0.7.0
 
-BLE host stack (embassy-rs/trouble), Apache-2.0 OR MIT, from crates.io with three changes, all
+BLE host stack (embassy-rs/trouble), Apache-2.0 OR MIT, from crates.io with four changes, all
 marked `meshcore-rust patch`:
 
 - `set_fixed_pass_key()`: passkey-entry pairing can use a fixed 6-digit PIN instead of a random
@@ -11,6 +11,9 @@ marked `meshcore-rust patch`:
   IRK, and Windows then refuses to bond a second such device (the IRK collides with the first).
 - `GAP_SERVICE_ATTRIBUTE_COUNT` is defined for `security` without `central` (0.7.0 left it
   undefined, which broke the `gatt_server` macro for peripheral-only builds).
+- The central's side of pairing is built only with `central`. 0.7.0 builds it into a peripheral
+  too, and as a connection's role is known only at run time, the linker keeps it: 17 KB of the
+  Heltec V4 repeater.
 
 The board crates use it through `[patch.crates-io]`.
 
