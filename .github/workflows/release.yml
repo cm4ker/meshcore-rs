@@ -184,8 +184,11 @@ jobs:
             *.content
 
   nrf52840:
-    name: LilyGO T-Echo and Pro Micro (nRF52840)
+    name: LilyGO T-Echo and Pro Micro (nRF52840), ${{ matrix.build }}
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        build: [images, content] # side by side, as the Heltec's
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
@@ -201,33 +204,56 @@ jobs:
           else
             sudo apt-get update && sudo apt-get install -y libclang-dev
           fi
-      - run: rustup toolchain install
+      - id: rust
         working-directory: firmware/models/t-echo
-      - working-directory: firmware/models/t-echo
         run: |
-          mkdir -p ../../../content
+          rustup toolchain install
+          echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+      # The built dependencies from an earlier run, as the Heltec's, and as there not for a release.
+      # The boards build with the image's stable Rust: a new one builds them anew.
+      - if: github.event_name != 'workflow_dispatch'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            firmware/models/t-echo/target
+            firmware/models/promicro/target
+          key: nrf52840-rust${{ steps.rust.outputs.version }}-${{ hashFiles('firmware/models/t-echo/Cargo.lock', 'firmware/models/promicro/Cargo.lock', 'firmware/models/t-echo/.cargo/config.toml', 'firmware/models/promicro/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
+      - name: T-Echo
+        working-directory: firmware/models/t-echo
+        run: |
+          out=../../..
+          if [ "${{ matrix.build }}" = content ]; then
+            export MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0
+            out=../../../content
+            mkdir -p $out
+          fi
           cargo build --locked --release
-          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../t-echo-companion.uf2 --bin ../../../t-echo-companion.bin
-          MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release
-          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../content/t-echo-companion.uf2 --bin ../../../content/t-echo-companion.bin
-      - working-directory: firmware/models/promicro
+          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion $out/t-echo-companion.uf2 --bin $out/t-echo-companion.bin
+      - name: Pro Micro
+        working-directory: firmware/models/promicro
         run: |
+          out=../../..
+          if [ "${{ matrix.build }}" = content ]; then
+            export MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0
+            out=../../../content
+          fi
           cargo build --locked --release
           for role in repeater companion; do
-            python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role ../../../promicro-$role.uf2 --bin ../../../promicro-$role.bin
+            python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role $out/promicro-$role.uf2 --bin $out/promicro-$role.bin
           done
           # the companion for web flashers too (serial DFU); not the repeater: the bootloader stages
           # an image that size over the repeater's data, and keeps a CRC that turns its updates off
-          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion ../../../promicro-companion.uf2 --dfu-zip ../../../promicro-companion.zip
-          MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release
-          for role in repeater companion; do
-            python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role ../../../content/promicro-$role.uf2 --bin ../../../content/promicro-$role.bin
-          done
+          if [ "${{ matrix.build }}" = images ]; then
+            python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion $out/promicro-companion.uf2 --dfu-zip $out/promicro-companion.zip
+          fi
       - name: Content hashes
+        if: matrix.build == 'content'
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: images-nrf52840
+          name: ${{ matrix.build }}-nrf52840
           path: |
             *.bin
             *.uf2
