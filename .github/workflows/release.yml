@@ -67,8 +67,14 @@ jobs:
         working-directory: firmware/models/promicro/installer
 
   esp32s3:
-    name: Heltec V4, V3 and Wireless Paper (ESP32-S3)
+    name: Heltec V4, V3 and Wireless Paper (ESP32-S3), ${{ matrix.build }}
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        # The images, and the build with no release number that says whether their code changed
+        # (see the top). Each links all six, a minute on a runner's cores: side by side, not one
+        # after the other.
+        build: [images, content]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
@@ -119,23 +125,25 @@ jobs:
       - name: Heltec V4, V3 and Wireless Paper
         working-directory: firmware/models/heltec
         run: |
-          mkdir -p ../../../content
-          save() { # <dir for the images> : each board's images with its flash size and layout
-            for role in repeater companion; do
-              espflash save-image --chip esp32s3 --flash-size 16mb --partition-table v4/partitions.csv target/xtensa-esp32s3-none-elf/release/heltec-v4-$role "$1/heltec-v4-$role.bin"
-              espflash save-image --chip esp32s3 --flash-size 8mb --partition-table v3/partitions.csv target/xtensa-esp32s3-none-elf/release/heltec-v3-$role "$1/heltec-v3-$role.bin"
-              espflash save-image --chip esp32s3 --flash-size 8mb --partition-table paper/partitions.csv target/xtensa-esp32s3-none-elf/release/heltec-paper-$role "$1/heltec-paper-$role.bin"
-            done
-          }
+          out=../../..
+          if [ "${{ matrix.build }}" = content ]; then
+            export MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0
+            out=../../../content
+            mkdir -p $out
+          fi
           cargo build --locked --release
-          save ../../..
-          MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0 cargo build --locked --release
-          save ../../../content
+          # each board's images with its flash size and layout
+          for role in repeater companion; do
+            espflash save-image --chip esp32s3 --flash-size 16mb --partition-table v4/partitions.csv target/xtensa-esp32s3-none-elf/release/heltec-v4-$role $out/heltec-v4-$role.bin
+            espflash save-image --chip esp32s3 --flash-size 8mb --partition-table v3/partitions.csv target/xtensa-esp32s3-none-elf/release/heltec-v3-$role $out/heltec-v3-$role.bin
+            espflash save-image --chip esp32s3 --flash-size 8mb --partition-table paper/partitions.csv target/xtensa-esp32s3-none-elf/release/heltec-paper-$role $out/heltec-paper-$role.bin
+          done
       - name: Content hashes
+        if: matrix.build == 'content'
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: images-esp32s3
+          name: ${{ matrix.build }}-esp32s3
           path: |
             *.bin
             *.content
