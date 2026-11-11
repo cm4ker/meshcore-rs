@@ -44,7 +44,8 @@ opt-level = "s"
 codegen-units = 1
 debug         = 2
 lto           = "fat"
-opt-level     = "s"
+# for size before speed, as on the Heltec boards: a tenth less than "s"
+opt-level     = "z"
 
 [patch.crates-io]
 # the identity-IRK patch and the USB fixes, see ../../vendor/README.md
