@@ -122,7 +122,10 @@ crates/meshcore/        no_std-ядро протокола, без железа,
   uplink.rs             JSON/топики MeshCoreTel, JWT, кодек MQTT 3.1.1, кадры WebSocket
   radio.rs prefs.rs     параметры LoRa и время в эфире; настройки узла
 firmware/common/        ESP32 (esp-hal 1.2, ESP32-S3 и ESP32-C6): прерывание радио, разделы flash,
-                        слоты и откат, watchdog, Wi-Fi и SNTP, BLE (trouble-host 0.7), USB-JTAG
+                        слоты и откат, watchdog, Wi-Fi и SNTP, BLE (firmware/ble; с фичей `ble-trouble` —
+                        прежний trouble-host 0.7), USB-JTAG
+firmware/ble/           BLE-хост для ESP32: один телефон, Nordic UART, пейринг LE Secure Connections
+                        по passkey, бонды; принимает и отдаёт HCI-пакеты, без ввода-вывода
 firmware/fw-core/       общее для любых чипов (embassy, embedded-hal, embedded-storage)
   radio.rs              интерфейс LoRa-трансивера
   sx1262.rs lr2021.rs   драйверы SX1262 и LR2021

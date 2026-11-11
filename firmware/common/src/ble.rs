@@ -4,24 +4,27 @@
 //! while pairing. Bonds are kept in flash so a paired phone reconnects without asking again.
 //!
 //! A repeater runs the same service only for a while (`start ota ble`): [`start`] and [`stop`].
+//!
+//! The host stack is `meshcore_ble`, which takes and gives HCI packets; here they are carried to
+//! and from the chip's controller, and what the host reports is acted on.
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::num::NonZeroU128;
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use core::future::pending;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use embassy_futures::join::join;
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_hal::peripherals::BT;
+use esp_hal::rng::Rng;
 use esp_radio::ble::controller::BleConnector;
 use log::{info, warn};
 use meshcore::companion::MAX_FRAME_SIZE;
 use meshcore::ota::REQ_TYPE_OTA_BEGIN;
-use trouble_host::prelude::*;
+use meshcore_ble::{Config, Event, Host, bonds_from_bytes, bonds_to_bytes};
 
 use crate::frames::{FRAMES_IN, Link};
 pub use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
@@ -30,36 +33,17 @@ use meshcore_fw_core::links::{pairing_begins, pairing_succeeded};
 /// The BLE task runs (and holds the controller).
 pub static BLE_RUNNING: AtomicBool = AtomicBool::new(false);
 static BLE_STOP: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-/// The GATT server, built on the first run of the BLE task: trouble-host keeps the attribute
-/// storage in statics, so a second one cannot be built in the same boot.
-static SERVER: AtomicPtr<Server<'static>> = AtomicPtr::new(core::ptr::null_mut());
+/// The pairing PIN of the running task (`NO_PIN` = a random one per pairing).
+static PIN: AtomicU32 = AtomicU32::new(NO_PIN);
+const NO_PIN: u32 = u32::MAX;
 
 /// Gap between notifications. Upstream uses 60 ms (`BLE_WRITE_MIN_INTERVAL`, Bluedroid's queue);
-/// here each notify already waits until the host stack has taken it, so a short gap is enough and
-/// a long contact list arrives before the apps' timeouts.
-const NOTIFY_INTERVAL_MS: u64 = 20;
-const BOND_RECORD: usize = 41;
-/// trouble-host's limit for the GAP device name (the advertised name may be longer).
-const GAP_NAME_MAX: usize = 22;
-
-type Hci = ExternalController<BleConnector<'static>, 20>;
-/// Connection interval asked for during a firmware upload: every chunk is a write request
-/// answered in a later connection event, so the interval sets the transfer rate.
-const UPLOAD_INTERVAL_MS: (u64, u64) = (8, 15);
-const MAX_STORED_BONDS: usize = 8;
-
-#[gatt_server]
-struct Server {
-    uart: UartService,
-}
-
-#[gatt_service(uuid = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")]
-struct UartService {
-    #[characteristic(uuid = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E", write, write_without_response, permissions(write = authenticated))]
-    rx: heapless::Vec<u8, MAX_FRAME_SIZE>,
-    #[characteristic(uuid = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E", read, notify, permissions(read = authenticated, cccd = authenticated))]
-    tx: heapless::Vec<u8, MAX_FRAME_SIZE>,
-}
+/// here a frame is notified only once the controller has taken the one before, so a short gap is
+/// enough and a long contact list arrives before the apps' timeouts.
+const NOTIFY_INTERVAL: Duration = Duration::from_millis(20);
+/// The largest HCI packet taken from the controller, with its type: an event of 255 bytes, or
+/// data of the 251 a link layer packet carries.
+const HCI_PACKET_MAX: usize = 260;
 
 pub struct Params {
     /// Advertised name: `MeshCore-<node name>`.
@@ -70,42 +54,6 @@ pub struct Params {
     pub bonds: Vec<u8>,
     /// Fixed pairing PIN; `None` = a random one per pairing (for boards with a screen).
     pub pin: Option<u32>,
-}
-
-/// `[kind][addr 6][ltk 16][irk 16, 0 = none][bonded][level]` per bond.
-fn serialize_bonds(bonds: &[BondInformation]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for b in bonds.iter().filter(|b| b.is_bonded).take(MAX_STORED_BONDS) {
-        out.push(b.identity.addr.kind.as_raw());
-        out.extend_from_slice(b.identity.addr.addr.raw());
-        out.extend_from_slice(&b.ltk.0.to_le_bytes());
-        out.extend_from_slice(&b.identity.irk.map_or(0, |k| k.0.get()).to_le_bytes());
-        out.push(1);
-        out.push(match b.security_level {
-            SecurityLevel::NoEncryption => 0,
-            SecurityLevel::Encrypted => 1,
-            SecurityLevel::EncryptedAuthenticated => 2,
-        });
-    }
-    out
-}
-
-fn deserialize_bonds(data: &[u8]) -> Vec<BondInformation> {
-    data.as_chunks::<BOND_RECORD>()
-        .0
-        .iter()
-        .map(|r| {
-            let addr = Address { kind: AddrKind::new(r[0]), addr: BdAddr::new(r[1..7].try_into().unwrap()) };
-            let ltk = LongTermKey(u128::from_le_bytes(r[7..23].try_into().unwrap()));
-            let irk = NonZeroU128::new(u128::from_le_bytes(r[23..39].try_into().unwrap())).map(IdentityResolvingKey);
-            let level = match r[40] {
-                0 => SecurityLevel::NoEncryption,
-                1 => SecurityLevel::Encrypted,
-                _ => SecurityLevel::EncryptedAuthenticated,
-            };
-            BondInformation::new(Identity { addr, irk }, ltk, level, r[39] != 0)
-        })
-        .collect()
 }
 
 /// Static random address derived from the MAC.
@@ -119,41 +67,24 @@ pub fn static_address() -> [u8; 6] {
     address
 }
 
-/// The GATT server (named on its first use: a new name needs a reboot).
-fn server(name: &str) -> Option<&'static Server<'static>> {
-    let p = SERVER.load(Ordering::Acquire);
-    if !p.is_null() {
-        // SAFETY: set below from a leaked box, never freed
-        return Some(unsafe { &*p });
-    }
-    let name: &'static str = alloc::boxed::Box::leak(truncate(name, GAP_NAME_MAX).into());
-    let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig { name, appearance: &appearance::UNKNOWN })).ok()?;
-    let server: &'static Server<'static> = alloc::boxed::Box::leak(alloc::boxed::Box::new(server));
-    SERVER.store(core::ptr::from_ref(server).cast_mut(), Ordering::Release);
-    Some(server)
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    let mut n = s.len().min(max);
-    while !s.is_char_boundary(n) {
-        n -= 1;
-    }
-    &s[..n]
-}
-
-/// IRK handed to phones when they bond: unique to the board (the default all-zero IRK makes Windows
-/// refuse a second board) and stable, so both firmware roles on a board share their bonds. The
-/// board keeps its static address: nothing is resolved with it.
-fn identity_irk(address: &[u8; 6]) -> u128 {
+/// IRK handed to phones when they bond: unique to the board (an all-zero IRK makes Windows refuse
+/// a second board) and stable, so both firmware roles on a board share their bonds. The board
+/// keeps its static address: nothing is resolved with it.
+fn identity_irk(address: &[u8; 6]) -> [u8; 16] {
     let mut h = [0u8; 32];
     meshcore::crypto::sha256(&mut h, &[b"MeshCore BLE IRK", address]);
-    u128::from_le_bytes(h[..16].try_into().unwrap())
+    h[..16].try_into().unwrap()
+}
+
+/// Random bytes for keys: the chip's generator, fed by the radio's noise while BLE is on.
+fn random(out: &mut [u8]) {
+    Rng::new().read(out);
 }
 
 /// Spawn the BLE task unless it is already running (then only its PIN changes).
 pub fn start(spawner: &Spawner, bt: BT<'static>, params: Params) {
     if BLE_RUNNING.swap(true, Ordering::AcqRel) {
-        trouble_host::set_fixed_pass_key(params.pin);
+        PIN.store(params.pin.unwrap_or(NO_PIN), Ordering::Relaxed);
         return;
     }
     match ble_task(bt, params) {
@@ -183,170 +114,155 @@ pub async fn ble_task(bt: BT<'static>, params: Params) {
 }
 
 async fn serve(bt: BT<'static>, params: Params) {
-    let connector = match BleConnector::new(bt, Default::default()) {
+    let mut controller = match BleConnector::new(bt, Default::default()) {
         Ok(c) => c,
         Err(e) => {
             warn!("BLE: controller init failed: {e:?}");
             return;
         }
     };
-    let controller: Hci = ExternalController::new(connector);
-    trouble_host::set_fixed_pass_key(params.pin);
-    trouble_host::set_identity_irk(identity_irk(&params.address));
-    let mut resources: HostResources<_, DefaultPacketPool, 1, 3> = HostResources::new();
-    let stack = trouble_host::new(controller, &mut resources)
-        .set_random_address(Address::random(params.address))
-        .set_io_capabilities(IoCapabilities::DisplayOnly)
-        .build();
-    for b in deserialize_bonds(&params.bonds) {
-        let _ = stack.add_bond_information(b);
-    }
-    let runner = stack.runner();
-    let mut peripheral = stack.peripheral();
-    let Some(server) = server(&params.name) else {
-        warn!("BLE: GATT server setup failed");
-        return;
-    };
-
-    let _ = join(run_host(runner), async {
-        loop {
-            match advertise(&params.name, &mut peripheral, server).await {
-                Ok(conn) => {
-                    let _ = conn.raw().set_bondable(true);
+    PIN.store(params.pin.unwrap_or(NO_PIN), Ordering::Relaxed);
+    let mut host = Host::new(Config {
+        name: params.name,
+        address: params.address,
+        irk: identity_irk(&params.address),
+        passkey: params.pin,
+        bonds: bonds_from_bytes(&params.bonds),
+        frame_max: MAX_FRAME_SIZE,
+        random,
+    });
+    let mut packet = [0u8; HCI_PACKET_MAX];
+    let mut connected = false;
+    let mut notify_at = Instant::now();
+    loop {
+        let pin = PIN.load(Ordering::Relaxed);
+        host.set_passkey((pin != NO_PIN).then_some(pin));
+        host.tick(Instant::now().as_secs() as u32);
+        while let Some(out) = host.transmit() {
+            write(&mut controller, &out).await;
+        }
+        if let Some(event) = host.event() {
+            match event {
+                Event::Connected => {
+                    info!("BLE: connected, {host:?}");
+                    connected = true;
                     while BLE_OUT.try_receive().is_ok() {} // stale frames for an earlier app
-                    select(events(server, &conn, &stack), notifier(server, &conn)).await;
+                }
+                Event::Disconnected(reason) => {
+                    info!("BLE: disconnected ({reason:#04x}), {host:?}");
+                    connected = false;
                     BLE_CONNECTED.store(false, Ordering::Relaxed);
                     BLE_PASSKEY.store(0, Ordering::Relaxed);
                 }
-                Err(e) => {
-                    warn!("BLE: advertising failed: {e:?}");
-                    Timer::after_secs(5).await;
+                Event::Passkey(key) => {
+                    if pairing_begins() {
+                        BLE_PASSKEY.store(key.max(1), Ordering::Relaxed);
+                    } else {
+                        warn!("BLE: pairing refused after failed ones, try later");
+                        host.disconnect();
+                    }
                 }
-            }
-        }
-    })
-    .await;
-}
-
-async fn run_host<C: Controller, P: PacketPool>(mut runner: Runner<'_, C, P>) {
-    loop {
-        if let Err(e) = runner.run().await {
-            warn!("BLE: host error: {e:?}");
-            Timer::after_secs(1).await;
-        }
-    }
-}
-
-async fn advertise<'stack, 'server, C: Controller>(
-    name: &str, peripheral: &mut Peripheral<'stack, C, DefaultPacketPool>, server: &'server Server<'_>,
-) -> Result<GattConnection<'stack, 'server, DefaultPacketPool>, BleHostError<C::Error>> {
-    let mut adv = [0u8; 31];
-    let adv_len = AdStructure::encode_slice(
-        &[
-            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::CompleteServiceUuids128(&[[
-                0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x01, 0x00, 0x40, 0x6E,
-            ]]),
-        ],
-        &mut adv[..],
-    )?;
-    let mut scan = [0u8; 31];
-    let scan_len =
-        AdStructure::encode_slice(&[AdStructure::CompleteLocalName(truncate(name, 29).as_bytes())], &mut scan[..])?;
-    let advertiser = peripheral
-        .advertise(
-            &Default::default(),
-            Advertisement::ConnectableScannableUndirected { adv_data: &adv[..adv_len], scan_data: &scan[..scan_len] },
-        )
-        .await?;
-    let conn = advertiser.accept().await?.with_attribute_server(server)?;
-    info!("BLE: connected");
-    Ok(conn)
-}
-
-/// GATT and security events until the link drops.
-async fn events(server: &Server<'_>, conn: &GattConnection<'_, '_, DefaultPacketPool>, stack: &Stack<'_, Hci, DefaultPacketPool>) {
-    let rx = server.uart.rx.handle;
-    loop {
-        match conn.next().await {
-            GattConnectionEvent::Disconnected { reason } => {
-                info!("BLE: disconnected ({reason:?})");
-                return;
-            }
-            GattConnectionEvent::PassKeyDisplay(key) => {
-                if pairing_begins() {
-                    BLE_PASSKEY.store(key.value().max(1), Ordering::Relaxed);
-                } else {
-                    warn!("BLE: pairing refused after failed ones, try later");
-                    conn.raw().disconnect();
-                }
-            }
-            GattConnectionEvent::PairingComplete { security_level, bond } => {
-                BLE_PASSKEY.store(0, Ordering::Relaxed);
-                info!("BLE: paired ({security_level:?})");
-                if security_level == SecurityLevel::EncryptedAuthenticated {
+                Event::Paired { bonded } => {
+                    info!("BLE: paired");
+                    BLE_PASSKEY.store(0, Ordering::Relaxed);
                     pairing_succeeded();
+                    BLE_CONNECTED.store(true, Ordering::Relaxed);
+                    if bonded {
+                        BONDS_CHANGED.signal(bonds_to_bytes(host.bonds()));
+                    }
                 }
-                BLE_CONNECTED.store(security_level == SecurityLevel::EncryptedAuthenticated, Ordering::Relaxed);
-                if bond.is_some() {
-                    BONDS_CHANGED.signal(stack.with_bond_information(serialize_bonds));
+                Event::Encrypted(authenticated) => {
+                    info!("BLE: encrypted, {host:?}");
+                    BLE_CONNECTED.store(authenticated, Ordering::Relaxed);
                 }
-            }
-            GattConnectionEvent::Encrypted { security_level, .. } => {
-                BLE_CONNECTED.store(security_level == SecurityLevel::EncryptedAuthenticated, Ordering::Relaxed);
-            }
-            GattConnectionEvent::PairingFailed(e) => {
-                BLE_PASSKEY.store(0, Ordering::Relaxed);
-                warn!("BLE: pairing failed: {e:?}");
-                conn.raw().disconnect();
-            }
-            GattConnectionEvent::ConnectionParamsUpdated { conn_interval, peripheral_latency, .. } => {
-                info!("BLE: interval {} ms, latency {peripheral_latency}", conn_interval.as_millis());
-            }
-            GattConnectionEvent::Gatt { event } => {
-                if let GattEvent::Write(w) = &event
-                    && w.handle() == rx
-                {
-                    let frame = w.with_data(|_, data| data.to_vec());
+                Event::PairingFailed => {
+                    warn!("BLE: pairing failed");
+                    BLE_PASSKEY.store(0, Ordering::Relaxed);
+                    host.disconnect();
+                }
+                Event::Written(frame) => {
                     if frame.first() == Some(&REQ_TYPE_OTA_BEGIN) {
-                        let fast = RequestedConnParams {
-                            min_connection_interval: Duration::from_millis(UPLOAD_INTERVAL_MS.0),
-                            max_connection_interval: Duration::from_millis(UPLOAD_INTERVAL_MS.1),
-                            // committing stalls the stack for half a minute of flash work
-                            supervision_timeout: Duration::from_secs(20),
-                            ..Default::default()
-                        };
-                        if let Err(e) = conn.raw().update_connection_params(stack, &fast).await {
-                            warn!("BLE: connection update failed: {e:?}");
-                        }
+                        // every chunk of a firmware upload is a write answered in a later
+                        // connection event, so the interval sets the transfer rate
+                        host.hurry();
                     }
                     if !frame.is_empty() {
                         // wait for room: the write is acknowledged only once the frame is queued,
                         // which paces a fast sender (firmware upload) to the main loop
                         FRAMES_IN.send((Link::Ble, frame)).await;
                     }
-                }
-                if let Ok(reply) = event.accept() {
-                    reply.send().await;
+                    host.written();
                 }
             }
-            _ => {}
+            continue;
+        }
+        // a frame for the app, once the controller has taken all that was for it before
+        let take_frame = connected && host.idle();
+        let frame = async {
+            if !take_frame {
+                pending::<()>().await;
+            }
+            Timer::at(notify_at).await;
+            BLE_OUT.receive().await
+        };
+        match select3(read(&mut controller, &mut packet), frame, Timer::after_secs(1)).await {
+            Either3::First(len) => host.receive(&packet[..len]),
+            // not authenticated yet: upstream drops pushes then too
+            Either3::Second(frame) => {
+                if BLE_CONNECTED.load(Ordering::Relaxed) && host.notify(&frame) {
+                    notify_at = Instant::now() + NOTIFY_INTERVAL;
+                }
+            }
+            // the host is told the time: a pairing that stalls ends
+            Either3::Third(()) => {}
         }
     }
 }
 
-/// Notify queued frames to the app.
-async fn notifier(server: &Server<'_>, conn: &GattConnection<'_, '_, DefaultPacketPool>) {
+/// The controller's next HCI packet, its type first: the length of it in `packet`. Nothing is
+/// taken while this waits, so the wait may be given up for something else.
+async fn read(controller: &mut BleConnector<'_>, packet: &mut [u8; HCI_PACKET_MAX]) -> usize {
     loop {
-        let frame = BLE_OUT.receive().await;
-        if !BLE_CONNECTED.load(Ordering::Relaxed) {
-            continue; // not authenticated yet: upstream drops pushes then too
+        if controller.read_async(&mut packet[..1]).await != Ok(1) {
+            continue;
         }
-        match select(server.uart.tx.notify_raw(conn, &frame, false), Timer::after_secs(5)).await {
-            Either::First(Ok(())) => {}
-            Either::First(Err(e)) => warn!("BLE: notify failed: {e:?}"),
-            Either::Second(()) => warn!("BLE: notify timed out"),
+        // a packet is whole in the controller's queue: the rest of it is there to read
+        let header = match packet[0] {
+            2 => 4, // data: handle and flags, length
+            4 => 2, // an event: code, length
+            _ => continue,
+        };
+        if controller.read(&mut packet[1..1 + header]) != Ok(header) {
+            continue;
         }
-        Timer::after_millis(NOTIFY_INTERVAL_MS).await;
+        let body = match packet[0] {
+            2 => u16::from_le_bytes([packet[3], packet[4]]) as usize,
+            _ => packet[2] as usize,
+        };
+        let end = 1 + header + body;
+        if end <= packet.len() {
+            if controller.read(&mut packet[1 + header..end]) == Ok(body) {
+                return end;
+            }
+            continue;
+        }
+        // longer than any the host takes: skipped, so the next read starts at a packet
+        let mut left = body;
+        while left > 0 {
+            let part = left.min(packet.len());
+            if controller.read(&mut packet[..part]) != Ok(part) {
+                break;
+            }
+            left -= part;
+        }
+    }
+}
+
+async fn write(controller: &mut BleConnector<'_>, mut packet: &[u8]) {
+    while !packet.is_empty() {
+        match controller.write_async(packet).await {
+            Ok(taken) if taken > 0 => packet = &packet[taken..],
+            _ => return,
+        }
     }
 }

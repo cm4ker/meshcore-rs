@@ -6,6 +6,12 @@
 
 extern crate alloc;
 
+#[cfg(not(feature = "ble-trouble"))]
+pub mod ble;
+// the BLE interface over trouble-host, as it was until meshcore-ble: to tell a fault of the new
+// host from one of a phone, until the new one has seen enough phones
+#[cfg(feature = "ble-trouble")]
+#[path = "ble_trouble.rs"]
 pub mod ble;
 pub mod broker;
 pub mod clock_cell;
