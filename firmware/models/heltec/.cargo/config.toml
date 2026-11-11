@@ -7,6 +7,9 @@ runner = "espflash flash --monitor --chip esp32s3"
 [build]
 rustflags = [
   "-C", "link-arg=-nostartfiles",
+  # the SHA-2 rounds in a loop, not unrolled (SHA-512 alone is 49 KB unrolled), at a cost nobody
+  # notices in signatures and hashes here
+  "--cfg", 'sha2_backend_soft="compact"',
 ]
 
 target = "xtensa-esp32s3-none-elf"

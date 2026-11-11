@@ -60,7 +60,8 @@ esp-radio = { version = "1.0.0-beta.1", features = ["esp32s3", "wifi", "ble", "c
 embassy-net = { version = "0.9", features = ["tcp", "udp", "dns", "dhcpv4", "medium-ethernet", "proto-ipv4"] }
 edge-dhcp = "0.8"
 edge-nal = "0.7"
-edge-nal-embassy = "0.9"
+# no default features: its `all` turns on IPv6, ICMP, multicast and medium-ip in smoltcp
+edge-nal-embassy = { version = "0.9", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp"] }
 ssd1306 = "0.10"
 embedded-graphics = "0.8"
 

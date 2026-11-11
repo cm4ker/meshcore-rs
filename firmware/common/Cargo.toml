@@ -27,7 +27,8 @@ static_cell = "2.1.1"
 # the Wi-Fi OTA access point's DHCP server (wifi_ota)
 edge-dhcp = "0.8"
 edge-nal = "0.7"
-edge-nal-embassy = "0.9"
+# no default features: its `all` turns on IPv6, ICMP, multicast and medium-ip in smoltcp
+edge-nal-embassy = { version = "0.9", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp"] }
 libm = "0.2.16"
 heapless = "0.9"
 # patched copy in ../vendor/trouble-host (fixed passkey), see the board crates' [patch.crates-io]
