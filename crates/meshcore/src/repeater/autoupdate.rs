@@ -13,7 +13,6 @@
 //! ([`crate::fwstate`]).
 
 use alloc::string::ToString;
-use core::cmp::Reverse;
 
 use super::*;
 use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, MAX_LORA_FILE, Offer, status};
@@ -414,7 +413,7 @@ impl Repeater {
             .filter(|n| n.heard_timestamp > 0 && now.saturating_sub(n.heard_timestamp) < HEARD_RECENTLY_SECS)
             .filter(|n| n.id.pub_key.starts_with(source))
             .collect();
-        heard.sort_by_key(|n| Reverse(n.snr));
+        sort_neighbours(&mut heard, |n| -(n.snr as i64));
         let a = &mut self.autoupdate;
         a.others = heard.iter().take(MAX_ASKED).rev().map(|n| n.id).collect();
         a.asked = 0;

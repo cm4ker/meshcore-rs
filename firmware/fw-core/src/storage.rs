@@ -355,7 +355,15 @@ impl<F: NorFlash> Store<F> {
             return self.lent_load(lend::TAG_CONTACTS, 0).map(|d| lend::unpack(&d));
         }
         let mut found = self.log_scan();
-        found.sort_by_key(|r| core::cmp::Reverse(r.0));
+        // the newest first, those of one number as found; by insertion, for the few records there
+        // are: core's sort is 3 KB of code on a board whose core is not built for size
+        for i in 1..found.len() {
+            let mut j = i;
+            while j > 0 && found[j - 1].0 < found[j].0 {
+                found.swap(j - 1, j);
+                j -= 1;
+            }
+        }
         if let (Some(&(seq, addr, len, _)), None) = (found.first(), self.log_head) {
             // appends continue after the newest record, even an interrupted one
             self.log_head = Some((addr + (HEADER as u32 + len).next_multiple_of(4), seq.wrapping_add(1)));

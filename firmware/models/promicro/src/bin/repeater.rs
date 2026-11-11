@@ -43,7 +43,7 @@ use meshcore::identity::LocalIdentity;
 use meshcore::mesh::{Mesh, MeshCtx};
 use meshcore::prefs::{NAME_MAX, NodePrefs};
 use meshcore::repeater::{BLE_OTA_WINDOW_MINS, BoardInfo, Repeater};
-use meshcore::util::to_hex;
+use meshcore::util::{Shortest, to_hex};
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE};
 use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT};
 use meshcore_fw_core::noise::NoiseFloor;
@@ -316,7 +316,7 @@ async fn main(spawner: Spawner) {
     }
     info!(
         "radio: {} MHz BW{} SF{} CR{} tx {} dBm",
-        prefs.radio.freq_mhz, prefs.radio.bw_khz, prefs.radio.sf, prefs.radio.cr, prefs.tx_power_dbm
+        Shortest(prefs.radio.freq_mhz), Shortest(prefs.radio.bw_khz), prefs.radio.sf, prefs.radio.cr, prefs.tx_power_dbm
     );
 
     // ---- entropy: the hardware RNG mixed with the radio's RSSI noise

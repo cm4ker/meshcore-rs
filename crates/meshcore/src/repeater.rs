@@ -145,6 +145,19 @@ pub struct Neighbour {
     pub snr: i8,
 }
 
+/// The neighbours by a key, the smallest first, those of one key in the order they were. By
+/// insertion: the table is short, and core's sort is 2 KB of code for each key it is used with on
+/// a board whose core is not built for size.
+pub(crate) fn sort_neighbours(list: &mut [&Neighbour], key: fn(&Neighbour) -> i64) {
+    for i in 1..list.len() {
+        let mut j = i;
+        while j > 0 && key(list[j - 1]) > key(list[j]) {
+            list.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+}
+
 /// Fixed-window rate limiter (`RateLimiter.h`).
 #[derive(Clone, Debug)]
 struct RateLimiter {
@@ -781,7 +794,7 @@ impl Repeater {
 
     fn format_neighbours(&self, ctx: &MeshCtx) -> String {
         let mut sorted: Vec<&Neighbour> = self.neighbours.iter().filter(|n| n.heard_timestamp > 0).collect();
-        sorted.sort_by_key(|a| core::cmp::Reverse(a.heard_timestamp));
+        sort_neighbours(&mut sorted, |n| -(n.heard_timestamp as i64));
         let now = ctx.current_time();
         let mut out = String::new();
         for (i, n) in sorted.iter().enumerate() {
@@ -991,10 +1004,10 @@ impl Repeater {
                 let prefix_len = (at(6) as usize).min(PUB_KEY_SIZE);
                 let mut sorted: Vec<&Neighbour> = self.neighbours.iter().filter(|n| n.heard_timestamp > 0).collect();
                 match order_by {
-                    0 => sorted.sort_by_key(|a| core::cmp::Reverse(a.heard_timestamp)),
-                    1 => sorted.sort_by_key(|a| a.heard_timestamp),
-                    2 => sorted.sort_by_key(|a| core::cmp::Reverse(a.snr)),
-                    3 => sorted.sort_by_key(|a| a.snr),
+                    0 => sort_neighbours(&mut sorted, |n| -(n.heard_timestamp as i64)),
+                    1 => sort_neighbours(&mut sorted, |n| n.heard_timestamp as i64),
+                    2 => sort_neighbours(&mut sorted, |n| -(n.snr as i64)),
+                    3 => sort_neighbours(&mut sorted, |n| n.snr as i64),
                     _ => {}
                 }
                 let now = ctx.current_time();
@@ -2779,5 +2792,47 @@ impl Repeater {
         } else {
             "Error, max 64".into()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn neighbours_sorted_as_core_sorts_them() {
+        let neighbour = |heard: u32, snr: i8, name: &str| Neighbour {
+            id: Identity::default(),
+            name: name.into(),
+            advert_timestamp: 0,
+            heard_timestamp: heard,
+            snr,
+        };
+        let table = [
+            neighbour(50, -8, "a"),
+            neighbour(90, 40, "b"),
+            neighbour(50, 12, "c"),
+            neighbour(10, 40, "d"),
+            neighbour(70, -128, "e"),
+            neighbour(u32::MAX, 127, "f"),
+            neighbour(50, 12, "g"),
+        ];
+        let names = |list: &[&Neighbour]| list.iter().map(|n| n.name.as_str()).collect::<String>();
+        let keys: [(fn(&Neighbour) -> i64, &str); 4] = [
+            (|n| -(n.heard_timestamp as i64), "fbeacgd"),
+            (|n| n.heard_timestamp as i64, "dacgebf"),
+            (|n| -(n.snr as i64), "fbdcgae"),
+            (|n| n.snr as i64, "eacgbdf"),
+        ];
+        for (key, order) in keys {
+            let mut ours: Vec<&Neighbour> = table.iter().collect();
+            sort_neighbours(&mut ours, key);
+            // equal keys stay in the table's order, as with core's stable sort
+            let mut cores: Vec<&Neighbour> = table.iter().collect();
+            cores.sort_by_key(|n| key(n));
+            assert_eq!(names(&ours), names(&cores));
+            assert_eq!(names(&ours), order);
+        }
+        sort_neighbours(&mut [], |n| n.snr as i64);
     }
 }
