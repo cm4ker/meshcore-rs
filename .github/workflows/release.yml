@@ -45,6 +45,11 @@ env:
   MCFW_COUNTER: ${{ inputs.counter || github.run_number }}
   MCFW_VERSION: ${{ inputs.version }}
   MCFW_CHANNEL: ${{ inputs.channel || 'dev' }}
+  # One espflash for every run: another version may lay the same program out differently. Its
+  # release's binary, taken only with this hash (built from source it was three minutes of the
+  # Heltec job's eight).
+  ESPFLASH_ZIP: https://github.com/esp-rs/espflash/releases/download/v4.6.0/espflash-x86_64-unknown-linux-musl.zip
+  ESPFLASH_SHA256: d515ee13ae44ba913c31a2ca58dc5fd72d3362994ee1d7487a16b289dfbb6e4a
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -73,8 +78,12 @@ jobs:
           default: true
           buildtargets: esp32s3
           ldproxy: false
-      # one espflash for every run: another version may lay the same program out differently
-      - run: cargo install espflash --version 4.6.0 --locked
+      - name: espflash
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/espflash.zip" "$ESPFLASH_ZIP"
+          echo "$ESPFLASH_SHA256  $RUNNER_TEMP/espflash.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/espflash.zip" espflash -d "$HOME/.cargo/bin"
+          espflash --version
       - name: Heltec V4, V3 and Wireless Paper
         working-directory: firmware/models/heltec
         run: |
@@ -107,7 +116,12 @@ jobs:
       - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
       - run: rustup toolchain install
         working-directory: firmware/models/xiao-c6
-      - run: cargo install espflash --version 4.6.0 --locked
+      - name: espflash
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/espflash.zip" "$ESPFLASH_ZIP"
+          echo "$ESPFLASH_SHA256  $RUNNER_TEMP/espflash.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/espflash.zip" espflash -d "$HOME/.cargo/bin"
+          espflash --version
       - working-directory: firmware/models/xiao-c6
         run: |
           mkdir -p ../../../content
@@ -135,8 +149,18 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
-      # nrf-sdc and nrf-mpsl generate their bindings with libclang
-      - run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      # nrf-sdc and nrf-mpsl generate their bindings with libclang. The runner's image has it, with
+      # its clang; from apt only should a later image not: Ubuntu's mirror went unresolved for
+      # hours once, and this job failed with it
+      - name: libclang
+        run: |
+          lib=$(find /usr/lib/llvm-*/lib /usr/lib/x86_64-linux-gnu -maxdepth 1 -name 'libclang-[0-9]*.so.*' 2> /dev/null | sort -V | tail -1)
+          if [ -n "$lib" ]; then
+            echo "libclang: $lib"
+            echo "LIBCLANG_PATH=$(dirname "$lib")" >> "$GITHUB_ENV"
+          else
+            sudo apt-get update && sudo apt-get install -y libclang-dev
+          fi
       - run: rustup toolchain install
         working-directory: firmware/models/t-echo
       - working-directory: firmware/models/t-echo

@@ -28,6 +28,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_OTA_SIGN = REPO / "target" / "release" / ("ota-sign.exe" if os.name == "nt" else "ota-sign")
@@ -50,17 +52,31 @@ def run(*args):
     return subprocess.run([str(a) for a in args], check=True, capture_output=True, text=True).stdout
 
 
+def download(tag, file, to):
+    """A release's file into `to`. GitHub answers a download with HTTP 500 now and then: asked
+    again, after a pause."""
+    for pause in (5, 15, 30, None):
+        try:
+            return run("gh", "release", "download", tag, "-p", file, "-D", to, "--clobber")
+        except subprocess.CalledProcessError:
+            if pause is None:
+                raise
+            time.sleep(pause)
+
+
 class Releases:
-    """The published releases, newest first, and their files (fetched when asked for)."""
+    """The published releases, newest first, and their files."""
 
     def __init__(self):
         rows = json.loads(run("gh", "release", "list", "--limit", "30", "--exclude-drafts", "--json", "tagName,isPrerelease"))
         self.tags = [(r["tagName"], not r["isPrerelease"]) for r in rows]
-        self._assets = {}
+        # the files of them all in one answer, not one for each release (a second each)
+        listed = json.loads(run("gh", "api", "repos/{owner}/{repo}/releases?per_page=30"))
+        self._assets = {r["tag_name"]: [a["name"] for a in r["assets"]] for r in listed}
 
     def release_file(self, tag, name):
         """The .mcfw of `name` (<board>-<role>) in release `tag`, if it carries one."""
-        if tag not in self._assets:
+        if tag not in self._assets:  # an older one, named with --from
             self._assets[tag] = run("gh", "release", "view", tag, "--json", "assets", "-q", ".assets[].name").split()
         pattern = re.compile(re.escape(name) + r"-.*\.mcfw")
         return next((a for a in self._assets[tag] if pattern.fullmatch(a)), None)
@@ -141,41 +157,55 @@ def main():
     github = os.environ.get("GITHUB_ACTIONS") == "true"
     rows = ["| image | from | delta | RAM layout |", "|---|---|---|---|"]
     work = pathlib.Path(tempfile.mkdtemp(prefix="delta-report-"))
-    for path in args.images:
+
+    def bundle(path):
+        """An image packed as a release packs it: its board and role, its bytes, the .mcfw."""
         name = args.name or path.stem
         board, _, role = name.rpartition("-")
-        image = path.read_bytes()
         new = work / f"{name}.mcfw"
         run(args.ota_sign, "bundle", path, "--board", board, "--role", role, "--counter", "1", "--version", "check", "--issued", "0", "-o", new)
-        bases = [(t, releases.release_file(t, name)) for t in args.tags] if args.tags else releases.bases(name)
-        if not bases:
-            rows.append(f"| {name} | | no release yet | |")
-        for tag, file in bases:
-            if file is None:
-                rows.append(f"| {name} | {tag} | not in that release | |")
-                continue
-            base = args.cache / tag / file
-            if not base.exists():
-                run("gh", "release", "download", tag, "-p", file, "-D", args.cache / tag, "--clobber")
-            delta = work / f"{name}.from-{tag}.mcfd"
-            run(args.ota_sign, "delta", base, new, "-o", delta)
-            size = delta.stat().st_size
-            base_image = work / f"{name}.{tag}.bin"
-            run(args.ota_sign, "extract", base, "-o", base_image)
-            layout = ram_layout(base_image.read_bytes(), image)
-            room = lora_room(name, len(image), tag)
-            mark = warning = ""
-            if size > room:
-                title, mark = "Delta over the LoRa limit", f", over the LoRa limit ({room // 1024} KB)"
-                warning = f"{name} from {tag} would be {size // 1024} KB, more than {room // 1024} KB: nodes on {tag} would not take it over LoRa by themselves, only over Wi-Fi, USB or BLE, or by hand (fw update) where {tag} has that"
-            elif size > budget:
-                title, mark = "Delta over the budget", f", over the budget ({args.budget} KB)"
-                warning = f"{name} from {tag} would be {size // 1024} KB, more than {args.budget} KB (RAM layout: {layout}): release before more goes in"
+        return name, path.read_bytes(), new
+
+    def delta(job):
+        """The table's row for an image's delta from a release, and the warning if it is too large
+        (its title and text)."""
+        (name, image, new), tag, file = job
+        if tag is None:
+            return f"| {name} | | no release yet | |", None
+        if file is None:
+            return f"| {name} | {tag} | not in that release | |", None
+        base = args.cache / tag / file
+        if not base.exists():
+            download(tag, file, args.cache / tag)
+        delta = work / f"{name}.from-{tag}.mcfd"
+        run(args.ota_sign, "delta", base, new, "-o", delta)
+        size = delta.stat().st_size
+        base_image = work / f"{name}.{tag}.bin"
+        run(args.ota_sign, "extract", base, "-o", base_image)
+        layout = ram_layout(base_image.read_bytes(), image)
+        room = lora_room(name, len(image), tag)
+        mark, warning = "", None
+        if size > room:
+            mark = f", over the LoRa limit ({room // 1024} KB)"
+            warning = "Delta over the LoRa limit", f"{name} from {tag} would be {size // 1024} KB, more than {room // 1024} KB: nodes on {tag} would not take it over LoRa by themselves, only over Wi-Fi, USB or BLE, or by hand (fw update) where {tag} has that"
+        elif size > budget:
+            mark = f", over the budget ({args.budget} KB)"
+            warning = "Delta over the budget", f"{name} from {tag} would be {size // 1024} KB, more than {args.budget} KB (RAM layout: {layout}): release before more goes in"
+        return f"| {name} | {tag} | {size // 1024} KB{mark} | {layout} |", warning
+
+    # a delta takes ota-sign seconds on one core: as many at once as there are cores
+    with ThreadPoolExecutor(os.cpu_count()) as pool:
+        jobs = []
+        for image in pool.map(bundle, args.images):
+            name = image[0]
+            bases = [(t, releases.release_file(t, name)) for t in args.tags] if args.tags else releases.bases(name)
+            jobs += [(image, tag, file) for tag, file in bases] or [(image, None, None)]
+        for row, warning in pool.map(delta, jobs):
             if warning and github:
-                print(f"::warning title={title}::{warning}")
+                print(f"::warning title={warning[0]}::{warning[1]}")
             elif warning:
-                print(f"warning: {warning}", file=sys.stderr)
-            rows.append(f"| {name} | {tag} | {size // 1024} KB{mark} | {layout} |")
+                print(f"warning: {warning[1]}", file=sys.stderr)
+            rows.append(row)
     table = "\n".join(rows) + "\n"
     print(table)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
