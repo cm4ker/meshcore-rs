@@ -1,3 +1,6 @@
+# A release of Rust, not "stable": a newer compiler changes every image, and every node then takes
+# an update with nothing in it (Rust 1.100.0 did so). Raised by hand, in step with the T-Echo's and
+# the XIAO C6's. The installer, in installer/, is built with it too.
 [toolchain]
-channel = "stable"
+channel = "1.99.1"
 targets = ["thumbv7em-none-eabihf"]

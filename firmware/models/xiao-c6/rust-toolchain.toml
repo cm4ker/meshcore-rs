@@ -1,4 +1,7 @@
+# A release of Rust, not "stable": a newer compiler changes every image, and every node then takes
+# an update with nothing in it (Rust 1.100.0 did so to the Pro Micro and the T-Echo). Raised by
+# hand, in step with the Pro Micro's and the T-Echo's.
 [toolchain]
-channel = "stable"
+channel = "1.99.1"
 components = ["rust-src"]
 targets = ["riscv32imac-unknown-none-elf"]
