@@ -1,4 +1,4 @@
-//! The host against a controller and a phone made up here: the phone's side of pairing is
+//! The host against a controller and a peer made up here: the peer's side of pairing is
 //! written from the specification, with the same toolbox.
 
 use alloc::collections::VecDeque;
@@ -39,12 +39,12 @@ fn config(passkey: Option<u32>, bonds: Vec<Bond>) -> Config {
     }
 }
 
-/// The controller under the host, and what the phone hears through it.
+/// The controller under the host, and what the peer hears through it.
 struct Sim {
     host: Host,
     /// Commands the host gave: opcode and parameters.
     commands: Vec<(u16, Vec<u8>)>,
-    /// PDUs for the phone: channel and payload.
+    /// PDUs for the peer: channel and payload.
     heard: VecDeque<(u16, Vec<u8>)>,
     partial: Vec<u8>,
     /// The size of a data buffer and their number.
@@ -152,7 +152,7 @@ impl Sim {
         self.run();
     }
 
-    /// The phone sends a PDU, in parts of at most `part` bytes.
+    /// The peer sends a PDU, in parts of at most `part` bytes.
     fn say_in_parts(&mut self, channel: u16, payload: &[u8], part: usize) {
         let mut pdu = (payload.len() as u16).to_le_bytes().to_vec();
         pdu.extend_from_slice(&channel.to_le_bytes());
@@ -171,9 +171,9 @@ impl Sim {
         self.say_in_parts(channel, payload, 251);
     }
 
-    /// What the phone heard next on a channel.
+    /// What the peer heard next on a channel.
     fn hear(&mut self, channel: u16) -> Vec<u8> {
-        let (on, pdu) = self.heard.pop_front().expect("the phone heard nothing");
+        let (on, pdu) = self.heard.pop_front().expect("the peer heard nothing");
         assert_eq!(on, channel, "{pdu:02x?}");
         pdu
     }
@@ -193,7 +193,7 @@ impl Sim {
         self.commands.iter().rev().find(|c| c.0 == opcode).map(|c| c.1.as_slice())
     }
 
-    /// The phone starts encryption: the key the host gives for it, if any.
+    /// The peer starts encryption: the key the host gives for it, if any.
     fn encrypt(&mut self) -> Option<[u8; 16]> {
         let handle = HANDLE.to_le_bytes();
         self.commands.clear();
@@ -216,8 +216,8 @@ impl Sim {
     }
 }
 
-/// A phone that pairs.
-struct Phone {
+/// A peer that pairs.
+struct Peer {
     /// The address it connects with, as on the air, and its type.
     kind: u8,
     address: [u8; 6],
@@ -228,7 +228,7 @@ struct Phone {
     features: [u8; 6],
 }
 
-impl Phone {
+impl Peer {
     /// One with a keyboard and a display, bonding, behind a private address made of its key.
     fn new(n: u8) -> Self {
         let irk = [n; 16];
@@ -375,17 +375,17 @@ fn buffers_shared_with_classic_bluetooth() {
 #[test]
 fn pairs_with_the_passkey_and_bonds() {
     let mut sim = Sim::new(config(None, vec![]), (251, 12));
-    let phone = Phone::new(7);
-    sim.connect(phone.kind, phone.address);
+    let peer = Peer::new(7);
+    sim.connect(peer.kind, peer.address);
     assert_eq!(sim.take_events(), [Event::Connected]);
 
-    // not paired: the service is closed, which is what makes a phone pair
+    // not paired: the service is closed, which is what makes a peer pair
     assert_eq!(sim.ask(&[0x12, 12, 0, 1, 0]), [0x01, 0x12, 12, 0, 0x05]);
     assert!(!sim.host.notify(&[1, 2, 3]));
 
-    let key = phone.pair(&mut sim, |shown| shown).unwrap();
+    let key = peer.pair(&mut sim, |shown| shown).unwrap();
     assert_eq!(sim.take_events(), [Event::Encrypted(true), Event::Paired { bonded: true }]);
-    let bond = Bond { kind: 0, address: phone.identity.1, ltk: key, irk: phone.irk, authenticated: true, bonded: true };
+    let bond = Bond { kind: 0, address: peer.identity.1, ltk: key, irk: peer.irk, authenticated: true, bonded: true };
     assert_eq!(sim.host.bonds(), core::slice::from_ref(&bond));
 
     // the service is open
@@ -403,12 +403,12 @@ fn pairs_with_the_passkey_and_bonds() {
     sim.run();
     assert_eq!(sim.hear(att::CID), [0x13]);
 
-    // the phone comes back behind another private address: known by its key, and no pairing
+    // the peer comes back behind another private address: known by its key, and no pairing
     sim.disconnect();
     assert_eq!(sim.take_events(), [Event::Disconnected(0x13)]);
     assert_eq!(sim.commands.last().unwrap(), &(LE_SET_ADVERTISING_ENABLE, vec![1]));
-    let address = Phone::private_address(&phone.irk, 99);
-    assert_ne!(address, phone.address);
+    let address = Peer::private_address(&peer.irk, 99);
+    assert_ne!(address, peer.address);
     sim.connect(1, address);
     // until it encrypts the link it is refused, and told that the key it has will do: in the
     // refusal, and once in a Security Request
@@ -428,15 +428,15 @@ fn pairs_with_the_passkey_and_bonds() {
     let stored = bonds_to_bytes(sim.host.bonds());
     assert_eq!(stored.len(), BOND_RECORD);
     let mut sim = Sim::new(config(None, bonds_from_bytes(&stored)), (251, 12));
-    sim.connect(1, Phone::private_address(&phone.irk, 5));
+    sim.connect(1, Peer::private_address(&peer.irk, 5));
     assert_eq!(sim.encrypt(), Some(key));
     assert_eq!(sim.take_events(), [Event::Connected, Event::Encrypted(true)]);
-    // after a restart the phone asks for its notifications anew
+    // after a restart the peer asks for its notifications anew
     assert!(!sim.host.notify(&[9]));
 
-    // another phone is none of ours
+    // another peer is none of ours
     sim.disconnect();
-    sim.connect(1, Phone::new(8).address);
+    sim.connect(1, Peer::new(8).address);
     assert_eq!(sim.encrypt(), None);
     assert_eq!(sim.take_events(), [Event::Disconnected(0x13), Event::Connected]);
 }
@@ -444,16 +444,16 @@ fn pairs_with_the_passkey_and_bonds() {
 #[test]
 fn a_fixed_passkey_and_a_wrong_one() {
     let mut sim = Sim::new(config(Some(123_456), vec![]), (251, 12));
-    let phone = Phone::new(3);
-    sim.connect(phone.kind, phone.address);
+    let peer = Peer::new(3);
+    sim.connect(peer.kind, peer.address);
     // every bit of the passkey is checked in a round of its own: a wrong one fails there
-    assert_eq!(phone.pair(&mut sim, |shown| shown ^ 0x10), Err(0x04));
+    assert_eq!(peer.pair(&mut sim, |shown| shown ^ 0x10), Err(0x04));
     assert_eq!(sim.take_events(), [Event::PairingFailed { why: Failure::Refused(0x04), passkey_entered: true }]);
     assert_eq!(sim.host.bonds(), []);
     assert_eq!(sim.encrypt(), None);
 
-    // the phone may try again
-    phone.pair(&mut sim, |shown| {
+    // the peer may try again
+    peer.pair(&mut sim, |shown| {
         assert_eq!(shown, 123_456);
         shown
     })
@@ -463,23 +463,23 @@ fn a_fixed_passkey_and_a_wrong_one() {
     // a passkey of more than six digits is no fixed one
     sim.host.set_passkey(Some(1_000_000));
     sim.disconnect();
-    sim.connect(phone.kind, phone.address);
-    phone.pair(&mut sim, |shown| {
+    sim.connect(peer.kind, peer.address);
+    peer.pair(&mut sim, |shown| {
         assert!(shown <= 999_999 && shown != 123_456);
         shown
     })
     .unwrap();
-    assert_eq!(sim.host.bonds().len(), 1, "the phone's bond is replaced, not added to");
+    assert_eq!(sim.host.bonds().len(), 1, "the peer's bond is replaced, not added to");
 }
 
 #[test]
 fn pairings_that_are_refused() {
     let mut sim = Sim::new(config(None, vec![]), (251, 12));
-    let mut phone = Phone::new(4);
-    sim.connect(phone.kind, phone.address);
+    let mut peer = Peer::new(4);
+    sim.connect(peer.kind, peer.address);
     let mut refused = |features: [u8; 6]| {
-        phone.features = features;
-        let reason = phone.pair(&mut sim, |shown| shown).unwrap_err();
+        peer.features = features;
+        let reason = peer.pair(&mut sim, |shown| shown).unwrap_err();
         let failed = Event::PairingFailed { why: Failure::Refused(reason), passkey_entered: false };
         assert_eq!(sim.take_events().last(), Some(&failed));
         reason
@@ -498,7 +498,7 @@ fn pairings_that_are_refused() {
     assert_eq!(sim.hear(smp::CID), [0x05, 0x0A]);
     sim.say(smp::CID, &[0x0F, 0]);
     assert_eq!(sim.hear(smp::CID), [0x05, 0x07]);
-    // the phone gives up: not answered
+    // the peer gives up: not answered
     sim.say(smp::CID, &[0x01, 0x04, 0, 0x0D, 16, 2, 2]);
     assert_eq!(sim.hear(smp::CID)[0], 0x02);
     sim.say(smp::CID, &[0x05, 0x08]);
@@ -513,32 +513,32 @@ fn pairings_that_are_refused() {
 }
 
 #[test]
-fn a_phone_that_keeps_no_bond_or_gives_no_identity() {
+fn a_peer_that_keeps_no_bond_or_gives_no_identity() {
     let mut sim = Sim::new(config(None, vec![]), (251, 12));
     // pairs without bonding: good for the connection
-    let mut phone = Phone::new(5);
-    phone.features = [0x02, 0, 0x0C, 16, 0, 0];
-    sim.connect(phone.kind, phone.address);
-    let key = phone.pair(&mut sim, |shown| shown).unwrap();
+    let mut peer = Peer::new(5);
+    peer.features = [0x02, 0, 0x0C, 16, 0, 0];
+    sim.connect(peer.kind, peer.address);
+    let key = peer.pair(&mut sim, |shown| shown).unwrap();
     assert_eq!(sim.take_events(), [Event::Encrypted(true), Event::Paired { bonded: false }]);
     assert_eq!(sim.host.bonds(), []);
     assert_eq!(sim.encrypt(), Some(key), "the key is refreshed with the same");
     sim.disconnect();
-    sim.connect(phone.kind, phone.address);
+    sim.connect(peer.kind, peer.address);
     assert_eq!(sim.encrypt(), None);
 
     // bonds under the address it has, a public one
-    let mut phone = Phone::new(6);
-    (phone.kind, phone.features) = (0, [0x04, 0, 0x0D, 16, 0, 2]);
+    let mut peer = Peer::new(6);
+    (peer.kind, peer.features) = (0, [0x04, 0, 0x0D, 16, 0, 2]);
     sim.disconnect();
-    sim.connect(phone.kind, phone.address);
-    let key = phone.pair(&mut sim, |shown| shown).unwrap();
-    assert_eq!(sim.host.bonds(), [Bond { kind: 0, address: phone.address, ltk: key, irk: [0; 16], authenticated: true, bonded: true }]);
+    sim.connect(peer.kind, peer.address);
+    let key = peer.pair(&mut sim, |shown| shown).unwrap();
+    assert_eq!(sim.host.bonds(), [Bond { kind: 0, address: peer.address, ltk: key, irk: [0; 16], authenticated: true, bonded: true }]);
     sim.disconnect();
-    sim.connect(1, phone.address);
+    sim.connect(1, peer.address);
     assert_eq!(sim.encrypt(), None, "the same address of the other type is another device");
     sim.disconnect();
-    sim.connect(0, phone.address);
+    sim.connect(0, peer.address);
     assert_eq!(sim.encrypt(), Some(key));
 }
 
@@ -546,7 +546,7 @@ fn a_phone_that_keeps_no_bond_or_gives_no_identity() {
 fn a_pairing_that_stalls() {
     let mut sim = Sim::new(config(None, vec![]), (251, 12));
     sim.host.tick(1000);
-    sim.connect(1, Phone::new(9).address);
+    sim.connect(1, Peer::new(9).address);
     sim.say(smp::CID, &[0x01, 0x04, 0, 0x0D, 16, 2, 2]);
     assert_eq!(sim.hear(smp::CID)[0], 0x02);
     sim.host.tick(1029);
@@ -563,7 +563,7 @@ fn a_pairing_that_stalls() {
     assert_eq!(sim.take_events(), []);
 }
 
-/// The phone's side of a pairing up to its question for the passkey.
+/// The peer's side of a pairing up to its question for the passkey.
 fn ask_for_the_passkey(sim: &mut Sim) {
     sim.say(smp::CID, &[0x01, 0x04, 0, 0x0D, 16, 2, 2]);
     assert_eq!(sim.hear(smp::CID)[0], 0x02);
@@ -581,10 +581,10 @@ fn ask_for_the_passkey(sim: &mut Sim) {
 
 #[test]
 fn a_passkey_nobody_types() {
-    // the phone's question may stay up longer than any other step: a person reads and types
+    // the peer's question may stay up longer than any other step: a person reads and types
     let mut sim = Sim::new(config(None, vec![]), (251, 12));
     sim.host.tick(1000);
-    sim.connect(1, Phone::new(10).address);
+    sim.connect(1, Peer::new(10).address);
     sim.take_events();
     ask_for_the_passkey(&mut sim);
     sim.host.tick(1119);
@@ -594,9 +594,9 @@ fn a_passkey_nobody_types() {
     sim.run();
     assert_eq!(sim.take_events(), [Event::PairingFailed { why: Failure::Stalled, passkey_entered: false }]);
 
-    // dismissed on the phone: its failure, and no passkey was tried
+    // dismissed on the peer: its failure, and no passkey was tried
     sim.disconnect();
-    sim.connect(1, Phone::new(10).address);
+    sim.connect(1, Peer::new(10).address);
     sim.take_events();
     ask_for_the_passkey(&mut sim);
     sim.say(smp::CID, &[0x05, 0x01]);
@@ -610,7 +610,7 @@ fn a_passkey_nobody_types() {
     sim.say(smp::CID, &[0x05, 0x08]);
     assert_eq!(sim.take_events(), [Event::PairingFailed { why: Failure::Peer(0x08), passkey_entered: true }]);
 
-    // the phone gone with its question up: the pairing ends too
+    // the peer gone with its question up: the pairing ends too
     ask_for_the_passkey(&mut sim);
     sim.disconnect();
     assert_eq!(
@@ -623,9 +623,9 @@ fn a_passkey_nobody_types() {
 fn long_frames_through_small_buffers() {
     // a controller of the least there may be: 27 bytes a packet, and three of them
     let mut sim = Sim::new(config(Some(1), vec![]), (27, 3));
-    let phone = Phone::new(2);
-    sim.connect(phone.kind, phone.address);
-    phone.pair(&mut sim, |shown| shown).unwrap();
+    let peer = Peer::new(2);
+    sim.connect(peer.kind, peer.address);
+    peer.pair(&mut sim, |shown| shown).unwrap();
     assert_eq!(sim.ask(&[0x02, 0xF7, 0x00]), [0x03, 251, 0]);
     assert_eq!(sim.ask(&[0x12, 12, 0, 1, 0]), [0x13]);
     sim.take_events();
@@ -686,11 +686,11 @@ fn long_frames_through_small_buffers() {
 #[test]
 fn the_signalling_channel_and_the_short_interval() {
     let mut sim = Sim::new(config(None, vec![]), (251, 12));
-    sim.connect(1, Phone::new(1).address);
+    sim.connect(1, Peer::new(1).address);
     // a channel of its own: none to be had
     sim.say(SIGNALLING, &[0x14, 7, 10, 0, 0x80, 0, 0x40, 0, 0x00, 1, 0x00, 1, 1, 0]);
     assert_eq!(sim.hear(SIGNALLING), [0x15, 7, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0]);
-    // the phone has the say over the connection's parameters, and anything else is not known
+    // the peer has the say over the connection's parameters, and anything else is not known
     sim.say(SIGNALLING, &[0x12, 8, 8, 0, 6, 0, 12, 0, 0, 0, 0xD0, 0x07]);
     assert_eq!(sim.hear(SIGNALLING), [0x01, 8, 2, 0, 0, 0]);
     sim.say(SIGNALLING, &[0x0A, 9, 2, 0, 1, 0]);
@@ -705,7 +705,7 @@ fn the_signalling_channel_and_the_short_interval() {
     sim.run();
     assert_eq!(sim.commanded(LE_CONNECTION_UPDATE), Some(&[0x41, 0, 6, 0, 12, 0, 0, 0, 0xD0, 0x07, 0, 0, 0, 0][..]));
     assert!(sim.heard.is_empty());
-    // or, if it cannot (the phone lacks the procedure), by asking the phone
+    // or, if it cannot (the peer lacks the procedure), by asking the peer
     sim.event(0x0F, &[0x1A, 1, 0x13, 0x20]);
     sim.run();
     assert_eq!(sim.hear(SIGNALLING), [0x12, 1, 8, 0, 6, 0, 12, 0, 0, 0, 0xD0, 0x07]);
@@ -719,16 +719,16 @@ fn the_signalling_channel_and_the_short_interval() {
 #[test]
 fn switched_off_and_on() {
     let mut sim = Sim::new(config(None, vec![]), (251, 12));
-    sim.connect(1, Phone::new(1).address);
+    sim.connect(1, Peer::new(1).address);
     sim.commands.clear();
-    // off: no advertising, and the phone is dropped, to no new advertising
+    // off: no advertising, and the peer is dropped, to no new advertising
     sim.host.enable(false);
     sim.host.enable(false);
     sim.run();
     assert_eq!(sim.commands, [(LE_SET_ADVERTISING_ENABLE, vec![0]), (DISCONNECT, vec![0x41, 0, 0x13])]);
     assert_eq!(sim.take_events(), [Event::Connected, Event::Disconnected(0x16)]);
-    // a phone that got in just before is dropped as well
-    sim.connect(1, Phone::new(1).address);
+    // a peer that got in just before is dropped as well
+    sim.connect(1, Peer::new(1).address);
     assert_eq!(sim.take_events(), [Event::Connected, Event::Disconnected(0x16)]);
     sim.commands.clear();
     sim.host.enable(true);
@@ -736,8 +736,8 @@ fn switched_off_and_on() {
     let opcodes: Vec<u16> = sim.commands.iter().map(|c| c.0).collect();
     assert_eq!(opcodes, [0x2006, 0x2008, 0x2009, 0x200A]);
     assert_eq!(sim.commanded(LE_SET_ADVERTISING_ENABLE), Some(&[1][..]));
-    // on with a phone connected: no advertising until it leaves
-    sim.connect(1, Phone::new(1).address);
+    // on with a peer connected: no advertising until it leaves
+    sim.connect(1, Peer::new(1).address);
     sim.host.enable(false);
     sim.host.enable(true);
     sim.commands.clear();
@@ -762,20 +762,20 @@ fn bonds_as_stored() {
 
     // the oldest bond makes room
     let mut sim = Sim::new(config(Some(42), (10..18).map(bond).collect()), (251, 12));
-    let phone = Phone::new(1);
-    sim.connect(phone.kind, phone.address);
-    phone.pair(&mut sim, |shown| shown).unwrap();
+    let peer = Peer::new(1);
+    sim.connect(peer.kind, peer.address);
+    peer.pair(&mut sim, |shown| shown).unwrap();
     let bonds = sim.host.bonds();
-    assert_eq!((bonds.len(), &bonds[0], bonds[7].address), (MAX_BONDS, &bond(11), phone.identity.1));
+    assert_eq!((bonds.len(), &bonds[0], bonds[7].address), (MAX_BONDS, &bond(11), peer.identity.1));
 }
 
 /// Whatever the controller hands up, the host goes on: a panic would reset the node.
 #[test]
 fn any_packets_are_survived() {
     let mut sim = Sim::new(config(Some(7), vec![]), (27, 4));
-    let phone = Phone::new(1);
-    sim.connect(phone.kind, phone.address);
-    phone.pair(&mut sim, |shown| shown).unwrap();
+    let peer = Peer::new(1);
+    sim.connect(peer.kind, peer.address);
+    peer.pair(&mut sim, |shown| shown).unwrap();
     let mut x = 0x0123_4567_89AB_CDEFu64;
     let mut next = move || {
         x ^= x << 13;

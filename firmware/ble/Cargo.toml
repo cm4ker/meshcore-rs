@@ -3,7 +3,7 @@ edition      = "2024"
 name         = "meshcore-ble"
 rust-version = "1.88"
 version      = "0.1.0"
-description  = "A small BLE host for the MeshCore firmware: one phone at a time, the Nordic UART service, LE Secure Connections pairing with a passkey, bonds. Takes and gives HCI packets; no I/O of its own"
+description  = "A small BLE host for the MeshCore firmware: one peer at a time, the Nordic UART service, LE Secure Connections pairing with a passkey, bonds. Takes and gives HCI packets; no I/O of its own"
 
 [dependencies]
 # as the protocol core's, so one AES in the image

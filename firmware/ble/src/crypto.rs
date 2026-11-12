@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(check, bytes("e3c47398 9cd0e8c5 d26c0b09 da958f61"));
     }
 
-    /// [Vol 3] Part H, Appendix D.7, and an address a phone made.
+    /// [Vol 3] Part H, Appendix D.7, and an address a peer made.
     #[test]
     fn private_addresses() {
         let irk = bytes("ec0234a3 57c8ad05 341010a6 0a397d9b");

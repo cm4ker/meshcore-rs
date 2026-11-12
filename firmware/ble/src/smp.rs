@@ -1,5 +1,5 @@
 //! The Security Manager of the peripheral ([Vol 3] Part H): LE Secure Connections pairing with a
-//! passkey this device shows (or has printed on it) and the phone types in, then the exchange of
+//! passkey this device shows (or has printed on it) and the peer types in, then the exchange of
 //! identity keys that makes a bond.
 //!
 //! No other pairing: legacy pairing can be listened in on, and without a passkey ("Just Works")
@@ -51,9 +51,9 @@ const ROUNDS: u8 = 20;
 /// A pairing with no progress for this long is over, and no other may follow on the connection
 /// ([Vol 3] Part H, Section 3.4).
 pub(crate) const TIMEOUT_SECS: u32 = 30;
-/// But the step a person takes, reading the passkey off the device and typing it into the phone,
-/// gets longer. Phones keep their question up past the 30 s: ended there by the device, the
-/// pairing began anew as the phone came back, each time with a new passkey.
+/// But the step a person takes, reading the passkey off the device and typing it in on the other
+/// side, gets longer. Peers keep their question up past the 30 s: ended there by the device, the
+/// pairing began anew as the peer came back, each time with a new passkey.
 pub(crate) const PASSKEY_SECS: u32 = 120;
 
 /// The Security Request ([Vol 3] Part H, Section 3.6.7) to a peer that has a key: it is to
@@ -67,17 +67,17 @@ pub(crate) fn security_request(mitm: bool) -> [u8; 2] {
 enum Stage {
     /// No pairing: before one, or after it ended either way.
     Idle,
-    /// The response is sent: the phone's public key is due.
+    /// The response is sent: the peer's public key is due.
     PublicKey,
-    /// The phone's commitment of a round is due.
+    /// The peer's commitment of a round is due.
     Confirm(u8),
     /// The nonce of that commitment is due.
     Random(u8),
-    /// All rounds passed: the phone's check value is due.
+    /// All rounds passed: the peer's check value is due.
     Check,
-    /// Ours is sent: the phone starts encryption with the new key.
+    /// Ours is sent: the peer starts encryption with the new key.
     Encryption,
-    /// The link is encrypted and our identity sent: the phone's is due, key then address.
+    /// The link is encrypted and our identity sent: the peer's is due, key then address.
     IdentityInformation,
     IdentityAddress,
 }
@@ -92,7 +92,7 @@ struct Session {
     peer_key_x: [u8; 32],
     dh_key: [u8; 32],
     passkey: u32,
-    /// The round's commitment of the phone and both nonces.
+    /// The round's commitment of the peer and both nonces.
     confirm: [u8; 16],
     peer_nonce: [u8; 16],
     nonce: [u8; 16],
@@ -104,10 +104,10 @@ struct Session {
 pub(crate) struct Env<'a> {
     pub out: &'a mut Out,
     pub random: fn(&mut [u8]),
-    /// This device's address and the phone's, as the connection was made with them.
+    /// This device's address and the peer's, as the connection was made with them.
     pub local: Addr,
     pub peer: Addr,
-    /// The identity resolving key this device gives a bonding phone, as on the air.
+    /// The identity resolving key this device gives a bonding peer, as on the air.
     pub irk: [u8; 16],
     /// The passkey, if a fixed one; else a random one per pairing.
     pub passkey: Option<u32>,
@@ -148,7 +148,7 @@ impl Smp {
                         env.out.l2cap(CID, &[PAIRING_FAILED, reason as u8]);
                         Failure::Refused(reason as u8)
                     }
-                    // the phone's own failure is not answered with another
+                    // the peer's own failure is not answered with another
                     None => Failure::Peer(payload.first().copied().unwrap_or(0)),
                 };
                 self.fail(env.out, failure);
@@ -212,11 +212,11 @@ impl Smp {
         if oob != 0 {
             return Err(Some(Reason::OobNotAvailable));
         }
-        // the passkey is typed on the phone: one that cannot take it cannot pair
+        // the passkey is typed on the peer: one that cannot take it cannot pair
         if !matches!(io, IO_KEYBOARD_ONLY | IO_KEYBOARD_DISPLAY) {
             return Err(Some(Reason::AuthenticationRequirements));
         }
-        // identity keys go the ways the phone asked for, and no other keys: the long term key of
+        // identity keys go the ways the peer asked for, and no other keys: the long term key of
         // LE Secure Connections is made, not sent
         let response = [
             IO_DISPLAY_ONLY,
@@ -288,7 +288,7 @@ impl Smp {
         Ok(())
     }
 
-    /// A round of the passkey: the phone commits to its nonce and the round's bit, then we do.
+    /// A round of the passkey: the peer commits to its nonce and the round's bit, then we do.
     fn confirm(&mut self, round: u8, payload: &[u8], env: &mut Env<'_>) -> Result<(), Option<Reason>> {
         let session = self.session.as_mut().ok_or(Some(Reason::Unspecified))?;
         let keys = session.keys.as_ref().ok_or(Some(Reason::Unspecified))?;
@@ -302,7 +302,7 @@ impl Smp {
         Ok(())
     }
 
-    /// The phone opens its commitment: it holds only if the phone has the passkey's bit.
+    /// The peer opens its commitment: it holds only if the peer has the passkey's bit.
     fn random(&mut self, round: u8, payload: &[u8], env: &mut Env<'_>) -> Result<(), Option<Reason>> {
         let session = self.session.as_mut().ok_or(Some(Reason::Unspecified))?;
         let keys = session.keys.as_ref().ok_or(Some(Reason::Unspecified))?;
@@ -387,7 +387,7 @@ impl Smp {
     }
 
     fn fail(&mut self, out: &mut Out, why: Failure) {
-        // the phone asks for the passkey before the first round, and goes on once it has one
+        // the peer asks for the passkey before the first round, and goes on once it has one
         let passkey_entered = !matches!(self.stage, Stage::Idle | Stage::PublicKey | Stage::Confirm(0));
         self.stage = Stage::Idle;
         self.session = None;

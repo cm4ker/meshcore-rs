@@ -1,10 +1,10 @@
 //! A small Bluetooth LE host for the MeshCore firmware: the part of the stack above the
 //! controller, for what the firmware does with it and no more.
 //!
-//! - one phone at a time, this device the peripheral, advertising when no phone is connected;
+//! - one peer at a time, this device the peripheral, advertising when no peer is connected;
 //! - the Nordic UART service: frames the app writes, frames it is notified of;
-//! - LE Secure Connections pairing with a passkey the phone types in, and bonds: a paired phone
-//!   comes back without pairing again, recognised behind its private address.
+//! - LE Secure Connections pairing with a passkey typed in on the other side, and bonds: a paired
+//!   peer comes back without pairing again, recognised behind its private address.
 //!
 //! The host does no I/O. It is handed the HCI packets of the controller ([`Host::receive`]) and
 //! asked for the ones to send ([`Host::transmit`]), each as the UART transport frames them (the
@@ -34,15 +34,15 @@ pub const MAX_BONDS: usize = 8;
 /// A bond as kept in flash: `[kind][address 6][key 16][identity key 16][bonded][level]`.
 pub const BOND_RECORD: usize = 41;
 
-/// What a paired phone and this device keep of each other.
+/// What a paired peer and this device keep of each other.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bond {
-    /// The phone's identity address: its type (0 public, 1 random) and the address as on the air.
+    /// The peer's identity address: its type (0 public, 1 random) and the address as on the air.
     pub kind: u8,
     pub address: [u8; 6],
     /// The long term key, as the controller takes it.
     pub ltk: [u8; 16],
-    /// The phone's identity resolving key, as on the air: what its private addresses are made
+    /// The peer's identity resolving key, as on the air: what its private addresses are made
     /// with. Zero if it gave none.
     pub irk: [u8; 16],
     /// Paired with a passkey.
@@ -52,13 +52,13 @@ pub struct Bond {
 }
 
 impl Bond {
-    /// The phone at `address` of type `kind`, as it connected, is this bond's.
+    /// The peer at `address` of type `kind`, as it connected, is this bond's.
     fn matches(&self, kind: u8, address: &[u8; 6]) -> bool {
         (self.kind == kind && self.address == *address)
             || (kind == 1 && self.irk != [0; 16] && crypto::resolves(&self.irk, address))
     }
 
-    fn same_phone(&self, other: &Bond) -> bool {
+    fn same_peer(&self, other: &Bond) -> bool {
         (self.kind == other.kind && self.address == other.address) || (self.irk != [0; 16] && self.irk == other.irk)
     }
 }
@@ -97,7 +97,7 @@ pub struct Config {
     pub name: String,
     /// The static random address.
     pub address: [u8; 6],
-    /// The identity resolving key given to a bonding phone, as on the air: unique to the device
+    /// The identity resolving key given to a bonding peer, as on the air: unique to the device
     /// (Windows refuses a second device with a key it has), though the address never changes.
     pub irk: [u8; 16],
     /// The passkey of pairing: a fixed one, or `None` for a random one per pairing, to be shown.
@@ -114,11 +114,11 @@ pub struct Config {
 /// passkey was another, 0x08 unspecified, 0x0B the check of the shared key failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// This device ended it, and told the phone this reason.
+    /// This device ended it, and told the peer this reason.
     Refused(u8),
     /// The other side ended it, with this reason.
     Peer(u8),
-    /// The phone did not go on within the time a step may take: 30 s, and two minutes for the
+    /// The peer did not go on within the time a step may take: 30 s, and two minutes for the
     /// passkey to be typed.
     Stalled,
     /// Encryption with the new key did not start.
@@ -131,16 +131,16 @@ pub enum Failure {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Connected,
-    /// With the controller's reason: 0x08 the phone went silent, 0x13 it left, 0x16 this side left,
+    /// With the controller's reason: 0x08 the peer went silent, 0x13 it left, 0x16 this side left,
     /// 0x3D it has another key than this side.
     Disconnected(u8),
-    /// A phone pairs: the passkey it asks its user for.
+    /// A peer pairs: the passkey it asks its user for.
     Passkey(u32),
-    /// A pairing ended without a key. `passkey_entered`: the phone had gone on from its question
+    /// A pairing ended without a key. `passkey_entered`: the peer had gone on from its question
     /// for the passkey, so somebody typed one; without that it is a question left unanswered or
     /// dismissed, which tells nobody anything of the passkey.
     PairingFailed { why: Failure, passkey_entered: bool },
-    /// The phone paired, with the passkey. `bonded`: the bonds changed, keep them.
+    /// The peer paired, with the passkey. `bonded`: the bonds changed, keep them.
     Paired { bonded: bool },
     /// The link is encrypted; `true` if with a key of a pairing by passkey, which is what the
     /// service takes.
@@ -158,7 +158,7 @@ pub(crate) struct Out {
 
 impl Out {
     pub(crate) fn l2cap(&mut self, cid: u16, payload: &[u8]) {
-        // a phone that asks and asks and takes no answer is not answered without end
+        // a peer that asks and asks and takes no answer is not answered without end
         if self.acl.len() >= QUEUE_MAX {
             return;
         }
@@ -209,7 +209,7 @@ const SIGNALLING: u16 = 5;
 const PDU_MAX: usize = att::MTU_MAX;
 /// The most data in a packet for the controller: what a link layer packet carries.
 const ACL_MAX: usize = 251;
-/// Commands, and PDUs for the phone, that may wait to be sent: far more than ever do.
+/// Commands, and PDUs for the peer, that may wait to be sent: far more than ever do.
 const QUEUE_MAX: usize = 32;
 /// The Device Name's length, as the table had it so far.
 const NAME_MAX: usize = 22;
@@ -222,9 +222,9 @@ const FAST_TIMEOUT: u16 = 2000;
 
 struct Connection {
     handle: u16,
-    /// The phone's address as it connected: what pairing computes with.
+    /// The peer's address as it connected: what pairing computes with.
     peer: Addr,
-    /// The bond of the phone: found by its address, or made on this connection.
+    /// The bond of the peer: found by its address, or made on this connection.
     bond: Option<Bond>,
     /// The key the controller was last given is of a pairing by passkey.
     key_authenticated: bool,
@@ -253,11 +253,11 @@ pub struct Host {
     /// The L2CAP PDU going out in parts, and how much of it went.
     outgoing: Option<(Vec<u8>, usize)>,
     connection: Option<Connection>,
-    /// What the last bonded phone asked of TX: it comes back expecting that kept.
+    /// What the last bonded peer asked of TX: it comes back expecting that kept.
     kept_cccd: Option<(Bond, u16)>,
     /// A signalling request's identifier: any but zero.
     identifier: u8,
-    /// Phones are wanted: advertise for one (see [`Host::enable`]).
+    /// Peers are wanted: advertise for one (see [`Host::enable`]).
     enabled: bool,
     now: u32,
 }
@@ -268,14 +268,14 @@ impl core::fmt::Debug for Host {
         match &self.connection {
             Some(c) => write!(
                 f,
-                "phone {:02x?} bond {} authenticated {} mtu {} cccd {}",
+                "peer {:02x?} bond {} authenticated {} mtu {} cccd {}",
                 c.peer,
                 c.bond.is_some(),
                 c.authenticated,
                 c.att.mtu,
                 c.att.cccd
             )?,
-            None => f.write_str("no phone")?,
+            None => f.write_str("no peer")?,
         }
         write!(
             f,
@@ -389,12 +389,12 @@ impl Host {
         self.out.events.pop_front()
     }
 
-    /// Everything queued for the phone went to the controller: room for a notification.
+    /// Everything queued for the peer went to the controller: room for a notification.
     pub fn idle(&self) -> bool {
         self.out.acl.is_empty() && self.outgoing.is_none()
     }
 
-    /// Notify the app of a frame. `false` if no phone is there to take it: none connected, or
+    /// Notify the app of a frame. `false` if no peer is there to take it: none connected, or
     /// one that did not pair or did not ask for notifications.
     pub fn notify(&mut self, frame: &[u8]) -> bool {
         match &self.connection {
@@ -413,7 +413,7 @@ impl Host {
         }
     }
 
-    /// Ask the phone for the short connection interval of a firmware upload.
+    /// Ask the peer for the short connection interval of a firmware upload.
     pub fn hurry(&mut self) {
         if let Some(handle) = self.connection.as_ref().map(|c| c.handle) {
             let mut parameters = [0u8; 14];
@@ -423,7 +423,7 @@ impl Host {
         }
     }
 
-    /// Drop the phone.
+    /// Drop the peer.
     pub fn disconnect(&mut self) {
         if let Some(handle) = self.connection.as_ref().map(|c| c.handle) {
             let handle = handle.to_le_bytes();
@@ -432,7 +432,7 @@ impl Host {
         }
     }
 
-    /// Take phones or not: off, the device stops advertising and drops the phone it has. A host is
+    /// Take peers or not: off, the device stops advertising and drops the peer it has. A host is
     /// on until told otherwise.
     pub fn enable(&mut self, on: bool) {
         if self.enabled == on {
@@ -485,7 +485,7 @@ impl Host {
             }
             (EVENT_COMMAND_STATUS, [status, allowed, a, b]) => {
                 self.command_allowed = *allowed > 0;
-                // a controller that cannot ask the phone itself: ask over L2CAP
+                // a controller that cannot ask the peer itself: ask over L2CAP
                 if u16::from_le_bytes([*a, *b]) == LE_CONNECTION_UPDATE && *status != 0 && self.connection.is_some() {
                     self.identifier = self.identifier % 255 + 1;
                     let mut request = [0u8; 12];
@@ -543,12 +543,12 @@ impl Host {
 
     fn connected(&mut self, handle: u16, kind: u8, address: [u8; 6]) {
         if self.connection.is_some() {
-            return; // one phone at a time, and the controller advertises to no second
+            return; // one peer at a time, and the controller advertises to no second
         }
         let bond = self.config.bonds.iter().find(|b| b.matches(kind, &address)).cloned();
-        // a bonded phone that comes back finds its notifications as it left them
+        // a bonded peer that comes back finds its notifications as it left them
         let cccd = match (&bond, &self.kept_cccd) {
-            (Some(bond), Some((kept, cccd))) if bond.same_phone(kept) => *cccd,
+            (Some(bond), Some((kept, cccd))) if bond.same_peer(kept) => *cccd,
             _ => 0,
         };
         let address = flip(address);
@@ -586,7 +586,7 @@ impl Host {
         self.advertise();
     }
 
-    /// The phone starts encryption and the controller asks for the key: that of the pairing just
+    /// The peer starts encryption and the controller asks for the key: that of the pairing just
     /// done, or that of the bond.
     fn long_term_key_request(&mut self, handle: u16, of_secure_connections: bool) {
         let Some(c) = self.connection.as_mut().filter(|c| c.handle == handle) else {
@@ -607,7 +607,7 @@ impl Host {
                 parameters[2..].copy_from_slice(&key);
                 self.command(LE_LONG_TERM_KEY_REQUEST_REPLY, &parameters);
             }
-            // the phone is told the key is missing, and may pair again
+            // the peer is told the key is missing, and may pair again
             None => self.command(LE_LONG_TERM_KEY_REQUEST_NEGATIVE_REPLY, &handle),
         }
     }
@@ -627,10 +627,10 @@ impl Host {
         }
     }
 
-    /// A pairing completed: its bond is the phone's from now on.
+    /// A pairing completed: its bond is the peer's from now on.
     fn paired(&mut self, bond: Bond) {
         if bond.bonded {
-            self.config.bonds.retain(|b| !b.same_phone(&bond));
+            self.config.bonds.retain(|b| !b.same_peer(&bond));
             self.config.bonds.push(bond.clone());
             if self.config.bonds.len() > MAX_BONDS {
                 self.config.bonds.remove(0);
@@ -642,7 +642,7 @@ impl Host {
         }
     }
 
-    /// Data of the phone: an L2CAP PDU, or a part of one.
+    /// Data of the peer: an L2CAP PDU, or a part of one.
     fn acl(&mut self, handle: u16, boundary: u16, data: &[u8]) {
         let Some(c) = self.connection.as_mut().filter(|c| c.handle == handle) else {
             return;

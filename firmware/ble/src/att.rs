@@ -1,7 +1,7 @@
 //! The attribute server ([Vol 3] Part F and G) of one fixed table: the GAP and GATT services every
 //! device has, and the Nordic UART service the MeshCore apps talk through.
 //!
-//! The table is the one the firmware had with trouble-host, handle for handle: a bonded phone
+//! The table is the one the firmware had with trouble-host, handle for handle: a bonded peer
 //! keeps the handles it once found, and no Service Changed tells it otherwise.
 //!
 //! | Handle | Attribute                                   | Access                        |
@@ -122,7 +122,7 @@ fn group_end(handle: u16) -> u16 {
     }
 }
 
-/// What a connection's phone has set up with the server.
+/// What a connection's peer has set up with the server.
 pub(crate) struct Att {
     /// The largest PDU either side sends.
     pub mtu: usize,
@@ -150,13 +150,13 @@ impl Att {
 
     /// What a link that is not authenticated is refused with ([Vol 3] Part C, Section 10.3.1):
     /// with a key to its name and no encryption yet, it is to start encryption; else it is to
-    /// pair. The difference is acted on: told to pair, a phone that has the key pairs anew, and
+    /// pair. The difference is acted on: told to pair, a peer that has the key pairs anew, and
     /// asks its user for the passkey each time it comes back.
     fn refusal(&self) -> u8 {
         if self.keyed { INSUFFICIENT_ENCRYPTION } else { INSUFFICIENT_AUTHENTICATION }
     }
 
-    /// The phone asked for notifications of TX.
+    /// The peer asked for notifications of TX.
     pub(crate) fn notifying(&self) -> bool {
         self.cccd & 1 != 0
     }
@@ -223,7 +223,7 @@ impl Att {
         }
     }
 
-    /// A PDU of the phone. `name` is the Device Name, `authenticated` whether the link is
+    /// A PDU of the peer. `name` is the Device Name, `authenticated` whether the link is
     /// encrypted with a key of a pairing by passkey, `frame_max` the longest frame RX takes.
     pub(crate) fn pdu(&mut self, pdu: &[u8], name: &[u8], authenticated: bool, frame_max: usize) -> Outcome {
         let Some((&opcode, body)) = pdu.split_first() else {
@@ -424,7 +424,7 @@ mod tests {
         att.pdu(pdu, NAME, authenticated, 176).reply.unwrap_or_default()
     }
 
-    /// What a phone asks when it looks a device over, and the answers the table gave so far.
+    /// What a peer asks when it looks a device over, and the answers the table gave so far.
     #[test]
     fn discovery_as_before() {
         let mut att = Att::new(0);
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn the_service_takes_an_authenticated_link() {
         let mut att = Att::new(0);
-        // a phone not paired: told so, which makes it pair
+        // a peer not paired: told so, which makes it pair
         assert_eq!(ask(&mut att, &[0x12, 12, 0, 1, 0], false), [0x01, 0x12, 12, 0, 0x05]);
         assert_eq!(ask(&mut att, &[0x12, 9, 0, 0xAA], false), [0x01, 0x12, 9, 0, 0x05]);
         assert_eq!(ask(&mut att, &[0x0A, 11, 0], false), [0x01, 0x0A, 11, 0, 0x05]);
