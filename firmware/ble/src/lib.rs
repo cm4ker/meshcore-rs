@@ -109,6 +109,24 @@ pub struct Config {
     pub random: fn(&mut [u8]),
 }
 
+/// Why a pairing ended without a key. The reasons are the Security Manager's ([Vol 3] Part H,
+/// Section 3.5.5): 0x01 no passkey was entered, 0x03 the other side cannot pair this way, 0x04 the
+/// passkey was another, 0x08 unspecified, 0x0B the check of the shared key failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// This device ended it, and told the phone this reason.
+    Refused(u8),
+    /// The other side ended it, with this reason.
+    Peer(u8),
+    /// The phone did not go on within the time a step may take: 30 s, and two minutes for the
+    /// passkey to be typed.
+    Stalled,
+    /// Encryption with the new key did not start.
+    NotEncrypted,
+    /// The connection ended first.
+    LinkLost,
+}
+
 /// What happened, for the firmware to act on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -118,7 +136,10 @@ pub enum Event {
     Disconnected(u8),
     /// A phone pairs: the passkey it asks its user for.
     Passkey(u32),
-    PairingFailed,
+    /// A pairing ended without a key. `passkey_entered`: the phone had gone on from its question
+    /// for the passkey, so somebody typed one; without that it is a question left unanswered or
+    /// dismissed, which tells nobody anything of the passkey.
+    PairingFailed { why: Failure, passkey_entered: bool },
     /// The phone paired, with the passkey. `bonded`: the bonds changed, keep them.
     Paired { bonded: bool },
     /// The link is encrypted; `true` if with a key of a pairing by passkey, which is what the
@@ -209,6 +230,8 @@ struct Connection {
     key_authenticated: bool,
     /// The link is encrypted with such a key.
     authenticated: bool,
+    /// The other side was asked to encrypt the link with the key it has.
+    security_requested: bool,
     att: Att,
     smp: Smp,
     /// An L2CAP PDU arriving in parts.
@@ -529,13 +552,16 @@ impl Host {
             _ => 0,
         };
         let address = flip(address);
+        let mut att = Att::new(cccd);
+        att.keyed = bond.is_some();
         self.connection = Some(Connection {
             handle,
             peer: [kind, address[0], address[1], address[2], address[3], address[4], address[5]],
             bond,
             key_authenticated: false,
             authenticated: false,
-            att: Att::new(cccd),
+            security_requested: false,
+            att,
             smp: Smp::new(),
             incoming: Vec::new(),
         });
@@ -546,9 +572,11 @@ impl Host {
     }
 
     fn disconnected(&mut self, handle: u16, reason: u8) {
-        let Some(c) = self.connection.take_if(|c| c.handle == handle) else {
+        let Some(mut c) = self.connection.take_if(|c| c.handle == handle) else {
             return;
         };
+        // a pairing under way ends with the connection: said, so that every one that began ends
+        c.smp.link_lost(&mut self.out);
         self.kept_cccd = c.bond.filter(|b| b.bonded).map(|b| (b, c.att.cccd));
         // what was on its way is gone with the connection, and the controller's buffers are free
         self.out.acl.clear();
@@ -589,6 +617,7 @@ impl Host {
             return;
         };
         c.authenticated = on && c.key_authenticated;
+        c.att.keyed = !on && c.bond.is_some();
         if on {
             self.out.event(Event::Encrypted(c.authenticated));
         }
@@ -645,6 +674,14 @@ impl Host {
                 let outcome = c.att.pdu(pdu, name, c.authenticated, self.config.frame_max);
                 if let Some(reply) = outcome.reply {
                     self.out.l2cap(att::CID, &reply);
+                    // Refused for want of encryption with the key it has, the other side is
+                    // also asked for that in the Security Manager's words, once: some start
+                    // encryption only when asked so.
+                    if matches!(reply[..], [0x01, .., att::INSUFFICIENT_ENCRYPTION]) && !c.security_requested {
+                        c.security_requested = true;
+                        let mitm = c.bond.as_ref().is_some_and(|b| b.authenticated);
+                        self.out.l2cap(smp::CID, &smp::security_request(mitm));
+                    }
                 }
                 if let Some(frame) = outcome.frame {
                     self.out.event(Event::Written(frame));

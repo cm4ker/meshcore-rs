@@ -410,6 +410,12 @@ fn pairs_with_the_passkey_and_bonds() {
     let address = Phone::private_address(&phone.irk, 99);
     assert_ne!(address, phone.address);
     sim.connect(1, address);
+    // until it encrypts the link it is refused, and told that the key it has will do: in the
+    // refusal, and once in a Security Request
+    assert_eq!(sim.ask(&[0x12, 12, 0, 1, 0]), [0x01, 0x12, 12, 0, 0x0F]);
+    assert_eq!(sim.hear(smp::CID), [0x0B, 0x0D]);
+    assert_eq!(sim.ask(&[0x0A, 11, 0]), [0x01, 0x0A, 11, 0, 0x0F]);
+    assert!(sim.heard.is_empty());
     assert!(!sim.host.notify(&[9]), "not before the link is encrypted");
     assert_eq!(sim.encrypt(), Some(key));
     assert_eq!(sim.take_events(), [Event::Connected, Event::Encrypted(true)]);
@@ -442,7 +448,7 @@ fn a_fixed_passkey_and_a_wrong_one() {
     sim.connect(phone.kind, phone.address);
     // every bit of the passkey is checked in a round of its own: a wrong one fails there
     assert_eq!(phone.pair(&mut sim, |shown| shown ^ 0x10), Err(0x04));
-    assert_eq!(sim.take_events(), [Event::PairingFailed]);
+    assert_eq!(sim.take_events(), [Event::PairingFailed { why: Failure::Refused(0x04), passkey_entered: true }]);
     assert_eq!(sim.host.bonds(), []);
     assert_eq!(sim.encrypt(), None);
 
@@ -474,7 +480,8 @@ fn pairings_that_are_refused() {
     let mut refused = |features: [u8; 6]| {
         phone.features = features;
         let reason = phone.pair(&mut sim, |shown| shown).unwrap_err();
-        assert_eq!(sim.take_events().last(), Some(&Event::PairingFailed));
+        let failed = Event::PairingFailed { why: Failure::Refused(reason), passkey_entered: false };
+        assert_eq!(sim.take_events().last(), Some(&failed));
         reason
     };
     assert_eq!(refused([0x04, 0, 0x05, 16, 2, 2]), 0x03, "legacy pairing");
@@ -547,13 +554,69 @@ fn a_pairing_that_stalls() {
     assert_eq!(sim.take_events(), [Event::Connected]);
     sim.host.tick(1030);
     sim.run();
-    assert_eq!(sim.take_events(), [Event::PairingFailed]);
+    assert_eq!(sim.take_events(), [Event::PairingFailed { why: Failure::Stalled, passkey_entered: false }]);
     // and nothing more of it on this connection
     sim.say(smp::CID, &[0x01, 0x04, 0, 0x0D, 16, 2, 2]);
     assert!(sim.heard.is_empty());
     sim.host.tick(5000);
     sim.run();
     assert_eq!(sim.take_events(), []);
+}
+
+/// The phone's side of a pairing up to its question for the passkey.
+fn ask_for_the_passkey(sim: &mut Sim) {
+    sim.say(smp::CID, &[0x01, 0x04, 0, 0x0D, 16, 2, 2]);
+    assert_eq!(sim.hear(smp::CID)[0], 0x02);
+    let mut secret = [0u8; 32];
+    random(&mut secret);
+    secret[0] &= 0x7F;
+    let keys = KeyPair::new(secret).unwrap();
+    let mut pdu = vec![0x0C];
+    pdu.extend_from_slice(&flip::<32>(keys.public[..32].try_into().unwrap()));
+    pdu.extend_from_slice(&flip::<32>(keys.public[32..].try_into().unwrap()));
+    sim.say(smp::CID, &pdu);
+    assert_eq!(sim.hear(smp::CID)[0], 0x0C);
+    assert!(matches!(sim.take_events().last(), Some(Event::Passkey(_))));
+}
+
+#[test]
+fn a_passkey_nobody_types() {
+    // the phone's question may stay up longer than any other step: a person reads and types
+    let mut sim = Sim::new(config(None, vec![]), (251, 12));
+    sim.host.tick(1000);
+    sim.connect(1, Phone::new(10).address);
+    sim.take_events();
+    ask_for_the_passkey(&mut sim);
+    sim.host.tick(1119);
+    sim.run();
+    assert_eq!(sim.take_events(), []);
+    sim.host.tick(1120);
+    sim.run();
+    assert_eq!(sim.take_events(), [Event::PairingFailed { why: Failure::Stalled, passkey_entered: false }]);
+
+    // dismissed on the phone: its failure, and no passkey was tried
+    sim.disconnect();
+    sim.connect(1, Phone::new(10).address);
+    sim.take_events();
+    ask_for_the_passkey(&mut sim);
+    sim.say(smp::CID, &[0x05, 0x01]);
+    assert!(sim.heard.is_empty());
+    assert_eq!(sim.take_events(), [Event::PairingFailed { why: Failure::Peer(0x01), passkey_entered: false }]);
+
+    // one that was typed and then let go: a passkey was tried
+    ask_for_the_passkey(&mut sim);
+    sim.say(smp::CID, &[0x03; 17]);
+    assert_eq!(sim.hear(smp::CID)[0], 0x03);
+    sim.say(smp::CID, &[0x05, 0x08]);
+    assert_eq!(sim.take_events(), [Event::PairingFailed { why: Failure::Peer(0x08), passkey_entered: true }]);
+
+    // the phone gone with its question up: the pairing ends too
+    ask_for_the_passkey(&mut sim);
+    sim.disconnect();
+    assert_eq!(
+        sim.take_events(),
+        [Event::PairingFailed { why: Failure::LinkLost, passkey_entered: false }, Event::Disconnected(0x13)]
+    );
 }
 
 #[test]

@@ -521,8 +521,11 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     if links.tcp {
         mesh.app.fw_store = platform.fw_store(&spawner);
     }
-    // from here on the USB port carries companion frames only
-    log::set_max_level(log::LevelFilter::Off);
+    // from here on the USB port carries companion frames only; a diagnostic build (MCFW_USB_LOG
+    // set when it is built) goes on logging among them
+    if option_env!("MCFW_USB_LOG").is_none() {
+        log::set_max_level(log::LevelFilter::Off);
+    }
 
     let mut noise = NoiseFloor::new();
     let mut next_noise = 0u64;

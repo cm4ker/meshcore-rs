@@ -24,11 +24,11 @@ use esp_radio::ble::controller::BleConnector;
 use log::{info, warn};
 use meshcore::companion::MAX_FRAME_SIZE;
 use meshcore::ota::REQ_TYPE_OTA_BEGIN;
-use meshcore_ble::{Config, Event, Host, bonds_from_bytes, bonds_to_bytes};
+use meshcore_ble::{Config, Event, Failure, Host, bonds_from_bytes, bonds_to_bytes};
 
 use crate::frames::{FRAMES_IN, Link};
 pub use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
-use meshcore_fw_core::links::{pairing_begins, pairing_succeeded};
+use meshcore_fw_core::links::{pairing_abandoned, pairing_begins, pairing_succeeded};
 
 /// The BLE task runs (and holds the controller).
 pub static BLE_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -133,6 +133,8 @@ async fn serve(bt: BT<'static>, params: Params) {
     });
     let mut packet = [0u8; HCI_PACKET_MAX];
     let mut connected = false;
+    // the pairing under way was counted against the tries at the passkey
+    let mut counted = false;
     let mut notify_at = Instant::now();
     loop {
         let pin = PIN.load(Ordering::Relaxed);
@@ -155,7 +157,8 @@ async fn serve(bt: BT<'static>, params: Params) {
                     BLE_PASSKEY.store(0, Ordering::Relaxed);
                 }
                 Event::Passkey(key) => {
-                    if pairing_begins() {
+                    counted = pairing_begins();
+                    if counted {
                         BLE_PASSKEY.store(key.max(1), Ordering::Relaxed);
                     } else {
                         warn!("BLE: pairing refused after failed ones, try later");
@@ -165,6 +168,7 @@ async fn serve(bt: BT<'static>, params: Params) {
                 Event::Paired { bonded } => {
                     info!("BLE: paired");
                     BLE_PASSKEY.store(0, Ordering::Relaxed);
+                    counted = false;
                     pairing_succeeded();
                     BLE_CONNECTED.store(true, Ordering::Relaxed);
                     if bonded {
@@ -175,10 +179,20 @@ async fn serve(bt: BT<'static>, params: Params) {
                     info!("BLE: encrypted, {host:?}");
                     BLE_CONNECTED.store(authenticated, Ordering::Relaxed);
                 }
-                Event::PairingFailed => {
-                    warn!("BLE: pairing failed");
+                Event::PairingFailed { why, passkey_entered } => {
+                    warn!("BLE: pairing failed: {why:?}, passkey entered: {passkey_entered}");
                     BLE_PASSKEY.store(0, Ordering::Relaxed);
-                    host.disconnect();
+                    // one nobody typed a passkey into is no failed try at it
+                    if counted && !passkey_entered {
+                        pairing_abandoned();
+                    }
+                    counted = false;
+                    // A phone that takes its own question back stays: it asks again when its
+                    // user is there. (Dropped, it comes back within the second, asks and takes
+                    // the question back at once, over and over.)
+                    if !matches!(why, Failure::Peer(_)) || passkey_entered {
+                        host.disconnect();
+                    }
                 }
                 Event::Written(frame) => {
                     if frame.first() == Some(&REQ_TYPE_OTA_BEGIN) {

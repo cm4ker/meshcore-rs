@@ -18,10 +18,11 @@ use embassy_futures::select::{Either3, select3};
 use embassy_time::{Duration, Instant, Timer};
 use log::{info, warn};
 use meshcore::companion::MAX_FRAME_SIZE;
-use meshcore_ble::{Config, Event, Host, bonds_from_bytes, bonds_to_bytes};
+use meshcore_ble::{Config, Event, Failure, Host, bonds_from_bytes, bonds_to_bytes};
 use meshcore_fw_core::frames::{FRAMES_IN, Link};
 use meshcore_fw_core::links::{
-    BLE_CONNECTED, BLE_ENABLED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED, pairing_begins, pairing_succeeded,
+    BLE_CONNECTED, BLE_ENABLED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED, pairing_abandoned, pairing_begins, pairing_pause,
+    pairing_succeeded,
 };
 use nrf_sdc::{SoftdeviceController, raw};
 
@@ -101,14 +102,18 @@ pub async fn ble_task(sdc: SoftdeviceController<'static>, params: Params) {
     });
     let mut packet = [0u8; PACKET_MAX];
     let mut connected = false;
+    // the pairing under way was counted against the tries at the passkey
+    let mut counted = false;
     let mut notify_at = Instant::now();
     loop {
         // switched off on the device: no advertising, and the app is dropped
         host.enable(BLE_ENABLED.load(Ordering::Relaxed));
         host.tick(Instant::now().as_secs() as u32);
         while let Some(out) = host.transmit() {
+            trace(">", &out);
             if out[0] == 1 {
                 let (answer, len) = command(&out);
+                trace("<", &answer[..len]);
                 host.receive(&answer[..len]);
             } else if let Err(e) = sdc.hci_data_put(&out[1..]) {
                 // the host sends no more than the controller has said it has room for
@@ -129,16 +134,20 @@ pub async fn ble_task(sdc: SoftdeviceController<'static>, params: Params) {
                     BLE_PASSKEY.store(0, Ordering::Relaxed);
                 }
                 Event::Passkey(key) => {
-                    if pairing_begins() {
+                    let (failed, wait) = pairing_pause();
+                    counted = pairing_begins();
+                    if counted {
+                        info!("BLE: pairing begins, {failed} before it did not end paired");
                         BLE_PASSKEY.store(key.max(1), Ordering::Relaxed);
                     } else {
-                        warn!("BLE: pairing refused after failed ones, try later");
+                        warn!("BLE: pairing refused after {failed} that did not end paired, {wait} s to wait");
                         host.disconnect();
                     }
                 }
                 Event::Paired { bonded } => {
                     info!("BLE: paired");
                     BLE_PASSKEY.store(0, Ordering::Relaxed);
+                    counted = false;
                     pairing_succeeded();
                     BLE_CONNECTED.store(true, Ordering::Relaxed);
                     if bonded {
@@ -149,10 +158,20 @@ pub async fn ble_task(sdc: SoftdeviceController<'static>, params: Params) {
                     info!("BLE: encrypted, {host:?}");
                     BLE_CONNECTED.store(authenticated, Ordering::Relaxed);
                 }
-                Event::PairingFailed => {
-                    warn!("BLE: pairing failed");
+                Event::PairingFailed { why, passkey_entered } => {
+                    warn!("BLE: pairing failed: {why:?}, passkey entered: {passkey_entered}");
                     BLE_PASSKEY.store(0, Ordering::Relaxed);
-                    host.disconnect();
+                    // one nobody typed a passkey into is no failed try at it
+                    if counted && !passkey_entered {
+                        pairing_abandoned();
+                    }
+                    counted = false;
+                    // A phone that takes its own question back stays: it asks again when its
+                    // user is there. (Dropped, it comes back within the second, asks and takes
+                    // the question back at once, over and over.)
+                    if !matches!(why, Failure::Peer(_)) || passkey_entered {
+                        host.disconnect();
+                    }
                 }
                 Event::Written(frame) => {
                     if !frame.is_empty() {
@@ -175,7 +194,10 @@ pub async fn ble_task(sdc: SoftdeviceController<'static>, params: Params) {
             BLE_OUT.receive().await
         };
         match select3(read(&sdc, &mut packet), frame, Timer::after(TICK)).await {
-            Either3::First(len) => host.receive(&packet[..len]),
+            Either3::First(len) => {
+                trace("<", &packet[..len]);
+                host.receive(&packet[..len]);
+            }
             // not authenticated yet: upstream drops pushes then too
             Either3::Second(frame) => {
                 if BLE_CONNECTED.load(Ordering::Relaxed) && host.notify(&frame) {
@@ -184,6 +206,29 @@ pub async fn ble_task(sdc: SoftdeviceController<'static>, params: Params) {
             }
             Either3::Third(()) => {}
         }
+    }
+}
+
+/// In a diagnostic build (MCFW_USB_LOG set when it is built), the log's line for a packet to (`>`)
+/// or from (`<`) the controller: commands and events whole, of data the Security Manager's and
+/// the attribute protocol's first bytes. Not what comes all the time: the counts of packets sent,
+/// the app's frames (writes, their answers, notifications).
+fn trace(way: &str, packet: &[u8]) {
+    if option_env!("MCFW_USB_LOG").is_none() {
+        return;
+    }
+    match packet {
+        [4, 0x13, ..] | [2, _, _, _, _, _, _, 4, 0, 0x13, ..] => {}
+        // a frame of the app's (written to RX) or for it (notified on TX): its code and length
+        [2, _, _, _, _, len, _, 4, 0, 0x12 | 0x52, 9, 0, code, ..] | [2, _, _, _, _, len, _, 4, 0, 0x1B, 11, 0, code, ..] => {
+            info!("BLE {way} frame {code:#04x}, {} bytes", len.saturating_sub(3))
+        }
+        [1 | 4, rest @ ..] => info!("BLE {way} hci {:02x?}", &rest[..rest.len().min(24)]),
+        // the start of an L2CAP PDU: `[2][handle 2][length 2][PDU length 2][channel 2][PDU]`
+        [2, _, flags, _, _, _, _, channel @ (4 | 6), 0, pdu @ ..] if flags >> 4 & 3 != 1 => {
+            info!("BLE {way} {} {:02x?}", if *channel == 6 { "smp" } else { "att" }, &pdu[..pdu.len().min(8)])
+        }
+        _ => {}
     }
 }
 

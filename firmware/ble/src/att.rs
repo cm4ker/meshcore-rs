@@ -65,6 +65,7 @@ const REQUEST_NOT_SUPPORTED: u8 = 0x06;
 const INVALID_OFFSET: u8 = 0x07;
 const ATTRIBUTE_NOT_FOUND: u8 = 0x0A;
 const INVALID_ATTRIBUTE_VALUE_LENGTH: u8 = 0x0D;
+pub(crate) const INSUFFICIENT_ENCRYPTION: u8 = 0x0F;
 const UNSUPPORTED_GROUP_TYPE: u8 = 0x10;
 
 /// An attribute's type: a 16-bit UUID of the Bluetooth SIG or one of the service's own.
@@ -129,6 +130,8 @@ pub(crate) struct Att {
     pub cccd: u16,
     /// A frame's Write Request waits for its response: the frame is not taken yet.
     write_pending: bool,
+    /// The other side has the key of an earlier pairing and the link is not encrypted with it yet.
+    pub keyed: bool,
 }
 
 /// What a PDU brought about.
@@ -142,7 +145,15 @@ pub(crate) struct Outcome {
 
 impl Att {
     pub(crate) fn new(cccd: u16) -> Self {
-        Self { mtu: MTU_DEFAULT, cccd, write_pending: false }
+        Self { mtu: MTU_DEFAULT, cccd, write_pending: false, keyed: false }
+    }
+
+    /// What a link that is not authenticated is refused with ([Vol 3] Part C, Section 10.3.1):
+    /// with a key to its name and no encryption yet, it is to start encryption; else it is to
+    /// pair. The difference is acted on: told to pair, a phone that has the key pairs anew, and
+    /// asks its user for the passkey each time it comes back.
+    fn refusal(&self) -> u8 {
+        if self.keyed { INSUFFICIENT_ENCRYPTION } else { INSUFFICIENT_AUTHENTICATION }
     }
 
     /// The phone asked for notifications of TX.
@@ -190,7 +201,7 @@ impl Att {
             10 => characteristic(READ | NOTIFY, TX, Uuid::Long(uart(3))),
             // frames are notified, never kept to be read
             TX if authenticated => Vec::new(),
-            TX => return Err(INSUFFICIENT_AUTHENTICATION),
+            TX => return Err(self.refusal()),
             CCCD => self.cccd.to_le_bytes().to_vec(),
             _ => return Err(INVALID_HANDLE),
         })
@@ -199,7 +210,7 @@ impl Att {
     /// A write to an attribute: `Ok` with the frame, if it was one written to RX.
     fn write(&mut self, handle: u16, value: &[u8], authenticated: bool, frame_max: usize) -> Result<Option<Vec<u8>>, u8> {
         match handle {
-            RX | CCCD if !authenticated => Err(INSUFFICIENT_AUTHENTICATION),
+            RX | CCCD if !authenticated => Err(self.refusal()),
             RX if value.len() > frame_max => Err(INVALID_ATTRIBUTE_VALUE_LENGTH),
             RX => Ok(Some(value.to_vec())),
             CCCD if value.len() != 2 => Err(INVALID_ATTRIBUTE_VALUE_LENGTH),

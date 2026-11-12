@@ -43,6 +43,24 @@ pub fn pairing_begins() -> bool {
     true
 }
 
+/// The pairing begun last ended before the phone had a passkey typed into it: its question was
+/// left unanswered, or dismissed. That tells nobody a bit of the passkey, so it is not counted,
+/// and the wait it set is off. (An app that reconnects by itself asks again every time, with
+/// nobody at the phone: counted, three such made the device turn the owner away for minutes.)
+pub fn pairing_abandoned() {
+    let n = PAIRING_FAILURES.load(Ordering::Relaxed).saturating_sub(1);
+    PAIRING_FAILURES.store(n, Ordering::Relaxed);
+    // it began, so no wait was on before it
+    PAIRING_BLOCKED_UNTIL.store(0, Ordering::Relaxed);
+}
+
+/// The pairings begun in a row that did not end paired, and the seconds still to wait before the
+/// next is let in.
+pub fn pairing_pause() -> (u32, u32) {
+    let now = embassy_time::Instant::now().as_secs() as u32;
+    (PAIRING_FAILURES.load(Ordering::Relaxed), PAIRING_BLOCKED_UNTIL.load(Ordering::Relaxed).saturating_sub(now))
+}
+
 /// A pairing completed with the passkey: the count starts over.
 pub fn pairing_succeeded() {
     PAIRING_FAILURES.store(0, Ordering::Relaxed);

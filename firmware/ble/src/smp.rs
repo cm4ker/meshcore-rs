@@ -8,7 +8,7 @@
 use alloc::boxed::Box;
 
 use crate::crypto::{self, Addr, KeyPair, flip};
-use crate::{Bond, Event, Out};
+use crate::{Bond, Event, Failure, Out};
 
 /// The Security Manager's channel.
 pub(crate) const CID: u16 = 6;
@@ -51,6 +51,17 @@ const ROUNDS: u8 = 20;
 /// A pairing with no progress for this long is over, and no other may follow on the connection
 /// ([Vol 3] Part H, Section 3.4).
 pub(crate) const TIMEOUT_SECS: u32 = 30;
+/// But the step a person takes, reading the passkey off the device and typing it into the phone,
+/// gets longer. Phones keep their question up past the 30 s: ended there by the device, the
+/// pairing began anew as the phone came back, each time with a new passkey.
+pub(crate) const PASSKEY_SECS: u32 = 120;
+
+/// The Security Request ([Vol 3] Part H, Section 3.6.7) to a peer that has a key: it is to
+/// encrypt the link with it, or to pair if it has none after all. `mitm`: the key is of a pairing
+/// by passkey, and no lesser one will do.
+pub(crate) fn security_request(mitm: bool) -> [u8; 2] {
+    [0x0B, AUTH_BONDING | AUTH_SECURE_CONNECTIONS | if mitm { AUTH_MITM } else { 0 }]
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
@@ -126,16 +137,21 @@ impl Smp {
         match self.step(code, payload, env) {
             Ok(bond) => {
                 if self.stage != Stage::Idle {
-                    self.deadline = env.now.wrapping_add(TIMEOUT_SECS);
+                    let time = if self.stage == Stage::Confirm(0) { PASSKEY_SECS } else { TIMEOUT_SECS };
+                    self.deadline = env.now.wrapping_add(time);
                 }
                 bond
             }
             Err(reason) => {
-                // the phone's own failure is not answered with another
-                if let Some(reason) = reason {
-                    env.out.l2cap(CID, &[PAIRING_FAILED, reason as u8]);
-                }
-                self.fail(env.out);
+                let failure = match reason {
+                    Some(reason) => {
+                        env.out.l2cap(CID, &[PAIRING_FAILED, reason as u8]);
+                        Failure::Refused(reason as u8)
+                    }
+                    // the phone's own failure is not answered with another
+                    None => Failure::Peer(payload.first().copied().unwrap_or(0)),
+                };
+                self.fail(env.out, failure);
                 None
             }
         }
@@ -339,7 +355,7 @@ impl Smp {
             return None;
         }
         if !on {
-            self.fail(env.out);
+            self.fail(env.out, Failure::NotEncrypted);
             return None;
         }
         let session = self.session.as_ref()?;
@@ -370,10 +386,19 @@ impl Smp {
         self.session.take().map(|session| session.bond.clone())
     }
 
-    fn fail(&mut self, out: &mut Out) {
+    fn fail(&mut self, out: &mut Out, why: Failure) {
+        // the phone asks for the passkey before the first round, and goes on once it has one
+        let passkey_entered = !matches!(self.stage, Stage::Idle | Stage::PublicKey | Stage::Confirm(0));
         self.stage = Stage::Idle;
         self.session = None;
-        out.event(Event::PairingFailed);
+        out.event(Event::PairingFailed { why, passkey_entered });
+    }
+
+    /// The connection is gone, and a pairing under way with it.
+    pub(crate) fn link_lost(&mut self, out: &mut Out) {
+        if self.stage != Stage::Idle {
+            self.fail(out, Failure::LinkLost);
+        }
     }
 
     /// The clock moved on: a pairing that stalled is over.
@@ -381,7 +406,7 @@ impl Smp {
         // wrapping: the clock may be one that starts over
         if self.stage != Stage::Idle && now.wrapping_sub(self.deadline) < u32::MAX / 2 {
             self.dead = true;
-            self.fail(out);
+            self.fail(out, Failure::Stalled);
         }
     }
 }
