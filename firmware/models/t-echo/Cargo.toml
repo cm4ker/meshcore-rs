@@ -59,3 +59,5 @@ opt-level     = "z"
 # the identity-IRK patch and the USB fixes, see ../../vendor/README.md
 trouble-host = { path = "../../vendor/trouble-host-0.8" }
 embassy-nrf = { path = "../../vendor/embassy-nrf-0.11" }
+# the scalar arithmetic once in the image
+curve25519-dalek = { path = "../../vendor/curve25519-dalek" }

@@ -50,3 +50,5 @@ ble-trouble = ["dep:trouble-host"]
 [patch.crates-io]
 # fixed BLE passkey support, see ../vendor/README.md (standalone builds of this crate, e.g. clippy)
 trouble-host = { path = "../vendor/trouble-host" }
+# the scalar arithmetic once in an image
+curve25519-dalek = { path = "../vendor/curve25519-dalek" }

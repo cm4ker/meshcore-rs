@@ -62,6 +62,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: cargo test --workspace --locked
+      # the protocol core once more with the 32-bit curve arithmetic the boards run (a host build
+      # takes the 64-bit one), as firmware/vendor/curve25519-dalek has it
+      - run: cargo test --locked -p meshcore
+        env:
+          RUSTFLAGS: --cfg curve25519_dalek_bits="32"
       # the Pro Micro's update installer: its swap, with the power going at any step
       - run: cargo test --lib --locked --target x86_64-unknown-linux-gnu
         working-directory: firmware/models/promicro/installer

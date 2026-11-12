@@ -2,3 +2,8 @@
 resolver = "2"
 members = ["crates/meshcore", "tools/provision", "tools/ota-delta", "tools/ota-sign", "tools/companion-sim", "tools/ui-preview"]
 exclude = ["firmware", "reference"]
+
+[patch.crates-io]
+# the scalar arithmetic once in an image, see firmware/vendor/README.md; here so that the tests run
+# the boards' copy
+curve25519-dalek = { path = "firmware/vendor/curve25519-dalek" }

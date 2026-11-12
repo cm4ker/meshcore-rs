@@ -43,3 +43,5 @@ opt-level     = 'z'
 [patch.crates-io]
 # fixed BLE passkey support, see ../../vendor/README.md
 trouble-host = { path = "../../vendor/trouble-host" }
+# the scalar arithmetic once in the image
+curve25519-dalek = { path = "../../vendor/curve25519-dalek" }

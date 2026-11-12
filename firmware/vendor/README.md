@@ -35,3 +35,17 @@ upstream made after 0.11.0, marked `meshcore-rust patch` in `src/usb/mod.rs`:
 - Erratum 199 ("USBD cannot receive tasks during DMA") is worked around around each DMA.
 
 The T-Echo crate uses it through `[patch.crates-io]`.
+
+## curve25519-dalek 5.0.0
+
+Curve25519 and Ed25519 arithmetic (dalek-cryptography), BSD-3-Clause, from crates.io with one
+change, marked `meshcore-rust patch` in `src/backend/serial/u32/scalar.rs`: the 32-bit backend's
+`mul_internal`, `square_internal` and `montgomery_reduce` are `inline(never)` instead of
+`inline(always)`. Inlined, each of the scalar operations that use them (a product mod l, the
+reduction of a hash, of a key) carried its own copy, unrolled: 21 KB of the Heltec V4 repeater,
+9 KB on the nRF52. Once each, the boards are 5.5 to 15.5 KB smaller. The arithmetic is the same,
+statement for statement; a signature takes a few calls more.
+
+Every board crate, firmware/common and the repository's workspace (so that the tests run this
+copy; with `--cfg curve25519_dalek_bits="32"` they run the 32-bit backend the boards use) take it
+through `[patch.crates-io]`.
