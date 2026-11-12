@@ -1,0 +1,16 @@
+# Build settings every board shares. Cargo reads this file for any build under firmware/, after a
+# board's own .cargo/config.toml; a board added later has them without a line of its own (the XIAO
+# C6 went without the compact SHA-2 for months, its settings written apart).
+#
+# For the boards only (no operating system): the host builds of the tests keep their defaults. A
+# board's rustflags go in its [target.<triple>] table, not [build]: Cargo takes [build].rustflags
+# only if no [target] table here or there gives any.
+#
+# The release profile stays in each board's Cargo.toml: a profile set here would also be the
+# installers' (promicro/installer and t-echo/installer are built from within their board's
+# directory, so they read this file too), and the T-Echo's is built with opt-level "s".
+
+[target.'cfg(target_os = "none")']
+# the SHA-2 rounds in a loop, not unrolled (SHA-512 alone is 49 KB unrolled on the ESP32-S3), at a
+# cost nobody notices in signatures and hashes here
+rustflags = ["--cfg", 'sha2_backend_soft="compact"']

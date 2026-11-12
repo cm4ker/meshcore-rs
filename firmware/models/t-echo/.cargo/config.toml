@@ -2,9 +2,8 @@
 target = "thumbv7em-none-eabihf"
 
 [target.thumbv7em-none-eabihf]
-# sha2_backend_soft: the SHA-2 rounds in a loop, not unrolled (32 KB less code), at a cost nobody
-# notices in signatures and hashes here
-rustflags = ["-C", "link-arg=--nmagic", "--cfg", 'sha2_backend_soft="compact"']
+# with those of every board, in ../../../.cargo/config.toml
+rustflags = ["-C", "link-arg=--nmagic"]
 
 [env]
 # nrf-sdc/nrf-mpsl generate bindings with clang for a bare-metal target: its own stdint.h, not a

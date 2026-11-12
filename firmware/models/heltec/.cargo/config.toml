@@ -3,15 +3,10 @@ include = ["esp-config.toml"]
 
 [target.xtensa-esp32s3-none-elf]
 runner = "espflash flash --monitor --chip esp32s3"
+# with those of every board, in ../../../.cargo/config.toml
+rustflags = ["-C", "link-arg=-nostartfiles"]
 
 [build]
-rustflags = [
-  "-C", "link-arg=-nostartfiles",
-  # the SHA-2 rounds in a loop, not unrolled (SHA-512 alone is 49 KB unrolled), at a cost nobody
-  # notices in signatures and hashes here
-  "--cfg", 'sha2_backend_soft="compact"',
-]
-
 target = "xtensa-esp32s3-none-elf"
 
 [unstable]

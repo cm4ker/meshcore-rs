@@ -37,7 +37,8 @@ opt-level = "s"
 codegen-units = 1 # LLVM can perform better optimizations using a single thread
 debug         = 2
 lto           = 'fat'
-opt-level     = 's'
+# for size before speed, as on the other boards: 34 KB less than "s"
+opt-level     = 'z'
 
 [patch.crates-io]
 # fixed BLE passkey support, see ../../vendor/README.md

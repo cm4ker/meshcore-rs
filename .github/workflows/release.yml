@@ -115,7 +115,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             firmware/models/heltec/target
-          key: heltec-${{ env.XTENSA_RUST }}-${{ hashFiles('firmware/models/heltec/Cargo.lock', 'firmware/models/heltec/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
+          key: heltec-${{ env.XTENSA_RUST }}-${{ hashFiles('firmware/models/heltec/Cargo.lock', 'firmware/.cargo/config.toml', 'firmware/models/heltec/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
       - name: espflash
         run: |
           curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/espflash.zip" "$ESPFLASH_ZIP"
@@ -219,7 +219,7 @@ jobs:
             ~/.cargo/git
             firmware/models/t-echo/target
             firmware/models/promicro/target
-          key: nrf52840-rust${{ steps.rust.outputs.version }}-${{ hashFiles('firmware/models/t-echo/Cargo.lock', 'firmware/models/promicro/Cargo.lock', 'firmware/models/t-echo/.cargo/config.toml', 'firmware/models/promicro/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
+          key: nrf52840-rust${{ steps.rust.outputs.version }}-${{ hashFiles('firmware/models/t-echo/Cargo.lock', 'firmware/models/promicro/Cargo.lock', 'firmware/.cargo/config.toml', 'firmware/models/t-echo/.cargo/config.toml', 'firmware/models/promicro/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
       - name: T-Echo
         working-directory: firmware/models/t-echo
         run: |
