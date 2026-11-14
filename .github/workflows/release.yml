@@ -11,12 +11,12 @@
 # The actions are pinned by commit: the toolchain action's code runs where the signed images are
 # built. Releases are made from master only.
 #
-# A release carries only the boards and roles whose code changed, so the others don't update for
-# nothing. Each image is built once more with no release number or version and a fixed date
-# (MCFW_COUNTER=0, MCFW_VERSION=, SOURCE_DATE_EPOCH=0); the hash of that build (<board>-<role>.content) changes only with the
-# code. A release lists these hashes for every board and role (content.txt) and leaves out those
-# that match the release it follows: for a stable release the last stable one, for a dev release
-# the last of either channel (devices that follow dev take both).
+# A release carries every board and role, so all devices run the same release. Each image is built
+# once more with no release number or version and a fixed date (MCFW_COUNTER=0, MCFW_VERSION=,
+# SOURCE_DATE_EPOCH=0); the hash of that build (<board>-<role>.content) changes only with the code.
+# A release lists these hashes (content.txt) and names those that match the release it follows (for
+# a stable release the last stable one, for a dev release the last of either channel): their delta
+# is the release number alone, about a kilobyte. A release whose every board matches is refused.
 
 name: build and release
 
@@ -376,9 +376,8 @@ jobs:
             hash=$(cat "images/$name.content")
             echo "$hash  $name" >> out/content.txt
             if grep -qxF "$hash  $name" prev-content.txt; then
-              echo "$name: the same code as in $prev, left out"
+              echo "$name: the same code as in $prev (its delta is the release number, about a kilobyte)"
               echo "$name" >> unchanged.txt
-              continue
             fi
             mcfw=out/$name-$MCFW_VERSION-r$MCFW_COUNTER.mcfw
             $sign bundle "$image" --board "$board" --role "$role" --counter "$MCFW_COUNTER" --version "$MCFW_VERSION" --channel "$MCFW_CHANNEL" -o "$mcfw"
@@ -386,7 +385,7 @@ jobs:
             if [ -f "images/$name.uf2" ]; then cp "images/$name.uf2" out/; fi
             if [ -f "images/$name.zip" ]; then cp "images/$name.zip" out/; fi
           done
-          if ! ls out/*.mcfw > /dev/null 2>&1; then
+          if [ "$(wc -l < unchanged.txt)" -eq "$(ls images/*.bin | wc -l)" ]; then
             echo "no board's code changed since $prev: nothing to release"
             exit 1
           fi
@@ -499,7 +498,7 @@ jobs:
             echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo or Pro Micro image for the USB bootloader's drive; a .zip, the Pro Micro companion's for its serial DFU (web flashers' custom firmware). The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them. ota-app-* is the program that puts a .mcfw on a device over USB or BLE, for Windows, macOS and Linux (README, «ota-app»)."
             if [ -s unchanged.txt ]; then
               echo
-              echo "Left out, the same code as in $(cat prev-tag.txt): $(paste -sd, unchanged.txt | sed 's/,/, /g'). Those devices keep what they run; content.txt lists the code of every board and role."
+              echo "The same code as in $(cat prev-tag.txt): $(paste -sd, unchanged.txt | sed 's/,/, /g'). They come out all the same, so every device runs the same release; their delta is about a kilobyte. content.txt lists the code of every board and role."
             fi
           } > notes.md
           gh release create "v$MCFW_VERSION-r$MCFW_COUNTER" out/* $prerelease \
