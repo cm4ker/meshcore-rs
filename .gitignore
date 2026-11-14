@@ -7,3 +7,4 @@
 __pycache__/
 *.pyc
 /firmware/models/*/installer/target
+tools/ota-app/dist/

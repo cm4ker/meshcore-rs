@@ -1,0 +1,5 @@
+# What ota_app.py needs, and what the release's ota-app programs are built with (build.py).
+bleak==2.1.1
+pyserial==3.5
+pyserial-asyncio-fast==0.16
+pyinstaller==6.22.3

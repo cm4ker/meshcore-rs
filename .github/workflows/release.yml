@@ -265,6 +265,44 @@ jobs:
             *.zip
             *.content
 
+  # tools/ota-app as a program for each system (tools/ota-app/build.py), so a device can be updated
+  # over USB or BLE without installing Python; every release carries them. Linux on 22.04: a
+  # program runs on the glibc it was built with or a newer one.
+  ota-app:
+    name: ota-app for ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-2025, macos-15, ubuntu-22.04, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+      - run: pip install -r tools/ota-app/requirements.txt
+      - run: python tools/ota-app/build.py dist
+      # the program starts and has its modules (bleak's backend is found only at run time)
+      - shell: bash
+        run: |
+          set -euo pipefail
+          program=$(ls dist/ota-app-*)
+          "$program" --help
+          python - "$program" <<'PY'
+          import subprocess, sys
+          # a runner has no Bluetooth: the scan fails or hangs, either is fine, a missing module is not
+          try:
+              r = subprocess.run([sys.argv[1], "--list"], capture_output=True, text=True, timeout=60)
+              out = r.stdout + r.stderr
+          except subprocess.TimeoutExpired as e:
+              out = (e.stdout or b"").decode(errors="replace") + (e.stderr or b"").decode(errors="replace")
+          print(out)
+          assert "No module named" not in out, "a module is missing from the program"
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ota-app-${{ matrix.os }}
+          path: dist/ota-app-*
+
   # The deltas a release of this build would have, from the newest release and the newest stable
   # one, in the run's summary; a warning for each over the budget or the LoRa limit. A delta grows
   # with every change until the next release: one over the budget is worth a release before more
@@ -288,7 +326,7 @@ jobs:
   release:
     name: Sign and publish
     if: github.event_name == 'workflow_dispatch'
-    needs: [test, esp32s3, esp32c6, nrf52840]
+    needs: [test, esp32s3, esp32c6, nrf52840, ota-app]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -352,6 +390,7 @@ jobs:
             echo "no board's code changed since $prev: nothing to release"
             exit 1
           fi
+          cp images/ota-app-* out/
           $sign fingerprint --key-env MCFW_ROOT_KEY > out/root.txt
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
           for mcfw in out/*.mcfw; do $sign verify "$mcfw" --root "$root"; done
@@ -457,7 +496,7 @@ jobs:
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
           prerelease=$([ "$MCFW_CHANNEL" = dev ] && echo --prerelease || true)
           {
-            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo or Pro Micro image for the USB bootloader's drive; a .zip, the Pro Micro companion's for its serial DFU (web flashers' custom firmware). The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them."
+            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo or Pro Micro image for the USB bootloader's drive; a .zip, the Pro Micro companion's for its serial DFU (web flashers' custom firmware). The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them. ota-app-* is the program that puts a .mcfw on a device over USB or BLE, for Windows, macOS and Linux (README, «ota-app»)."
             if [ -s unchanged.txt ]; then
               echo
               echo "Left out, the same code as in $(cat prev-tag.txt): $(paste -sd, unchanged.txt | sed 's/,/, /g'). Those devices keep what they run; content.txt lists the code of every board and role."

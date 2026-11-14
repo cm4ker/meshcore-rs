@@ -116,7 +116,9 @@ def envelope_pieces(env, size):
 
 
 def store_image(images, image):
-    """Keep `image` in the store under its SHA-256 prefix (a future delta base)."""
+    """Keep `image` in the store under its SHA-256 prefix (a future delta base); no store, nothing."""
+    if images is None:
+        return None
     images.mkdir(parents=True, exist_ok=True)
     path = images / f"{hashlib.sha256(image).hexdigest()[:16]}.bin"
     if not path.exists():
@@ -126,7 +128,7 @@ def store_image(images, image):
 
 def find_base(images, length, sha8):
     """The stored image the repeater runs, by length and SHA-256 prefix."""
-    if not images.is_dir():
+    if images is None or not images.is_dir():
         return None
     for path in sorted(images.glob("*.bin")):
         if path.stat().st_size == length:

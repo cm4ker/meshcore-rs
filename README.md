@@ -158,7 +158,8 @@ firmware/models/        платы, у каждой свой крейт: про�
 tools/uf2/              ELF -> UF2 и прошивка платы с UF2-загрузчиком (T-Echo, Pro Micro)
 tools/provision/        образ раздела настроек (перенос ключа и конфигурации с другой прошивки)
 tools/ota-lora/         обновление репитера по LoRa через компаньон (Python, библиотека meshcore)
-tools/ota-app/          обновление компаньона по его подключению: BLE, USB или TCP
+tools/ota-app/          обновление по подключению приложения: BLE, USB или TCP; build.py собирает из него
+                        программу ota-app выпуска (Windows, macOS, Linux)
 tools/ota-delta/        дельта-патч для обновления по LoRa (bsdiff)
 tools/companion-sim/    сеть на ПК: компаньоны по TCP + репитер; interop.py гоняет её официальной
                         Python-библиотекой meshcore (meshcore-cli тоже подключается)
@@ -311,6 +312,65 @@ Wan10, и с `--singlebank`, и без). DFU по BLE из nRF Connect не пр
 отдельном разделе `meshcore` и при прошивке не стираются.
 
 ## Обновление по воздуху
+
+### ota-app: обновить узел по USB или BLE
+
+Программа без установки Python. Она есть в каждом выпуске на
+[странице выпусков](https://github.com/cm4ker/meshcore-rs/releases), рядом с прошивками:
+
+| Система | Файл |
+|---|---|
+| Windows | `ota-app-windows-x64.exe` |
+| macOS (Apple Silicon) | `ota-app-macos-arm64` |
+| Linux (ПК) | `ota-app-linux-x64` |
+| Linux (Raspberry Pi и другие ARM) | `ota-app-linux-arm64` |
+
+Из того же выпуска скачайте прошивку своей платы и роли:
+`<плата>-<роль>-<версия>-r<номер>.mcfw`, например `xiao-c6-companion-0.9.0-r130.mcfw`. Узел с
+закреплённым корневым ключом (сборки CI закрепляют его сами) ставит только `.mcfw` из выпуска, и
+только для своей платы и роли. Другой файл он отклонит, и прошивка не пострадает.
+
+На macOS и Linux программе нужно разрешить запуск:
+
+```
+chmod +x ota-app-macos-arm64
+xattr -d com.apple.quarantine ota-app-macos-arm64     # macOS: программа не подписана
+sudo usermod -aG dialout $USER                       # Linux: доступ к USB-порту, потом перелогиниться
+```
+
+Дальше команды для Windows; на других системах вместо `ota-app-windows-x64.exe` — свой файл
+(`./ota-app-macos-arm64`), а вместо `COM4` — `/dev/ttyACM0` (Linux) или `/dev/cu.usbmodem…` (macOS).
+
+1. Найти узел: `ota-app-windows-x64.exe --list` покажет USB-порты и устройства MeshCore, которые
+   сейчас видны по BLE.
+2. Посмотреть, что стоит: `ota-app-windows-x64.exe --port COM4 --info` — плата, роль и номер сборки.
+3. Обновить по USB:
+
+   ```
+   ota-app-windows-x64.exe --port COM4 xiao-c6-companion-0.9.0-r130.mcfw
+   ```
+
+4. Или по BLE. **Компаньон**: PIN — тот, что задан в приложении, иначе показан на экране, а на платах
+   без экрана — 123456. **Репитер**: включите окно обновления командой `fw ble` в консоли или
+   удалённо по LoRa (в meshcore-cli: `cmd <узел> "fw ble"`). Ответ — имя `MeshCore-OTA-<имя>` и
+   одноразовый PIN, окно открыто 15 минут.
+
+   ```
+   ota-app-windows-x64.exe --ble D8:E6:C5:14:21:A8 --pin 123456 heltec-v4-repeater-0.9.0-r130.mcfw
+   ```
+
+   `--pin` сопрягает на Windows. На macOS его не нужно: система сама спросит PIN при подключении.
+   На Linux сначала сопрягите устройство (`bluetoothctl`, затем `pair <адрес>` и PIN), потом запускайте
+   без `--pin`.
+
+Программа шлёт образ целиком: по USB это быстро, по BLE — несколько минут. Потом узел проверяет
+образ, перезагружается и работает «на пробу»: `fw` показывает, через сколько прошивка останется
+(2 минуты), а если узел не дожил до проверки, он сам вернётся на прежнюю. `fw rollback` — вернуться
+вручную. На T-Echo места под вторую прошивку нет, там отката нет.
+
+Ниже — то же для разработчиков: скрипты из `tools/`, дельты из своего хранилища образов, LoRa и Wi-Fi.
+
+### Из репозитория
 
 Образ для обновления: `espflash save-image --chip esp32s3 --flash-size 16mb <elf> firmware.bin`.
 

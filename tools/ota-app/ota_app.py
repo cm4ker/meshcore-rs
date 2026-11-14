@@ -14,10 +14,16 @@ same as the LoRa update of a repeater), so no LoRa airtime is used.
                                                                   # the PIN `fw ble` replied
     python ota_app.py --tcp 192.168.1.50:5000 firmware.bin
     python ota_app.py --port COM4 --info                     # what the device runs
+    python ota_app.py --list                                 # serial ports, MeshCore devices on BLE
+
+Every release also carries this script as a program for Windows, macOS and Linux (ota-app-*,
+built by tools/ota-app/build.py), with no Python needed: the same options, `ota-app` in place of
+`python ota_app.py`.
 
 Delta updates work as over LoRa: the device reports the SHA-256 of the image it runs, and if that
 image is in the image store (--images, by default the board's firmware/models/<board>/images) only a
-bsdiff patch is sent (tools/ota-delta). Every image sent is added to the store.
+bsdiff patch is sent (tools/ota-delta). Every image sent is added to the store. The program has no
+store unless --images names one: it sends whole images.
 
 Signed releases: give the release's `.mcfw` file (tools/ota-sign) instead of the `.bin`; its
 envelope goes first. A device that pins a root key (`fw_root` custom variable on a companion,
@@ -41,6 +47,8 @@ from meshcore_ota import (  # noqa: E402
     make_delta, store_image,
 )
 
+# run as the release's program (PyInstaller), away from the repository and its image stores
+FROZEN = getattr(sys, "frozen", False)
 OTA_BEGIN, OTA_DATA, OTA_STATUS, OTA_COMMIT, OTA_ABORT, OTA_INFO, OTA_MANIFEST = range(0xF0, 0xF7)
 # a piece of a release envelope: command + offset, total, length (5) + data, within 176 bytes
 ENVELOPE_PIECE = 160
@@ -232,6 +240,10 @@ async def open_link(args):
         return await SerialLink.open(args.port)
     if args.ble:
         if args.pin and not getattr(args, "paired", False):
+            if sys.platform != "win32":
+                sys.exit("--pin pairs on Windows only. On macOS leave it out: the system asks for the PIN when it "
+                         "connects. On Linux pair first (bluetoothctl, `pair <address>`, type the PIN), then "
+                         "run without --pin.")
             await pair_windows(args.ble, args.pin)
             args.paired = True
         return await BleLink.open(args.ble)
@@ -257,10 +269,33 @@ async def running_sha8(args):
     return None
 
 
+async def list_devices():
+    """The serial ports, and the MeshCore devices advertising over BLE."""
+    import serial.tools.list_ports
+    ports = sorted(serial.tools.list_ports.comports(), key=lambda p: p.device)
+    log("serial ports (--port):" if ports else "no serial ports")
+    for p in ports:
+        usb = f"  USB {p.vid:04X}:{p.pid:04X}" if p.vid is not None else ""
+        print(f"  {p.device}  {p.description}{usb}")
+    log("MeshCore devices advertising over BLE (--ble), 10 s:")
+    try:
+        from bleak import BleakScanner
+        found = await BleakScanner.discover(timeout=10, return_adv=True)
+    except Exception as e:  # no adapter, or Bluetooth off
+        log(f"no BLE: {e or type(e).__name__}")
+        return
+    devices = sorted(((adv.rssi, d.address, adv.local_name or d.name or "") for d, adv in found.values()
+                      if (adv.local_name or d.name or "").startswith("MeshCore")), reverse=True)
+    for rssi, address, name in devices:
+        print(f"  {address}  {name}  RSSI {rssi}")
+    if not devices:
+        print("  none (a repeater advertises only while its update window is open: `fw ble`)")
+
+
 async def main():
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("image", nargs="?")
-    link_args = ap.add_mutually_exclusive_group(required=True)
+    ap = argparse.ArgumentParser(description=" ".join(__doc__.split("\n\n")[0].split()))
+    ap.add_argument("image", nargs="?", help="the release's .mcfw (or an image .bin)")
+    link_args = ap.add_mutually_exclusive_group()
     link_args.add_argument("--port", help="USB serial port")
     link_args.add_argument("--ble", help="BLE address (pair it first)")
     link_args.add_argument("--tcp", help="host:port of the Wi-Fi interface")
@@ -272,7 +307,12 @@ async def main():
                     help="send the whole image uncompressed: the device only checks it at the end (slow, but "
                     "it gets firmware whose commit of a compressed update fails onto a new one)")
     ap.add_argument("--info", action="store_true", help="only show the device and the image it runs")
+    ap.add_argument("--list", action="store_true", help="list the serial ports and the MeshCore devices on BLE")
     args = ap.parse_args()
+    if args.list:
+        return await list_devices()
+    if not (args.port or args.ble or args.tcp):
+        ap.error("say how to reach the device: --port, --ble or --tcp (--list shows what is there)")
     if not args.info and not args.image:
         ap.error("an image is required (or --info)")
 
@@ -284,7 +324,7 @@ async def main():
         log(f"device: {model}, firmware {version}")
         board = ("xiao-c6" if "Xiao" in model else "t-echo" if "T-Echo" in model
                  else "promicro" if "ProMicro" in model else "heltec")
-        images = args.images or REPO / "firmware" / "models" / board / "images"
+        images = args.images or (None if FROZEN else REPO / "firmware" / "models" / board / "images")
         # the ESP boards keep the previous firmware and fall back to it; the T-Echo has room for one
         after = ("it installs the image and restarts" if board == "t-echo"
                  else "on trial until it has run healthy for 2 minutes")
@@ -298,7 +338,7 @@ async def main():
         if len(running) >= 12:
             run_len, run_sha8 = struct.unpack_from("<I", running)[0], running[4:12]
             log(f"running image: {run_len} bytes, sha256 {run_sha8.hex()}..."
-                + ("" if find_base(images, run_len, run_sha8) else f" (not in {images})"))
+                + ("" if images is None or find_base(images, run_len, run_sha8) else f" (not in {images})"))
         roots, about = describe_device(running)
         log(about)
         repeater = len(running) >= 19 and running[13] == 1
@@ -307,6 +347,8 @@ async def main():
 
         image, envelope = load_firmware(args.image)
         sha = hashlib.sha256(image).digest()
+        if len(running) >= 12 and running[4:12] == sha[:8]:
+            sys.exit("the device already runs this image")
         if envelope:
             log(describe_envelope(envelope))
         elif roots:
@@ -329,11 +371,9 @@ async def main():
             payload = image
             how = f"raw {len(image)} bytes" + ("" if args.raw else " (image and its zlib stream do not both fit the slot)")
             begin = struct.pack("<I", len(payload)) + sha + struct.pack("<HBI", CHUNK, FLAG_CRC, 0)
-        if len(running) >= 12 and not args.no_delta and not args.raw:
+        if images is not None and len(running) >= 12 and not args.no_delta and not args.raw:
             run_len, run_sha8 = struct.unpack_from("<I", running)[0], running[4:12]
             base = find_base(images, run_len, run_sha8)
-            if base == image:
-                sys.exit("the device already runs this image")
             if base is None:
                 log(f"running image ({run_len} bytes, sha256 {run_sha8.hex()}...) is not in {images}: whole image")
             else:
