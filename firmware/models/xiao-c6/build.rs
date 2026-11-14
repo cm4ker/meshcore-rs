@@ -4,8 +4,29 @@ fn main() {
     for f in ["src", "Cargo.toml", "build.rs"] {
         println!("cargo:rerun-if-changed={f}");
     }
+    layout();
     // make sure linkall.x is the last linker script
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+}
+
+/// A fixed RAM layout, so that a delta update is as large as the change, not as the image, as on
+/// the Heltec boards (their build.rs). Each static's address sits in the `lui`/`addi` pairs all
+/// through the code, so a static that moves changes them everywhere: 16 bytes more statics made a
+/// 7.5 KB delta of a change that had none. The code in RAM, the switch tables and constants esp-hal
+/// puts at the head of `.data`, and the statics each take a room of fixed size
+/// (`firmware/ld/lld/*_hook.x`), per binary: what a part leaves unused is RAM the main task's
+/// stack doesn't get. The link fails when a part outgrows its room (lld: "unable to move location
+/// counter backward"); raising one moves what comes after it, so the next delta is a large one.
+fn layout() {
+    let ld = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../ld/lld");
+    println!("cargo:rerun-if-changed={}", ld.display());
+    println!("cargo:rustc-link-search={}", ld.display());
+    // (image, code in RAM, switch tables and constants, those and the statics), in bytes
+    for (bin, rwtext, head, data) in [("companion", 0x1800, 0x1C00, 0x3C00), ("repeater", 0x2400, 0x2000, 0x4000)] {
+        for (sym, room) in [("MC_RWTEXT_ROOM", rwtext), ("MC_DATA_HEAD", head), ("MC_DATA_ROOM", data)] {
+            println!("cargo:rustc-link-arg-bin={bin}=--defsym={sym}={room:#x}");
+        }
+    }
 }
 
 /// Build timestamp: seeds the wall clock (adverts must carry increasing timestamps) and `ver`.

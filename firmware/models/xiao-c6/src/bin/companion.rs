@@ -15,6 +15,7 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
@@ -132,5 +133,7 @@ async fn main(spawner: Spawner) -> ! {
         build_epoch: BUILD_EPOCH.parse().unwrap_or(0),
         build_date: BUILD_DATE,
     };
-    companion_app::run(spawner, hw, board, cfg).await
+    // the main loop's state on the heap: in the main task's static it would grow with every change
+    // to the loop and move the statics after it (see `layout` in build.rs)
+    Box::pin(companion_app::run(spawner, hw, board, cfg)).await
 }
