@@ -63,7 +63,7 @@ impl Companion {
                 let mut f = alloc::vec![RESP_CODE_DEVICE_INFO, FIRMWARE_VER_CODE, (MAX_CONTACTS / 2) as u8, MAX_GROUP_CHANNELS as u8];
                 f.extend_from_slice(&self.prefs.ble_pin.to_le_bytes());
                 // the app shows it as the build: the release number, or a local build's date
-                let build = match release::RELEASE_COUNTER {
+                let build = match release::release_counter() {
                     0 => self.board.build_date.clone(),
                     n => alloc::format!("build #{n}"),
                 };

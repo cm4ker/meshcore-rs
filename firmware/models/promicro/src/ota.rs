@@ -188,7 +188,7 @@ impl FwRecord {
     /// This firmware is left for the one in the staging area: not installed by itself again.
     fn left(own: Option<(u32, [u8; 32])>) -> Self {
         Self {
-            skip: meshcore::release::RELEASE_COUNTER,
+            skip: meshcore::release::release_counter(),
             prev_hash: own.map_or([0; 32], |(_, h)| h),
             prev: own_label(),
             ..Self::default()
@@ -198,7 +198,7 @@ impl FwRecord {
 
 /// This firmware, as the record names it for after it is left: `0.8.6 #69`, or `0.8.6` on a local build.
 fn own_label() -> String {
-    meshcore::fwstate::Release::new(meshcore::release::PRODUCT_VERSION, meshcore::release::RELEASE_COUNTER).to_string()
+    meshcore::fwstate::Release::new(meshcore::release::PRODUCT_VERSION, meshcore::release::release_counter()).to_string()
 }
 
 /// Ask the installer to swap in the `size`-byte image in the staging area; `running` is this

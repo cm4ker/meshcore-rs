@@ -103,7 +103,7 @@ impl FwRecord {
 
 /// This firmware, as the record names it for after it is left: `0.8.6 #69`, or `0.8.6` on a local build.
 fn own_label() -> String {
-    meshcore::fwstate::Release::new(meshcore::release::PRODUCT_VERSION, meshcore::release::RELEASE_COUNTER).to_string()
+    meshcore::fwstate::Release::new(meshcore::release::PRODUCT_VERSION, meshcore::release::release_counter()).to_string()
 }
 
 /// Run at boot, before anything that could hang. Returns `true` while on a trial boot.
@@ -123,7 +123,7 @@ pub fn check_trial(store: &mut EspStore<'_>, booted: u8) -> bool {
     if boots >= MAX_TRIAL_BOOTS {
         log::error!("OTA: slot {slot} failed {boots} trial boots, rolling back to slot {prev}");
         // the firmware that runs is the one left: not installed by itself again
-        let left = FwRecord { trial: None, skip: meshcore::release::RELEASE_COUNTER, prev: own_label() };
+        let left = FwRecord { trial: None, skip: meshcore::release::release_counter(), prev: own_label() };
         left.save(store);
         select_slot(store, prev, OtaImageState::Valid);
         crate::reset::hard_reset();
@@ -157,7 +157,7 @@ pub fn confirm(store: &mut EspStore<'_>) {
 /// Switch back to the other slot (`fw rollback`); the restart is the caller's. The firmware that
 /// runs now is the one left: not installed by itself again.
 pub fn rollback(store: &mut EspStore<'_>, slots: Slots) -> bool {
-    let left = FwRecord { trial: None, skip: meshcore::release::RELEASE_COUNTER, prev: own_label() };
+    let left = FwRecord { trial: None, skip: meshcore::release::release_counter(), prev: own_label() };
     left.save(store) && select_slot(store, slots.target.0, OtaImageState::Valid)
 }
 

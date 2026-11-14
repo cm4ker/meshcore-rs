@@ -80,8 +80,15 @@ pub fn channel_by_name(name: &str) -> Option<u8> {
     }
 }
 
-/// Release number of this build, from `MCFW_COUNTER` at build time (0 for local builds).
-pub const RELEASE_COUNTER: u32 = parse_u32(option_env!("MCFW_COUNTER"));
+/// Release number of this build, from `MCFW_COUNTER` at build time (0 for local builds), read from
+/// a static the optimiser can't see into. As a constant it reached the code: on the ESP32-S3
+/// release #128 had 248 bytes of code fewer than #125 of the same source, which moved all the code
+/// after it, so a release that changed nothing but its number was a 23 KB delta, not one of 1 KB.
+pub fn release_counter() -> u32 {
+    static COUNTER: u32 = parse_u32(option_env!("MCFW_COUNTER"));
+    // SAFETY: a read of an initialised static of plain data
+    unsafe { core::ptr::read_volatile(&COUNTER) }
+}
 
 /// Root keys a device pins until told otherwise: the fingerprints in `MCFW_ROOT` at build time.
 /// The release build sets the project's root, so a node fresh from a release takes only signed
@@ -105,7 +112,7 @@ pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// How a build names itself to people (`ver`, the app's device info, logs): the product version,
 /// with the release number on a release and the build date on a local build.
 pub fn build_label(build_date: &str) -> String {
-    match RELEASE_COUNTER {
+    match release_counter() {
         0 => alloc::format!("{PRODUCT_VERSION} {build_date}"),
         n => alloc::format!("{PRODUCT_VERSION} #{n}"),
     }
@@ -114,7 +121,7 @@ pub fn build_label(build_date: &str) -> String {
 /// The release that runs, as `fw` and the map name it: `0.8.6 #69`, or `0.8.6 (1 Nov 2026 10:06)`
 /// on a local build.
 pub fn running_label(build_date: &str) -> String {
-    match RELEASE_COUNTER {
+    match release_counter() {
         0 => alloc::format!("{PRODUCT_VERSION} ({build_date})"),
         n => alloc::format!("{PRODUCT_VERSION} #{n}"),
     }
@@ -122,7 +129,7 @@ pub fn running_label(build_date: &str) -> String {
 
 /// What `ver` says after the firmware's own version: `0.8.6 #69`, or `0.8.6, local 1 Nov 2026 10:06`.
 pub fn ver_label(build_date: &str) -> String {
-    match RELEASE_COUNTER {
+    match release_counter() {
         0 => alloc::format!("{PRODUCT_VERSION}, local {build_date}"),
         n => alloc::format!("{PRODUCT_VERSION} #{n}"),
     }
@@ -329,7 +336,7 @@ pub struct Build {
 
 impl Default for Build {
     fn default() -> Self {
-        Self { board: 0, role: 0, counter: RELEASE_COUNTER }
+        Self { board: 0, role: 0, counter: release_counter() }
     }
 }
 
