@@ -272,8 +272,9 @@ async def running_sha8(args):
 async def list_devices():
     """The serial ports, and the MeshCore devices advertising over BLE."""
     import serial.tools.list_ports
-    ports = sorted(serial.tools.list_ports.comports(), key=lambda p: p.device)
-    log("serial ports (--port):" if ports else "no serial ports")
+    # USB ones only: Linux lists thirty-odd /dev/ttyS* of the board's own UARTs, nothing behind them
+    ports = sorted((p for p in serial.tools.list_ports.comports() if p.vid is not None), key=lambda p: p.device)
+    log("USB serial ports (--port):" if ports else "no USB serial ports")
     for p in ports:
         usb = f"  USB {p.vid:04X}:{p.pid:04X}" if p.vid is not None else ""
         print(f"  {p.device}  {p.description}{usb}")
