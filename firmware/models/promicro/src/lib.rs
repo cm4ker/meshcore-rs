@@ -14,17 +14,33 @@ extern crate alloc;
 pub mod ble;
 pub mod board;
 pub mod companion;
+pub mod companion_app;
 pub mod console;
 pub mod flash;
-#[cfg(feature = "t114")]
-pub mod gps;
 pub mod ota;
-#[cfg(feature = "t114")]
-pub mod screen;
+pub mod repeater_app;
 pub mod sd;
-#[cfg(feature = "t114")]
-pub mod tft;
 pub mod usb_frames;
+
+/// The board, as the repeater and the companion name and measure it.
+pub struct Spec {
+    /// In the boot log.
+    pub name: &'static str,
+    /// `board`, the device info.
+    pub manufacturer: &'static str,
+    /// The board a signed release must name (`meshcore::release::board`).
+    pub release_board: u8,
+    /// The USB IDs and product name of upstream's firmware for the board: the host keeps its
+    /// COM port.
+    pub usb: (u16, u16, &'static str),
+    /// The battery reading's millivolts per LSB (`set adc.multiplier` calibrates it).
+    pub batt_mv_per_lsb: f32,
+    /// System OFF, which only the button ends; the radio is asleep, the SoftDevice off.
+    pub system_off: fn() -> !,
+    /// The binary's `BUILD_EPOCH` and `BUILD_DATE`.
+    pub build_epoch: &'static str,
+    pub build_date: &'static str,
+}
 
 /// The node's data in the internal flash (`meshcore_fw_core::storage`, the 64 KiB layout
 /// `tools/provision` writes): right below 0xEA000, the end of what the Adafruit bootloader takes

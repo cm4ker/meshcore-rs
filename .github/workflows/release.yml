@@ -231,7 +231,8 @@ jobs:
             ~/.cargo/git
             firmware/models/t-echo/target
             firmware/models/promicro/target
-          key: nrf52840-rust${{ steps.rust.outputs.version }}-${{ hashFiles('firmware/models/t-echo/Cargo.lock', 'firmware/models/promicro/Cargo.lock', 'firmware/.cargo/config.toml', 'firmware/models/t-echo/.cargo/config.toml', 'firmware/models/promicro/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
+            firmware/models/t114/target
+          key: nrf52840-rust${{ steps.rust.outputs.version }}-${{ hashFiles('firmware/models/t-echo/Cargo.lock', 'firmware/models/promicro/Cargo.lock', 'firmware/models/t114/Cargo.lock', 'firmware/.cargo/config.toml', 'firmware/models/t-echo/.cargo/config.toml', 'firmware/models/promicro/.cargo/config.toml', 'firmware/models/t114/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
       - name: T-Echo
         working-directory: firmware/models/t-echo
         run: |
@@ -260,20 +261,20 @@ jobs:
           if [ "${{ matrix.build }}" = images ]; then
             python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion $out/promicro-companion.uf2 --dfu-zip $out/promicro-companion.zip
           fi
-      # the Pro Micro's code with the T114's pins (src/board.rs), beside it in target/t114
+      # the Pro Micro's repeater and companion (promicro's library) with the T114's board
       - name: Heltec T114
-        working-directory: firmware/models/promicro
+        working-directory: firmware/models/t114
         run: |
           out=../../..
           if [ "${{ matrix.build }}" = content ]; then
             export MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0
             out=../../../content
           fi
-          cargo build --locked --release --features t114 --target-dir target/t114
+          cargo build --locked --release
           # no .zip for serial DFU: whether its bootloader (0.9.0) keeps a CRC that turns updates off
           # is not known yet; the .uf2 is safe
           for role in repeater companion; do
-            python3 ../../../tools/uf2/elf2uf2.py target/t114/thumbv7em-none-eabihf/release/$role $out/heltec-t114-$role.uf2 --bin $out/heltec-t114-$role.bin
+            python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role $out/heltec-t114-$role.uf2 --bin $out/heltec-t114-$role.bin
           done
       - name: Content hashes
         if: matrix.build == 'content'

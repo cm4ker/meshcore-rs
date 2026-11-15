@@ -81,6 +81,36 @@ impl RepeaterUi {
     }
 }
 
+/// The T114 around the repeater (`promicro::repeater_app`): the screen, turned with the button,
+/// and the GPS.
+pub struct Extras {
+    pub ui: RepeaterUi,
+    /// The binary's `BUILD_DATE`, for the version on the pages.
+    pub build_date: &'static str,
+}
+
+impl promicro::repeater_app::Extras for Extras {
+    fn has_gps(&self) -> bool {
+        true
+    }
+
+    fn set_gps(&mut self, on: bool) {
+        crate::gps::GPS_ON.signal(on);
+    }
+
+    fn gps(&self) -> Option<meshcore::gps::GpsReading> {
+        crate::gps::reading()
+    }
+
+    fn poll(&mut self, mesh: &mut Mesh<Repeater>, down: bool, window: Option<(u32, String, u64)>, now: u64) -> bool {
+        matches!(self.ui.poll(mesh, down, window, now, self.build_date), Some(Action::ToggleUpdate))
+    }
+
+    fn wake(&mut self, now: u64) {
+        self.ui.wake(now);
+    }
+}
+
 /// Time on air as tenths of a percent of the uptime.
 fn permille(air_ms: u64, uptime_ms: u64) -> u16 {
     (air_ms * 1000 / uptime_ms.max(1)).min(1000) as u16

@@ -37,9 +37,9 @@ Micro, с пинами T114: всё, что умеет Pro Micro, есть и з
 
 ### Для разработчиков
 
-- Pro Micro и T114 собираются из `firmware/models/promicro`: T114 — с `--features t114
-  --target-dir target/t114`. Пины, светодиод, делитель батареи и USB-идентификаторы платы — в
-  `src/board.rs` (макрос `board_parts!`), бинарники от платы не зависят.
+- T114 — своя папка `firmware/models/t114`: пины (`src/board.rs`, макрос `board_parts!`), экран
+  и GPS; репитер и компаньон — общие с Pro Micro: `promicro::repeater_app` и
+  `promicro::companion_app` (что плата добавляет — через `repeater_app::Extras` и свой `Board`).
 - `meshcore::release::board::HELTEC_T114 = 7`, имя `heltec-t114` (ota-sign, ota-lora).
 - `meshcore-ui`: класс экрана `Tft240x135` (`layout/tft_240x135.rs`, только жирные шрифты, чтобы
   влезть в слот приложения). QR-код контакта рисует свой кодировщик `src/qr.rs` вместо
