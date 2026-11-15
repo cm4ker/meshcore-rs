@@ -301,7 +301,7 @@ fn build_view(
         age_min: ui::coarse_minutes(clock.saturating_sub(m.received)),
     };
     let body = match ui.page() {
-        Page::Home => Body::Home { name: app.prefs.node_name.clone(), unread },
+        Page::Home => Body::Home { name: app.prefs.node_name.clone(), unread, clock: app.screen_clock(&mesh.ctx) },
         Page::Messages => Body::Messages(app.recent.iter().rev().map(message).collect()),
         Page::Nearby => Body::Nearby(
             app.heard
@@ -351,7 +351,7 @@ fn build_view(
         Page::PowerOff => Body::PowerOff,
         Page::Pull => Body::Pull(pull_info(app, now)),
         // repeater pages
-        _ => Body::Home { name: app.prefs.node_name.clone(), unread },
+        _ => Body::Home { name: app.prefs.node_name.clone(), unread, clock: app.screen_clock(&mesh.ctx) },
     };
     let (page_idx, pages, alert) = ui.view_frame();
     View {

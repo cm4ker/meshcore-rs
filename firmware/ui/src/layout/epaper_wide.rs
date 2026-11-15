@@ -12,7 +12,7 @@ use embedded_graphics::prelude::*;
 
 use super::{ADVERT_FLOOD, ADVERT_ZERO_HOP, POWER_OFF, alert_text, title};
 use crate::model::{BleState, Body, View, Wifi};
-use crate::text::{ago, clean, duration, micro_deg, permille, plural, quarter, quarter_signed, trim_float, volts};
+use crate::text::{ago, clean, clock, duration, micro_deg, permille, plural, quarter, quarter_signed, trim_float, unread_lines, volts};
 use crate::theme::Font;
 use crate::theme::wide::{BIG, BIG_BOLD, DIGITS, HUGE_BOLD, HUGE_DIGITS, SMALL, TEXT, TEXT_BOLD};
 use crate::widgets::{Canvas, INK, fit, qr_side, width, wrap};
@@ -100,6 +100,18 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
     }
     bar(c, v);
     match &v.body {
+        Body::Home { unread, clock: Some(at), .. } => {
+            // the time and the unread count beside it, centred together
+            let t = clock(*at);
+            let (a, b) = unread_lines(*unread);
+            let tw = width(&HUGE_DIGITS, &t);
+            let x = (w - tw - 12 - width(&TEXT_BOLD, &a).max(width(&TEXT, b))) / 2;
+            c.text(&HUGE_DIGITS, &t, x, BODY_TOP + 5);
+            c.text(&TEXT_BOLD, &a, x + tw + 12, BODY_TOP + 12);
+            c.text(&TEXT, b, x + tw + 12, BODY_TOP + 30);
+            c.text(&SMALL, "Нажатие - дальше,", MARGIN, HINT_Y - 12);
+            c.text(&SMALL, "двойное - назад", MARGIN, HINT_Y + 2);
+        }
         Body::Home { unread, .. } => {
             if *unread > 0 {
                 let n = (*unread).min(999);

@@ -250,9 +250,10 @@ pub struct UpdateInfo {
 /// The page's content.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Body {
-    /// The companion's home: calm on purpose (it is up most of the time), no message text,
-    /// nothing that ticks.
-    Home { name: String, unread: u32 },
+    /// The companion's home: calm on purpose (it is up most of the time), no message text. It
+    /// ticks only with the clock on (`ui.show_clock`): hours and minutes in the node's time zone,
+    /// `Some(None)` while the node does not know the time.
+    Home { name: String, unread: u32, clock: Option<Option<(u8, u8)>> },
     /// Most recent first.
     Messages(Vec<Message>),
     /// Most recent first.

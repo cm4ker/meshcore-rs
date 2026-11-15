@@ -11,7 +11,7 @@ use embedded_graphics::prelude::*;
 
 use super::{alert_text, title};
 use crate::model::{BleState, Body, View, Wifi};
-use crate::text::{ago, clean, duration, micro_deg, permille, plural, quarter, quarter_signed, trim_float, volts};
+use crate::text::{ago, clean, clock, duration, micro_deg, permille, plural, quarter, quarter_signed, trim_float, unread_lines, volts};
 use crate::theme::Font;
 use crate::theme::mono::{BIG_BOLD, DIGITS, MID_DIGITS, SMALL, SMALL_BOLD, TEXT, TEXT_BOLD};
 use crate::widgets::{Canvas, fit, width, wrap};
@@ -81,6 +81,12 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
     }
     bar(c, v);
     match &v.body {
+        Body::Home { unread, clock: Some(at), .. } => {
+            // the time, and the unread count in a line under it: beside it there is no room
+            c.centered(&DIGITS, &clock(*at), 16);
+            let (a, b) = unread_lines(*unread);
+            c.centered(&SMALL, &format!("{a} {b}"), 49);
+        }
         Body::Home { unread, .. } => {
             if *unread > 0 {
                 let n = (*unread).min(999);

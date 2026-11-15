@@ -63,7 +63,13 @@ pub struct CompanionPrefs {
     pub disable_fwd: bool,
     pub default_scope_name: String,
     pub default_scope_key: [u8; 16],
-    pub tz_offset: i8,
+    /// The time zone, hours east of UTC, fractions for the half- and quarter-hour zones (upstream
+    /// keeps it a float since 1.18): the clock on the screen runs by it. The node's clock and
+    /// everything on the air stay UTC.
+    pub tz_offset: f32,
+    /// The clock on the screen's home page (`set ui.show_clock 1`, as upstream); off by default,
+    /// so an e-paper home page never ticks.
+    pub ui_show_clock: bool,
     /// Wi-Fi station for the TCP companion interface.
     pub wifi_ssid: String,
     pub wifi_pwd: String,
@@ -138,7 +144,8 @@ impl Default for CompanionPrefs {
             disable_fwd: true,
             default_scope_name: String::new(),
             default_scope_key: [0; 16],
-            tz_offset: 0,
+            tz_offset: 0.0,
+            ui_show_clock: false,
             wifi_ssid: String::new(),
             wifi_pwd: String::new(),
             wifi_enabled: true,
@@ -220,7 +227,8 @@ impl CompanionPrefs {
         let _ = writeln!(s, "disable_fwd={}", b(self.disable_fwd));
         let _ = writeln!(s, "defs_nm={}", escape(&self.default_scope_name));
         let _ = writeln!(s, "defs_key={}", to_hex(&self.default_scope_key));
-        let _ = writeln!(s, "tz_offset={}", self.tz_offset);
+        let _ = writeln!(s, "tz_offset={}", Shortest(self.tz_offset));
+        let _ = writeln!(s, "ui_show_clock={}", b(self.ui_show_clock));
         let _ = writeln!(s, "wifi_ssid={}", escape(&self.wifi_ssid));
         let _ = writeln!(s, "wifi_pwd={}", escape(&self.wifi_pwd));
         let _ = writeln!(s, "wifi_enabled={}", b(self.wifi_enabled));
@@ -286,7 +294,8 @@ impl CompanionPrefs {
                         p.default_scope_key = key;
                     }
                 }
-                "tz_offset" => p.tz_offset = atoi_signed(v).clamp(-12, 14) as i8,
+                "tz_offset" => p.tz_offset = (atof(v) as f32).clamp(-12.0, 14.0),
+                "ui_show_clock" => p.ui_show_clock = atoi(v) != 0,
                 "wifi_ssid" => p.wifi_ssid = unescape(v),
                 "wifi_pwd" => p.wifi_pwd = unescape(v),
                 "wifi_enabled" => p.wifi_enabled = flag(),
@@ -328,7 +337,8 @@ mod tests {
             node_name: "Карман \\ 2".into(),
             default_scope_name: "omsk".into(),
             default_scope_key: [7; 16],
-            tz_offset: -5,
+            tz_offset: -5.75,
+            ui_show_clock: true,
             fw_server: "server.lan:8095".into(),
             ..Default::default()
         };

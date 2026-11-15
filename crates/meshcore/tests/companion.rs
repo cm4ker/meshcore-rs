@@ -2277,3 +2277,32 @@ fn companion_takes_the_answer_of_a_gateway_that_is_one_of_its_contacts() {
     assert_eq!(c.app.timesync.clock(), Clock::Trusted);
     assert!(c.ctx.current_time_ms().abs_diff(server_ms) < 10_000);
 }
+
+#[test]
+fn time_zone_in_quarter_hours_and_the_screen_clock() {
+    use meshcore::timesync::Clock;
+    let mut a = companion(1, "Alice");
+    let run = |m: &mut Mesh<Companion>, c: &str| m.app.handle_command(&mut m.ctx, false, c);
+    assert_eq!(run(&mut a, "get tz.offset"), "> 0.0");
+    assert_eq!(run(&mut a, "set tz.offset 5.75"), "OK");
+    assert_eq!(run(&mut a, "get tz.offset"), "> 5.75", "a quarter-hour zone shows two decimals");
+    assert_eq!(run(&mut a, "set tz.offset 5.5"), "OK");
+    assert_eq!(run(&mut a, "get tz.offset"), "> 5.5");
+    assert_eq!(run(&mut a, "set tz.offset -12.5"), "Error, must be from -12 to +14");
+    assert!(a.app.take_effects().save_prefs);
+
+    assert_eq!(a.app.screen_clock(&a.ctx), None, "off by default");
+    assert_eq!(run(&mut a, "set ui.show_clock 1"), "> now 1");
+    assert_eq!(run(&mut a, "get ui.show_clock"), "> 1");
+    assert_eq!(a.app.screen_clock(&a.ctx), Some(None), "the time is not known yet");
+    // 2026-11-15 06:59:30 UTC, in Omsk (+6)
+    a.ctx.set_current_time(1_794_725_970);
+    a.app.timesync.note_set(&a.ctx, Clock::Approx, None);
+    assert_eq!(run(&mut a, "set tz.offset 6"), "OK");
+    assert_eq!(a.app.screen_clock(&a.ctx), Some(Some((12, 59))));
+    // across midnight backwards, and a half-hour zone
+    assert_eq!(run(&mut a, "set tz.offset -7.5"), "OK");
+    assert_eq!(a.app.screen_clock(&a.ctx), Some(Some((23, 29))));
+    let saved = CompanionPrefs::deserialize(&a.app.prefs.serialize(), 22);
+    assert_eq!((saved.tz_offset, saved.ui_show_clock), (-7.5, true));
+}

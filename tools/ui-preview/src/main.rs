@@ -2,7 +2,7 @@
 //! class, in the screen's own colours, and lists anything drawn off the screen or over
 //! something else (exit code 1 if there is).
 //!
-//!     cargo run -p ui-preview [-- <output dir>]      (default: target/ui-preview)
+//!     cargo run -p ui-preview [-- <output dir> [<part of a sample's name>]]      (default: target/ui-preview)
 
 use std::path::PathBuf;
 
@@ -56,7 +56,11 @@ fn look(class: Class) -> (Rgb888, Rgb888, u32) {
 fn main() {
     let out = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("target/ui-preview"));
     std::fs::create_dir_all(&out).expect("output directory");
-    let views = samples::all();
+    let mut views = samples::all();
+    // only the samples whose name has this in it, e.g. `home-clock`
+    if let Some(only) = std::env::args().nth(2) {
+        views.retain(|(name, _)| name.contains(only.as_str()));
+    }
     let mut problems = Vec::new();
     for class in Class::ALL {
         let (ink, paper, scale) = look(class);

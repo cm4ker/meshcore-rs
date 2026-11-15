@@ -10,7 +10,7 @@ use embedded_graphics::prelude::*;
 
 use super::{ADVERT_FLOOD, ADVERT_ZERO_HOP, POWER_OFF, alert_text, title};
 use crate::model::{BleState, Body, View, Wifi};
-use crate::text::{ago, clean, duration, micro_deg, permille, plural, quarter, quarter_signed, trim_float, volts};
+use crate::text::{ago, clean, clock, duration, micro_deg, permille, plural, quarter, quarter_signed, trim_float, unread_lines, volts};
 use crate::theme::Font;
 use crate::theme::square::{BIG, BIG_BOLD, FREQ_DIGITS, HUGE_DIGITS, SMALL, TEXT, TEXT_BOLD};
 use crate::widgets::{Canvas, fit, qr_side, width, wrap};
@@ -73,6 +73,14 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
     }
     bar(c, v);
     match &v.body {
+        Body::Home { unread, clock: Some(at), .. } => {
+            c.centered(&HUGE_DIGITS, &clock(*at), BODY_TOP + 10);
+            let (a, b) = unread_lines(*unread);
+            c.centered(&TEXT_BOLD, &a, BODY_TOP + 62);
+            c.centered(&TEXT, b, BODY_TOP + 84);
+            c.text(&SMALL, "Нажатие - дальше,", MARGIN, HINT_Y);
+            c.text(&SMALL, "двойное - назад", MARGIN, HINT_Y + 15);
+        }
         Body::Home { unread, .. } => {
             if *unread > 0 {
                 let n = (*unread).min(999);

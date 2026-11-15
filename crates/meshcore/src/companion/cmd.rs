@@ -1479,14 +1479,23 @@ impl Companion {
         } else if cmd == "ver" {
             format!("{} ({})", FIRMWARE_VERSION, release::ver_label(&self.board.build_date))
         } else if cmd == "get tz.offset" {
-            format!("> {}", p.tz_offset)
+            // as upstream: one decimal, two for a quarter-hour zone
+            let q = p.tz_offset * 4.0;
+            let quarter = q == libm::truncf(q) && (q as i32) % 2 != 0;
+            format!("> {}", Fixed(p.tz_offset as f64, if quarter { 2 } else { 1 }))
+        } else if cmd == "get ui.show_clock" {
+            format!("> {}", p.ui_show_clock as u8)
+        } else if let Some(v) = cmd.strip_prefix("set ui.show_clock") {
+            p.ui_show_clock = atoi(v.trim()) != 0;
+            self.effects.save_prefs = true;
+            format!("> now {}", p.ui_show_clock as u8)
         } else {
             let v = cmd.strip_prefix("set tz.offset ")?;
-            let tz = atof(v) as i32;
-            if !(-12..=14).contains(&tz) {
+            let tz = atof(v) as f32;
+            if !(-12.0..=14.0).contains(&tz) {
                 "Error, must be from -12 to +14".into()
             } else {
-                p.tz_offset = tz as i8;
+                p.tz_offset = tz;
                 self.effects.save_prefs = true;
                 "OK".into()
             }

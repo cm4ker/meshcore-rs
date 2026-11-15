@@ -41,6 +41,25 @@ pub fn plural(n: u32, one: &'static str, few: &'static str, many: &'static str) 
     }
 }
 
+/// The home page's clock: `HH:MM`, or dashes while the time is not known.
+pub fn clock(at: Option<(u8, u8)>) -> String {
+    match at {
+        Some((h, m)) => format!("{h:02}:{m:02}"),
+        None => "--:--".into(),
+    }
+}
+
+/// The unread count beside the home page's clock, in two lines.
+pub fn unread_lines(n: u32) -> (String, &'static str) {
+    match n {
+        0 => ("Нет новых".into(), "сообщений"),
+        n => {
+            let n = n.min(999);
+            (format!("{n} {}", plural(n, "новое", "новых", "новых")), plural(n, "сообщение", "сообщения", "сообщений"))
+        }
+    }
+}
+
 /// How long ago, from [`coarse_minutes`].
 pub fn ago(min: u32) -> String {
     match min {

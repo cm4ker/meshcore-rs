@@ -106,7 +106,7 @@ pub fn companion_view(page: Page) -> View {
         Page::Advert => Body::Advert { flood: false },
         Page::PowerOff => Body::PowerOff,
         Page::Pull => Body::Pull(pull("0.5.2 готова", "Установка займёт около 10 секунд", None, Some("установить"))),
-        _ => Body::Home { name: "PKIO🎃".into(), unread: 3 },
+        _ => Body::Home { name: "PKIO🎃".into(), unread: 3, clock: None },
     };
     frame(COMPANION_PAGES, page, companion_bar(), body)
 }
@@ -162,7 +162,11 @@ pub fn all() -> Vec<(String, View)> {
     };
 
     for n in [0, 1, 21, 999, 5000] {
-        add(&format!("home-unread-{n}"), with(c(Page::Home), Body::Home { name: long.into(), unread: n }));
+        add(&format!("home-unread-{n}"), with(c(Page::Home), Body::Home { name: long.into(), unread: n, clock: None }));
+    }
+    // the clock on (`ui.show_clock`): the widest digits, and the time not known yet
+    for (name, unread, clock) in [("home-clock", 0, Some((20, 48))), ("home-clock-unread", 24, Some((8, 0))), ("home-clock-unknown", 1, None)] {
+        add(name, with(c(Page::Home), Body::Home { name: long.into(), unread, clock: Some(clock) }));
     }
     add("messages-empty", with(c(Page::Messages), Body::Messages(vec![])));
     add(

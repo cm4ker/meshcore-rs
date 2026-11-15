@@ -1101,6 +1101,20 @@ impl Companion {
         }
     }
 
+    /// The clock on the screen's home page, hours and minutes in the node's time zone: none while
+    /// it is off (`ui.show_clock`), `Some(None)` while the node does not know the time.
+    pub fn screen_clock(&self, ctx: &MeshCtx) -> Option<Option<(u8, u8)>> {
+        if !self.prefs.ui_show_clock {
+            return None;
+        }
+        if self.timesync.clock() == timesync::Clock::Unknown {
+            return Some(None);
+        }
+        let secs = ctx.current_time() as i64 + libm::roundf(self.prefs.tz_offset * 3600.0) as i64;
+        let day = secs.rem_euclid(86_400);
+        Some(Some(((day / 3600) as u8, (day % 3600 / 60) as u8)))
+    }
+
     /// The battery multiplier in use: the one set with `set adc.multiplier`, else the board's own
     /// (none if the board takes none).
     pub fn adc_multiplier(&self) -> Option<f32> {
