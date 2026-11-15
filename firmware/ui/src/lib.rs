@@ -4,9 +4,10 @@
 //!   (top bar, page dots, notices, the pairing PIN) and each role's pages (the companion's
 //!   messages and nodes nearby, the repeater's passport, neighbours and traffic);
 //! - [`input`] and [`nav`]: buttons turned into intents (next, back, act), and which page is up;
-//! - [`layout`]: one layout per screen class (square and wide e-paper, 128 x 64 OLED), not per board,
-//!   built from the shared blocks in [`widgets`] with the class's fonts ([`theme`]);
-//! - [`refresh`]: when to redraw, per screen technology (e-paper, OLED).
+//! - [`layout`]: one layout per screen class (square and wide e-paper, 128 x 64 OLED, 240 x 135
+//!   TFT), not per board, built from the shared blocks in [`widgets`] with the class's fonts
+//!   ([`theme`]);
+//! - [`refresh`]: when to redraw, per screen technology (e-paper, OLED; a TFT redraws as an OLED).
 //!
 //! The panel driver, its rotation and the buttons stay with the board, which picks a class.
 
@@ -18,6 +19,7 @@ pub mod input;
 pub mod layout;
 pub mod model;
 pub mod nav;
+mod qr;
 pub mod refresh;
 #[cfg(any(test, feature = "samples"))]
 pub mod samples;

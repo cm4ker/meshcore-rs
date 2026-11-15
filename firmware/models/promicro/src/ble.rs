@@ -25,7 +25,7 @@ use embassy_time::Timer;
 use log::{info, warn};
 use meshcore::ota::REQ_TYPE_OTA_BEGIN;
 use meshcore_fw_core::frames::{self, Link};
-use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT, BONDS_CHANGED, pairing_begins, pairing_succeeded};
+use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED, pairing_begins, pairing_succeeded};
 use p256::elliptic_curve::point::AffineCoordinates;
 use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use p256::{AffinePoint, EncodedPoint, NonZeroScalar, ProjectivePoint};
@@ -36,7 +36,8 @@ pub struct Params {
     /// Advertised name: `MeshCore-OTA-<node name>` for the window, `MeshCore-<node name>` for
     /// the companion.
     pub name: String,
-    /// The pairing PIN (6 digits).
+    /// The pairing PIN (6 digits); 0: a random one for each pairing, for the screen to show
+    /// (`BLE_PASSKEY`).
     pub pin: u32,
     pub role: Role,
 }
@@ -407,6 +408,8 @@ struct Window {
     secret: Option<NonZeroScalar>,
     /// The companion's app link (`Role::Companion`).
     companion: bool,
+    /// A new PIN for each pairing ([`Params::pin`] 0).
+    random_pin: bool,
 }
 
 #[embassy_executor::task]
@@ -432,6 +435,7 @@ pub async fn task() -> ! {
             authenticated: false,
             secret: None,
             companion,
+            random_pin: params.pin == 0,
         };
         if open(&params, &mut w).is_ok() {
             info!("BLE: advertising as '{}'", params.name);
@@ -502,7 +506,9 @@ fn open(params: &Params, w: &mut Window) -> Result<(), ()> {
     let name = truncate(&params.name, 29);
     let no_access = SEC_NONE;
     check("name", sd_call!(SD_BLE_GAP_DEVICE_NAME_SET, &raw const no_access, name.as_ptr(), name.len()))?;
-    set_passkey(params.pin);
+    if params.pin != 0 {
+        set_passkey(params.pin);
+    }
     crate::console::record_crash("BLE step: lesc key");
     w.secret = lesc_keypair();
     if w.secret.is_none() {
@@ -616,7 +622,12 @@ async fn serve(w: &mut Window, bonds: &mut Vec<Bond>) {
                 }
                 return;
             }
-            Either4::Third(params) => set_passkey(params.pin),
+            Either4::Third(params) => {
+                w.random_pin = params.pin == 0;
+                if !w.random_pin {
+                    set_passkey(params.pin);
+                }
+            }
             // an unauthenticated link gets nothing (upstream drops pushes then too)
             Either4::Fourth(frame) => {
                 if w.authenticated && !notify(w, &frame) {
@@ -664,6 +675,7 @@ async fn handle(w: &mut Window, bonds: &mut Vec<Bond>, id: u16) {
         }
         BLE_GAP_EVT_DISCONNECTED => {
             info!("BLE: disconnected (reason {:#04x})", ev[8]);
+            BLE_PASSKEY.store(0, Ordering::Relaxed);
             w.conn = NO_CONN;
             w.authenticated = false;
             BLE_CONNECTED.store(false, Ordering::Relaxed);
@@ -678,6 +690,13 @@ async fn handle(w: &mut Window, bonds: &mut Vec<Bond>, id: u16) {
                 let _ = sd_call!(SD_BLE_GAP_SEC_PARAMS_REPLY, conn, BLE_GAP_SEC_STATUS_PAIRING_NOT_SUPP, 0, 0);
                 let _ = sd_call!(SD_BLE_GAP_DISCONNECT, conn, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
                 return;
+            }
+            if w.random_pin {
+                let mut r = [0u8; 4];
+                let _ = sd::random(&mut r);
+                let pin = 100_000 + u32::from_le_bytes(r) % 900_000;
+                set_passkey(pin);
+                BLE_PASSKEY.store(pin, Ordering::Relaxed);
             }
             // bond, MITM, LE Secure Connections, display only; our LTK (legacy pairing) and the
             // peer's identity are exchanged
@@ -712,6 +731,7 @@ async fn handle(w: &mut Window, bonds: &mut Vec<Bond>, id: u16) {
         }
         BLE_GAP_EVT_AUTH_STATUS => {
             let (status, flags, levels, kdist_peer) = (ev[8], ev[9], ev[10], ev[13]);
+            BLE_PASSKEY.store(0, Ordering::Relaxed);
             if status != 0 {
                 warn!("BLE: pairing failed ({status:#04x})");
                 return;

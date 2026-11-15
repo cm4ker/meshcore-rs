@@ -55,6 +55,24 @@ pub mod wide {
     pub static HUGE_DIGITS: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_logisoso42_tn>(), 46);
 }
 
+/// Colour TFT, 240 x 135 (Heltec T114): the wide e-paper's sizes, digits up to 42 px. Bold type
+/// only, as the wide e-paper's: three text fonts fit the T114's app slot, five did not.
+pub mod tft {
+    use super::*;
+
+    pub static SMALL: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox2hb_tf>(), 13);
+    pub static TEXT: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox3hb_tf>(), 16);
+    pub static TEXT_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox3hb_tf>(), 16);
+    pub static BIG: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4hb_tf>(), 20);
+    pub static BIG_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4hb_tf>(), 20);
+    /// "Выключено" on a node left off.
+    pub static HUGE_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4hb_tf>(), 20);
+    /// Digits only: the update PIN, the frequency.
+    pub static DIGITS: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_logisoso32_tn>(), 36);
+    /// Digits only: the unread count, the clock, the pairing PIN.
+    pub static HUGE_DIGITS: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_logisoso42_tn>(), 46);
+}
+
 /// Monochrome 128 x 64 (Heltec OLED): 10 to 12 px type, digits up to 24 px.
 pub mod mono {
     use super::*;

@@ -63,6 +63,8 @@ bind_interrupts!(struct Irqs {
     SPI2 => spim::InterruptHandler<peripherals::SPI2>;
     SAADC => saadc::InterruptHandler;
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+    #[cfg(feature = "t114")]
+    SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
     TEMP => temp::InterruptHandler;
     EGU2_SWI2 => sd::SoftDeviceEvents;
 });
@@ -100,6 +102,10 @@ async fn main(spawner: Spawner) {
     ncfg.gpiote_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(ncfg);
     for irq in [interrupt::USBD, interrupt::CLOCK_POWER, interrupt::SPI2, interrupt::SAADC, interrupt::TWISPI0, interrupt::TEMP] {
+        irq.set_priority(Priority::P3);
+    }
+    #[cfg(feature = "t114")]
+    for irq in [interrupt::SPIM3, interrupt::UARTE0] {
         irq.set_priority(Priority::P3);
     }
     // a watchdog still running from before a soft reset is taken over with the same settings
@@ -187,7 +193,13 @@ async fn main(spawner: Spawner) {
     }
 
     // ---- the board on its pins; the radio: its supply, the receive side of the antenna switch, the chip
-    let board::Parts { radio, led, rxen, button, battery, i2c, hold } = promicro::board_parts!(p, Irqs);
+    let parts = promicro::board_parts!(p, Irqs);
+    let board::Parts { radio, led, rxen, button, battery, i2c, hold, .. } = parts;
+    #[cfg(feature = "t114")]
+    {
+        spawner.spawn(promicro::tft::task(parts.screen).unwrap());
+        spawner.spawn(promicro::gps::task(parts.gps).unwrap());
+    }
     Timer::after_millis(10).await; // the radio powers up
 
     // ---- entropy: the hardware RNG (the SoftDevice's while it runs)

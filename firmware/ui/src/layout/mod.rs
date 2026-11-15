@@ -10,6 +10,7 @@ use crate::widgets::{Canvas, Recorder};
 pub mod epaper_square;
 pub mod epaper_wide;
 pub mod mono_128x64;
+pub mod tft_240x135;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Class {
@@ -19,16 +20,19 @@ pub enum Class {
     EpaperWide,
     /// Monochrome OLED, 128 x 64 (Heltec V3/V4).
     Mono128x64,
+    /// Colour TFT, 240 x 135, drawn in two colours (Heltec T114).
+    Tft240x135,
 }
 
 impl Class {
-    pub const ALL: [Class; 3] = [Class::EpaperSquare, Class::EpaperWide, Class::Mono128x64];
+    pub const ALL: [Class; 4] = [Class::EpaperSquare, Class::EpaperWide, Class::Mono128x64, Class::Tft240x135];
 
     pub fn size(self) -> Size {
         match self {
             Class::EpaperSquare => Size::new(200, 200),
             Class::EpaperWide => Size::new(250, 122),
             Class::Mono128x64 => Size::new(128, 64),
+            Class::Tft240x135 => Size::new(240, 135),
         }
     }
 
@@ -45,6 +49,7 @@ impl Class {
             Class::EpaperSquare => epaper_square::draw(&mut c, v),
             Class::EpaperWide => epaper_wide::draw(&mut c, v),
             Class::Mono128x64 => mono_128x64::draw(&mut c, v),
+            Class::Tft240x135 => tft_240x135::draw(&mut c, v),
         }
     }
 }

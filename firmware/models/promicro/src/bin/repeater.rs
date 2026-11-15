@@ -41,6 +41,8 @@ use meshcore::identity::LocalIdentity;
 use meshcore::mesh::{Mesh, MeshCtx};
 use meshcore::prefs::{NAME_MAX, NodePrefs};
 use meshcore::repeater::{BLE_OTA_WINDOW_MINS, BoardInfo, Repeater};
+#[cfg(feature = "t114")]
+use meshcore::timesync::{Clock, Source};
 use meshcore::util::{Shortest, to_hex};
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE};
 use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT};
@@ -68,6 +70,13 @@ const TRIAL_HEALTHY_MS: u64 = 120_000;
 /// Upstream's Pro Micro and T114 builds transmit at 22 dBm (`LORA_TX_POWER`).
 const DEFAULT_TX_DBM: i8 = 22;
 
+/// The clock follows the GPS this often while it has a fix (upstream `TIME_SYNC_INTERVAL`).
+#[cfg(feature = "t114")]
+const GPS_TIME_SYNC_MS: u64 = 30 * 60 * 1000;
+/// A fix that has held this long is trusted for the time (upstream waits out three checks).
+#[cfg(feature = "t114")]
+const GPS_FIX_SETTLE_MS: u64 = 3000;
+
 /// Wear-friendly: two sectors alternate, ~24 erases per sector per day.
 const CLOCK_SAVE_INTERVAL_MS: u64 = 30 * 60 * 1000;
 
@@ -85,6 +94,8 @@ bind_interrupts!(struct Irqs {
     SPI2 => spim::InterruptHandler<peripherals::SPI2>;
     SAADC => saadc::InterruptHandler;
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+    #[cfg(feature = "t114")]
+    SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
     TEMP => temp::InterruptHandler;
     EGU2_SWI2 => sd::SoftDeviceEvents;
 });
@@ -225,6 +236,10 @@ async fn main(spawner: Spawner) {
     for irq in [interrupt::USBD, interrupt::CLOCK_POWER, interrupt::SPI2, interrupt::SAADC, interrupt::TWISPI0, interrupt::TEMP] {
         irq.set_priority(Priority::P3);
     }
+    #[cfg(feature = "t114")]
+    for irq in [interrupt::SPIM3, interrupt::UARTE0] {
+        irq.set_priority(Priority::P3);
+    }
     // a watchdog still running from before a soft reset is taken over with the same settings
     let mut wcfg = wdt::Config::default();
     wcfg.timeout_ticks = 32_768 * WATCHDOG_SECS;
@@ -280,7 +295,13 @@ async fn main(spawner: Spawner) {
         .unwrap_or_else(|| NodePrefs { tx_power_dbm: DEFAULT_TX_DBM, ..Default::default() });
 
     // ---- the board on its pins; the radio: its supply, the receive side of the antenna switch, the chip
-    let board::Parts { mut radio, mut led, mut rxen, button: _button, mut battery, i2c, hold: _hold } = promicro::board_parts!(p, Irqs);
+    let parts = promicro::board_parts!(p, Irqs);
+    let board::Parts { mut radio, mut led, mut rxen, button, mut battery, i2c, hold: _hold, .. } = parts;
+    #[cfg(feature = "t114")]
+    {
+        spawner.spawn(promicro::tft::task(parts.screen).unwrap());
+        spawner.spawn(promicro::gps::task(parts.gps).unwrap());
+    }
     Timer::after_millis(10).await; // the radio powers up
     if let Err(e) = radio.init(prefs.radio, prefs.tx_power_dbm, prefs.rx_boosted_gain).await {
         println!("ERROR: radio init failed: {e:?}");
@@ -359,6 +380,7 @@ async fn main(spawner: Spawner) {
         bootloader_version: Some(board::bootloader_version()),
         ble_ota_name: sd::present().then(|| ota_name(&prefs.node_name)),
         sensor_scan: sensors.scan.clone(),
+        has_gps: cfg!(feature = "t114"),
         ..Default::default()
     };
     if sd::present() {
@@ -395,6 +417,17 @@ async fn main(spawner: Spawner) {
         room.app.start(&mut room.ctx);
         room
     });
+    // ---- the T114's GPS and screen (pages turned with the button)
+    #[cfg(feature = "t114")]
+    promicro::gps::GPS_ON.signal(mesh.app.prefs.gps_enabled);
+    #[cfg(feature = "t114")]
+    let mut ui = promicro::screen::RepeaterUi::new(button.is_low(), now_ms());
+    #[cfg(feature = "t114")]
+    let (mut gps_fix_since, mut next_gps_time) = (None::<u64>, 0u64);
+    #[cfg(not(feature = "t114"))]
+    let _ = &button; // held: it wakes the board from `poweroff`
+    #[cfg(feature = "t114")]
+    let mut ble_pin: Option<u32> = None;
     println!("Ready. Type CLI commands (e.g. 'get name', 'set name X', 'get radio', 'neighbors').");
 
     // ---- main loop
@@ -543,6 +576,49 @@ async fn main(spawner: Spawner) {
             }
         }
 
+        // the GPS for the `gps` CLI, and the clock from it once a fix has held for a moment, and
+        // again every half hour (upstream `MicroNMEALocationProvider::loop`)
+        #[cfg(feature = "t114")]
+        {
+            let reading = promicro::gps::reading();
+            mesh.app.board.gps = reading;
+            if let Some(r) = room.as_mut() {
+                r.app.board.gps = reading;
+            }
+            match reading.filter(|g| g.valid) {
+                Some(g) => {
+                    let since = *gps_fix_since.get_or_insert(now);
+                    if now >= since + GPS_FIX_SETTLE_MS
+                        && now >= next_gps_time
+                        && let Some(t) = g.time
+                    {
+                        next_gps_time = now + GPS_TIME_SYNC_MS;
+                        if t.abs_diff(mesh.ctx.current_time()) > 2 {
+                            info!("GPS: clock set to {t}");
+                            mesh.ctx.set_current_time(t);
+                        }
+                        mesh.app.timesync.note_set(&mesh.ctx, Clock::Trusted, Some(Source::Gps));
+                    }
+                }
+                None => gps_fix_since = None,
+            }
+        }
+
+        // the screen and the button
+        #[cfg(feature = "t114")]
+        {
+            let window = ble_pin.zip(ble_until).map(|(pin, until)| (pin, ota_name(&mesh.app.prefs.node_name), until));
+            if let Some(meshcore_ui::Action::ToggleUpdate) = ui.poll(&mut mesh, button.is_low(), window, now, BUILD_DATE) {
+                if ble_until.is_none() {
+                    let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "start ota ble");
+                } else if !BLE_CONNECTED.load(core::sync::atomic::Ordering::Relaxed) {
+                    (ble_until, ble_pin) = (None, None);
+                    ble::stop();
+                    println!("BLE update window closed with the button");
+                }
+            }
+        }
+
         // sensors for telemetry: each detected one takes the next channel from 2 up, in probe
         // order, as upstream numbers them
         if now >= next_sensors {
@@ -627,6 +703,11 @@ async fn main(spawner: Spawner) {
         }
         if let Some(pin) = fx.start_ble_ota {
             ble_until = Some(now + BLE_OTA_WINDOW_MINS as u64 * 60_000);
+            #[cfg(feature = "t114")]
+            {
+                ble_pin = Some(pin);
+                ui.wake(now);
+            }
             ble::start(ble::Params { name: ota_name(&mesh.app.prefs.node_name), pin, role: ble::Role::Window });
         }
         // the window stays open while an app is connected
@@ -635,6 +716,10 @@ async fn main(spawner: Spawner) {
                 ble_until = Some(now + 60_000);
             } else {
                 ble_until = None;
+                #[cfg(feature = "t114")]
+                {
+                    ble_pin = None;
+                }
                 ble::stop();
                 println!("BLE update window closed");
             }
@@ -677,6 +762,10 @@ async fn main(spawner: Spawner) {
             if rfx.apply_radio.is_some() || rfx.tx_power.is_some() || rfx.save_regions || rfx.erase || rfx.power_off {
                 println!("[room] radio, regions, erase and power are managed on the repeater: ignored");
             }
+        }
+        #[cfg(feature = "t114")]
+        if fx.gps {
+            promicro::gps::GPS_ON.signal(mesh.app.prefs.gps_enabled);
         }
         if fx.power_off {
             println!("Powering off (the button turns it on again)...");

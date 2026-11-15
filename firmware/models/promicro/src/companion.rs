@@ -17,6 +17,7 @@ use meshcore::ota::FirmwareTarget;
 use meshcore_fw_core::companion::{BleSetup, Board, Links, Platform};
 use meshcore_fw_core::sensors::Sensors;
 use meshcore_fw_core::storage::SharedStore;
+use meshcore_ui::{Page, View};
 
 use crate::board::{self, Battery, Led};
 use crate::flash::Flash;
@@ -108,8 +109,9 @@ impl Platform for Nrf {
         if !sd::enabled() {
             return Links::default();
         }
-        // a board without a screen always has a fixed PIN (upstream's 123456 unless set)
-        let pin = setup.pin.unwrap_or(123_456);
+        // a board without a screen always has a fixed PIN (upstream's 123456 unless set); one
+        // with a screen shows a new one for each pairing
+        let pin = setup.pin.unwrap_or(0);
         ble::start(ble::Params { name: setup.name, pin, role: ble::Role::Companion { bonds: setup.bonds } });
         spawner.spawn(ble::task().unwrap());
         Links { ble: true, tcp: false }
@@ -198,4 +200,47 @@ impl Board for ProMicro {
     fn button_down(&mut self) -> bool {
         self.button.is_low()
     }
+
+    fn has_screen(&self) -> bool {
+        cfg!(feature = "t114")
+    }
+
+    fn ui_pages(&self) -> &'static [Page] {
+        PAGES
+    }
+
+    fn show_view(&mut self, _view: &View) {
+        #[cfg(feature = "t114")]
+        crate::tft::SCREEN.signal(Some(_view.clone()));
+    }
+
+    fn screen_off(&mut self) {
+        #[cfg(feature = "t114")]
+        crate::tft::SCREEN.signal(None);
+    }
+
+    fn has_gps(&self) -> bool {
+        cfg!(feature = "t114")
+    }
+
+    fn set_gps(&mut self, _on: bool) {
+        #[cfg(feature = "t114")]
+        crate::gps::GPS_ON.signal(_on);
+    }
 }
+
+/// The interface's pages on the T114's screen; none on the Pro Micro (its button sends an advert).
+#[cfg(feature = "t114")]
+const PAGES: &[Page] = &[
+    Page::Home,
+    Page::Messages,
+    Page::Nearby,
+    Page::Radio,
+    Page::Bluetooth,
+    Page::Gps,
+    Page::Pull,
+    Page::Advert,
+    Page::PowerOff,
+];
+#[cfg(not(feature = "t114"))]
+const PAGES: &[Page] = &[];

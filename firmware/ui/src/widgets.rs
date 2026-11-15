@@ -13,9 +13,9 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{Circle, Line, Polyline, PrimitiveStyle, Rectangle};
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
-use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
 use crate::model::BleState;
+use crate::qr::Qr;
 use crate::text::cp1251;
 use crate::theme::Font;
 
@@ -89,8 +89,6 @@ pub fn wrap(font: &Font, text: &str, max: i32, max_lines: usize) -> Vec<String> 
     lines
 }
 
-/// The largest QR code drawn (version 10, 57 modules: a contact link with a long name).
-const QR_MAX_VERSION: Version = Version::new(10);
 /// Light modules around the code, which scanners need to find it (the standard asks for 4).
 const QR_QUIET: i32 = 2;
 
@@ -100,22 +98,9 @@ fn qr_fit(n: i32, max: i32) -> Option<(i32, i32)> {
     (scale > 0).then_some(((n + 2 * QR_QUIET) * scale, scale))
 }
 
-/// Encode `text` into `buf` (two buffers of [`QR_MAX_VERSION`]'s size, on the heap: on the stack
-/// they would grow every caller's frame, and the firmware's main loop draws the screen).
-fn qr_encode<'a>(text: &str, buf: &'a mut [u8]) -> Option<QrCode<'a>> {
-    let (out, temp) = buf.split_at_mut(QR_MAX_VERSION.buffer_len());
-    QrCode::encode_text(text, temp, out, QrCodeEcc::Low, Version::MIN, QR_MAX_VERSION, None, true).ok()
-}
-
-fn qr_buffer() -> Vec<u8> {
-    alloc::vec![0; 2 * QR_MAX_VERSION.buffer_len()]
-}
-
 /// The side [`Canvas::qr`] would draw `text` at in at most `max` pixels.
 pub fn qr_side(text: &str, max: i32) -> Option<i32> {
-    let mut buf = qr_buffer();
-    let qr = qr_encode(text, &mut buf)?;
-    qr_fit(qr.size(), max).map(|(side, _)| side)
+    qr_fit(Qr::encode(text.as_bytes())?.size(), max).map(|(side, _)| side)
 }
 
 /// Where texts and icons landed, layer by layer (a box over the page starts a new one).
@@ -280,8 +265,7 @@ impl<'a, D: DrawTarget<Color = BinaryColor>> Canvas<'a, D> {
     /// light as on paper.
     #[inline(never)]
     pub fn qr(&mut self, text: &str, x: i32, y: i32, max: i32, light_is_ink: bool) -> Option<i32> {
-        let mut buf = qr_buffer();
-        let qr = qr_encode(text, &mut buf)?;
+        let qr = Qr::encode(text.as_bytes())?;
         let n = qr.size();
         let (side, scale) = qr_fit(n, max)?;
         self.mark(Rectangle::new(Point::new(x, y), Size::new(side as u32, side as u32)), "qr");
@@ -289,7 +273,7 @@ impl<'a, D: DrawTarget<Color = BinaryColor>> Canvas<'a, D> {
         self.rect(x, y, side as u32, side as u32, Some(light));
         for my in 0..n {
             for mx in 0..n {
-                if qr.get_module(mx, my) {
+                if qr.get(mx, my) {
                     let (px, py) = (x + (QR_QUIET + mx) * scale, y + (QR_QUIET + my) * scale);
                     self.rect(px, py, scale as u32, scale as u32, Some(dark));
                 }

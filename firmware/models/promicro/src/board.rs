@@ -12,8 +12,8 @@
 //! SX1262 on SPI (SCK P0.19, MOSI P0.22, MISO P0.23, NSS P0.24), RESET P0.25, DIO1 P0.20, BUSY
 //! P0.17, DIO2 switching the antenna, a 1.8 V TCXO on DIO3; the button P1.10 (low while pressed),
 //! the LED P1.03 (active low), the battery on P0.04 (AIN2) behind a divider that P0.06 switches
-//! on; I2C on SDA P0.26, SCL P0.27. The ST7789 screen (power P0.03, backlight P0.15, both active
-//! low) and the GPS with the I2C connector's supply (P0.21) stay off.
+//! on; I2C on SDA P0.26, SCL P0.27; the ST7789 screen on SPIM3 (`tft`), the GPS socket on UARTE0
+//! (`gps`).
 
 use core::mem::MaybeUninit;
 
@@ -73,8 +73,14 @@ pub struct Parts {
     pub button: Input<'static>,
     pub battery: Battery,
     pub i2c: Twim<'static>,
-    /// Outputs that only have to stay as they are: the radio's supply, the T114's screen off.
+    /// Outputs that only have to stay as they are: the radio's supply.
     pub hold: heapless::Vec<Output<'static>, 4>,
+    /// The T114's screen, dark until its task shows a page.
+    #[cfg(feature = "t114")]
+    pub screen: crate::tft::Tft,
+    /// The T114's GPS socket, unpowered until switched on.
+    #[cfg(feature = "t114")]
+    pub gps: crate::gps::Gps,
 }
 
 /// The LED, lit while transmitting, at whichever level lights it.
@@ -175,12 +181,26 @@ macro_rules! board_parts {
     ($p:ident, $irqs:expr) => {{
         use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
         use embassy_nrf::{saadc, spim, twim};
-        let mut hold = heapless::Vec::new();
-        // the screen's supply and backlight off, as upstream's ST7789Display::turnOff
-        let _ = hold.push(Output::new($p.P0_03, Level::High, OutputDrive::Standard));
-        let _ = hold.push(Output::new($p.P0_15, Level::High, OutputDrive::Standard));
+        let mut tcfg = spim::Config::default();
+        tcfg.frequency = spim::Frequency::M32;
+        // the screen dark and unpowered, as upstream's ST7789Display::turnOff
+        let screen = $crate::tft::Tft {
+            spi: spim::Spim::new_txonly($p.SPI3, $irqs, $p.P1_08, $p.P1_09, tcfg),
+            cs: Output::new($p.P0_11, Level::Low, OutputDrive::Standard),
+            dc: Output::new($p.P0_12, Level::Low, OutputDrive::Standard),
+            reset: Output::new($p.P0_02, Level::Low, OutputDrive::Standard),
+            power: Output::new($p.P0_03, Level::High, OutputDrive::Standard),
+            light: Output::new($p.P0_15, Level::High, OutputDrive::Standard),
+        };
         // the GPS and the I2C connector unpowered
-        let _ = hold.push(Output::new($p.P0_21, Level::Low, OutputDrive::Standard));
+        let gps = $crate::gps::Gps {
+            uarte: $p.UARTE0,
+            rx: $p.P1_05,
+            tx: $p.P1_07,
+            power: Output::new($p.P0_21, Level::Low, OutputDrive::Standard),
+            reset: Output::new($p.P1_06, Level::Low, OutputDrive::Standard),
+            wake: Output::new($p.P1_02, Level::Low, OutputDrive::Standard),
+        };
         let mut scfg = spim::Config::default();
         scfg.frequency = spim::Frequency::M2;
         let spi = spim::Spim::new($p.SPI2, $irqs, $p.P0_19, $p.P0_23, $p.P0_22, scfg);
@@ -206,7 +226,9 @@ macro_rules! board_parts {
                 enable: Some(Output::new($p.P0_06, Level::Low, OutputDrive::Standard)),
             },
             i2c: twim::Twim::new($p.TWISPI0, $irqs, $p.P0_26, $p.P0_27, icfg, TWIM_BUF.init([0; 8])),
-            hold,
+            hold: heapless::Vec::new(),
+            screen,
+            gps,
         }
     }};
 }
@@ -265,9 +287,16 @@ pub fn system_off() -> ! {
         w.set_pin(13, true); // radio supply
         w.set_pin(17, true); // RXEN
     });
-    // the LED off; the screen and the GPS are off already
+    // the LED off; the screen dark and unpowered, the GPS too
     #[cfg(feature = "t114")]
-    pac::P1.outset().write(|w| w.set_pin(3, true));
+    {
+        pac::P1.outset().write(|w| w.set_pin(3, true));
+        pac::P0.outset().write(|w| {
+            w.set_pin(3, true); // screen supply
+            w.set_pin(15, true); // screen light
+        });
+        pac::P0.outclr().write(|w| w.set_pin(21, true)); // GPS supply
+    }
     pac::P1.pin_cnf(BUTTON_PIN).modify(|w| w.set_sense(pac::gpio::vals::Sense::Low));
     // the POWER registers are the SoftDevice's while it runs (the companion's BLE)
     if crate::sd::enabled() {

@@ -16,8 +16,14 @@ pub mod board;
 pub mod companion;
 pub mod console;
 pub mod flash;
+#[cfg(feature = "t114")]
+pub mod gps;
 pub mod ota;
+#[cfg(feature = "t114")]
+pub mod screen;
 pub mod sd;
+#[cfg(feature = "t114")]
+pub mod tft;
 pub mod usb_frames;
 
 /// The node's data in the internal flash (`meshcore_fw_core::storage`, the 64 KiB layout
