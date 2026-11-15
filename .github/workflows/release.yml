@@ -76,6 +76,9 @@ jobs:
       # the Pro Micro's update installer: its swap, with the power going at any step
       - run: cargo test --lib --locked --target x86_64-unknown-linux-gnu
         working-directory: firmware/models/promicro/installer
+      # the T-Echo's: the same swap between its app flash and its QSPI flash
+      - run: cargo test --lib --locked --target x86_64-unknown-linux-gnu
+        working-directory: firmware/models/t-echo/installer
       # the on-device interface: every page on every screen class, the QR encoder against qrcodegen
       - run: cargo test --locked
         working-directory: firmware/ui

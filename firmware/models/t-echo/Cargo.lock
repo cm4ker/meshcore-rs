@@ -1870,6 +1870,7 @@ dependencies = [
  "meshcore-ui",
  "nrf-mpsl",
  "nrf-sdc",
+ "sha2",
  "static_cell",
  "trouble-host",
 ]

@@ -1,5 +1,6 @@
 //! The nRF52840 under the companion loop: BLE (Nordic's SDC), the USB port, the watchdog, reboots.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
@@ -27,6 +28,9 @@ pub struct Nrf {
     pub watchdog: Option<WatchdogHandle>,
     /// The flash that stages updates.
     pub store: Option<SharedStore<Qspi<'static>>>,
+    /// A fresh update runs on trial (`ota::check_trial`): the staging area holds the firmware to
+    /// go back to.
+    pub in_trial: bool,
 }
 
 impl Platform for Nrf {
@@ -48,6 +52,30 @@ impl Platform for Nrf {
     fn ota_target(&mut self) -> Option<Box<dyn FirmwareTarget>> {
         let target = StagingTarget::new(self.store.clone()?)?;
         Some(Box::new(target))
+    }
+
+    fn in_trial(&self) -> bool {
+        self.in_trial
+    }
+
+    fn confirm_trial(&mut self) {
+        if let Some(s) = &self.store {
+            ota::confirm(s);
+        }
+        self.in_trial = false;
+        log::info!("OTA: new firmware confirmed");
+    }
+
+    fn other_slot(&mut self) -> (bool, String, u32) {
+        let Some(s) = &self.store else {
+            return (false, String::new(), 0);
+        };
+        let (kept, prev, skip, _) = ota::previous(s);
+        (kept, prev, skip)
+    }
+
+    fn rollback(&mut self) -> bool {
+        self.store.as_ref().is_some_and(ota::rollback)
     }
 
     fn random(&mut self) -> u32 {

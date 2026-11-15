@@ -1,33 +1,21 @@
 //! The T-Echo firmware's installer. An update arrives in the QSPI flash, where the firmware has
-//! verified it; to install it, the firmware points the first page of the app flash at this
-//! program and resets. This copies the image into the app flash, the first page last, and resets
-//! into it.
+//! verified it; to install it, the firmware saves the first page of the app flash there too,
+//! points that page at this program and resets. This swaps the image with the app (`lib.rs`), the
+//! first page last, and resets into it: the firmware that ran stays in the QSPI flash, to go back
+//! to.
 //!
-//! A power loss along the way leaves the first page pointing here, so the copy starts over at the
-//! next boot (pages already in place are skipped). Only rewriting the first page itself, a few
-//! milliseconds, is exposed: the page is written last word first, so until it is complete the
-//! bootloader sees no app and stays in its USB drive mode. With nothing valid to install, this
-//! restarts into that mode too: the board then needs a firmware copied over USB.
+//! A power loss along the way leaves the first page pointing here, so the swap goes on at the next
+//! boot. With nothing valid to install, the firmware that ran gets its first page back and starts
+//! again; with no firmware left to start, this restarts into the bootloader's USB drive mode: the
+//! board then needs a firmware copied over USB.
 
 #![no_std]
 #![no_main]
 
 use cortex_m_rt::{ExceptionFrame, entry, exception};
 use nrf_pac as pac;
-use sha2::{Digest, Sha256};
+use t_echo_installer::{Flash, Outcome, QSPI};
 
-// shared with the firmware (src/ota.rs)
-const APP_START: u32 = 0x26000;
-const APP_END: u32 = 0xED000;
-const STAGING: u32 = 0x11_0000;
-const RECORD: u32 = 0x1F_F000;
-const RECORD_MAGIC: &[u8; 8] = b"MCRS-INS";
-const TRAILER_MAGIC: &[u8; 8] = b"MCRS-NRF";
-const TRAILER_LEN: u32 = 64;
-const CHIP: u32 = 0x52840;
-
-const PAGE: u32 = 4096;
-const WORDS: usize = (PAGE / 4) as usize;
 /// `GPREGRET` value that keeps the Adafruit bootloader in its USB drive mode.
 const DFU_MAGIC_UF2_RESET: u8 = 0x57;
 /// The blue LED, lit while installing (active low).
@@ -38,74 +26,74 @@ fn main() -> ! {
     pac::P0.outclr().write(|w| w.set_pin(LED_PIN, true));
     pac::P0.pin_cnf(LED_PIN).write(|w| w.set_dir(pac::gpio::vals::Dir::Output));
     qspi_init();
-    let ok = install();
+    let outcome = t_echo_installer::install(&mut Flashes);
     pac::P0.outset().write(|w| w.set_pin(LED_PIN, true));
-    reset(if ok { 0 } else { DFU_MAGIC_UF2_RESET })
+    reset(if outcome == Outcome::Broken { DFU_MAGIC_UF2_RESET } else { 0 })
 }
 
-fn install() -> bool {
-    // the request: `[magic 8][image length u32][its complement u32]`
-    let mut rec = [0u32; 4];
-    qspi_read(RECORD, &mut rec);
-    let total = rec[2];
-    if bytes(&rec)[..8] != RECORD_MAGIC[..]
-        || rec[3] != !total
-        || total % 4 != 0
-        || total < PAGE + TRAILER_LEN
-        || total > APP_END - APP_START
-    {
-        return false;
-    }
-    // the image's trailer, and the app's hash in it
-    let app_len = total - TRAILER_LEN;
-    let mut trailer = [0u32; (TRAILER_LEN / 4) as usize];
-    qspi_read(STAGING + app_len, &mut trailer);
-    let t = bytes(&trailer);
-    if t[..8] != TRAILER_MAGIC[..] || trailer[2] != app_len || trailer[3] != APP_START || trailer[4] != CHIP {
-        return false;
-    }
-    let mut buf = [0u32; WORDS];
-    let mut hash = Sha256::new();
-    let mut offset = 0;
-    while offset < app_len {
-        let n = (app_len - offset).min(PAGE);
-        qspi_read(STAGING + offset, &mut buf[..n.div_ceil(4) as usize]);
-        hash.update(&bytes(&buf)[..n as usize]);
-        offset += n;
-        feed_watchdog();
-    }
-    if hash.finalize()[..] != t[32..64] {
-        return false;
-    }
-    // every page but the first, then the first: from then on the bootloader starts the new app
-    let pages = total.div_ceil(PAGE);
-    (1..pages).all(|p| copy_page(p, total, &mut buf)) && copy_page(0, total, &mut buf)
-}
+/// The app flash through the NVMC, the QSPI flash from [`QSPI`] up.
+struct Flashes;
 
-/// Bring page `p` of the app flash in line with the image; false if it does not read back.
-fn copy_page(p: u32, total: u32, buf: &mut [u32; WORDS]) -> bool {
-    feed_watchdog();
-    let n = (total - p * PAGE).min(PAGE);
-    buf.fill(0xFFFF_FFFF);
-    qspi_read(STAGING + p * PAGE, &mut buf[..(n / 4) as usize]);
-    let addr = APP_START + p * PAGE;
-    let flash = |i: usize| unsafe { core::ptr::read_volatile((addr as *const u32).add(i)) };
-    if (0..WORDS).all(|i| flash(i) == buf[i]) {
-        return true; // in place already (an earlier attempt, or unchanged)
-    }
-    nvmc_erase(addr);
-    // the first page last word first: its first word (the stack pointer) marks it complete
-    for i in (0..WORDS).rev() {
-        if buf[i] != 0xFFFF_FFFF {
-            nvmc_write(addr + 4 * i as u32, buf[i]);
+impl Flash for Flashes {
+    fn read(&mut self, addr: u32, out: &mut [u32]) {
+        if addr >= QSPI {
+            // the QSPI's DMA takes a word-aligned buffer in RAM, as `out` is
+            qspi_task(addr - QSPI, out.as_ptr() as u32, out.len() as u32 * 4, Task::Read);
+        } else {
+            for (i, w) in out.iter_mut().enumerate() {
+                // SAFETY: a word-aligned address in the app flash, which is memory-mapped
+                *w = unsafe { core::ptr::read_volatile((addr as *const u32).add(i)) };
+            }
         }
     }
-    (0..WORDS).all(|i| flash(i) == buf[i])
-}
 
-fn bytes(words: &[u32]) -> &[u8] {
-    // SAFETY: u32 has no padding and is at least as aligned as u8
-    unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, words.len() * 4) }
+    fn erase(&mut self, page: u32) {
+        if page >= QSPI {
+            qspi_task(page - QSPI, 0, 0, Task::Erase);
+        } else {
+            pac::NVMC.config().write(|w| w.set_wen(pac::nvmc::vals::Wen::Een));
+            pac::NVMC.erasepage().write_value(page);
+            while !pac::NVMC.ready().read().ready() {}
+            pac::NVMC.config().write(|w| w.set_wen(pac::nvmc::vals::Wen::Ren));
+        }
+    }
+
+    fn write(&mut self, addr: u32, words: &[u32]) {
+        if addr >= QSPI {
+            // through RAM (the DMA cannot read the app flash), the first word last
+            let mut buf = [0u32; 64];
+            let mut put = |at: usize, part: &[u32]| {
+                for (k, chunk) in part.chunks(buf.len()).enumerate() {
+                    buf[..chunk.len()].copy_from_slice(chunk);
+                    let to = addr - QSPI + 4 * (at + k * buf.len()) as u32;
+                    qspi_task(to, buf.as_ptr() as u32, chunk.len() as u32 * 4, Task::Write);
+                }
+            };
+            put(1, &words[1.min(words.len())..]);
+            put(0, &words[..1.min(words.len())]);
+            return;
+        }
+        pac::NVMC.config().write(|w| w.set_wen(pac::nvmc::vals::Wen::Wen));
+        for (i, &word) in words.iter().enumerate().rev().filter(|&(_, &w)| w != 0xFFFF_FFFF) {
+            // SAFETY: a word-aligned address in the app flash, erased just before
+            unsafe { core::ptr::write_volatile((addr as *mut u32).add(i), word) };
+            while !pac::NVMC.ready().read().ready() {}
+        }
+        pac::NVMC.config().write(|w| w.set_wen(pac::nvmc::vals::Wen::Ren));
+    }
+
+    /// The firmware's watchdog keeps running through the reset that started us.
+    fn feed(&mut self) {
+        let wdt = pac::WDT;
+        if wdt.runstatus().read().runstatus() {
+            let enabled = wdt.rren().read().0;
+            for i in 0..8 {
+                if enabled & (1 << i) != 0 {
+                    wdt.rr(i).write(|w| w.set_rr(pac::wdt::vals::Rr::Reload));
+                }
+            }
+        }
+    }
 }
 
 /// The QSPI flash as the firmware sets it up (P0.12 powers it; SCK P1.14, CSN P1.15, IO0-3 P1.12
@@ -157,42 +145,39 @@ fn qspi_init() {
     while q.events_ready().read() == 0 {}
 }
 
-fn qspi_read(addr: u32, dst: &mut [u32]) {
+enum Task {
+    Read,
+    Write,
+    Erase,
+}
+
+/// One QSPI job, waited out: the peripheral raises READY once the flash has finished an erase or
+/// a write too (it polls the flash's status). `ram`, `len`: the buffer for a read or a write.
+fn qspi_task(at: u32, ram: u32, len: u32, task: Task) {
     let q = pac::QSPI;
-    q.read().src().write_value(addr);
-    q.read().dst().write_value(dst.as_mut_ptr() as u32);
-    q.read().cnt().write(|w| w.set_cnt(dst.len() as u32 * 4));
-    q.events_ready().write_value(0);
-    q.tasks_readstart().write_value(1);
-    while q.events_ready().read() == 0 {}
-}
-
-fn nvmc_erase(addr: u32) {
-    pac::NVMC.config().write(|w| w.set_wen(pac::nvmc::vals::Wen::Een));
-    pac::NVMC.erasepage().write_value(addr);
-    while !pac::NVMC.ready().read().ready() {}
-    pac::NVMC.config().write(|w| w.set_wen(pac::nvmc::vals::Wen::Ren));
-}
-
-fn nvmc_write(addr: u32, word: u32) {
-    pac::NVMC.config().write(|w| w.set_wen(pac::nvmc::vals::Wen::Wen));
-    // SAFETY: a word-aligned address in the app flash, erased just before
-    unsafe { core::ptr::write_volatile(addr as *mut u32, word) };
-    while !pac::NVMC.ready().read().ready() {}
-    pac::NVMC.config().write(|w| w.set_wen(pac::nvmc::vals::Wen::Ren));
-}
-
-/// The firmware's watchdog keeps running through the reset that started us.
-fn feed_watchdog() {
-    let wdt = pac::WDT;
-    if wdt.runstatus().read().runstatus() {
-        let enabled = wdt.rren().read().0;
-        for i in 0..8 {
-            if enabled & (1 << i) != 0 {
-                wdt.rr(i).write(|w| w.set_rr(pac::wdt::vals::Rr::Reload));
-            }
+    match task {
+        Task::Read => {
+            q.read().src().write_value(at);
+            q.read().dst().write_value(ram);
+            q.read().cnt().write(|w| w.set_cnt(len));
+        }
+        Task::Write => {
+            q.write().src().write_value(ram);
+            q.write().dst().write_value(at);
+            q.write().cnt().write(|w| w.set_cnt(len));
+        }
+        Task::Erase => {
+            q.erase().ptr().write_value(at);
+            q.erase().len().write(|w| w.set_len(pac::qspi::vals::Len::_4kb));
         }
     }
+    q.events_ready().write_value(0);
+    match task {
+        Task::Read => q.tasks_readstart().write_value(1),
+        Task::Write => q.tasks_writestart().write_value(1),
+        Task::Erase => q.tasks_erasestart().write_value(1),
+    }
+    while q.events_ready().read() == 0 {}
 }
 
 fn reset(gpregret: u8) -> ! {

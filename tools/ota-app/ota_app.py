@@ -326,8 +326,9 @@ async def main():
         board = ("xiao-c6" if "Xiao" in model else "t-echo" if "T-Echo" in model
                  else "promicro" if "ProMicro" in model else "heltec")
         images = args.images or (None if FROZEN else REPO / "firmware" / "models" / board / "images")
-        # the ESP boards keep the previous firmware and fall back to it; the T-Echo has room for one
-        after = ("it installs the image and restarts" if board == "t-echo"
+        # every board keeps the previous firmware and falls back to it; the T-Echo only from
+        # 0.9.0-dev.4 on (before, it copied the image over its own)
+        after = ("it installs the image and restarts, on trial from 0.9.0-dev.4 on" if board == "t-echo"
                  else "on trial until it has run healthy for 2 minutes")
 
         info = await link.request(bytes([OTA_INFO]))

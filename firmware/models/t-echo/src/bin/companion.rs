@@ -222,6 +222,8 @@ async fn main(spawner: Spawner) {
     if let Some(s) = &store {
         t_echo::ota::clear_request(s);
     }
+    // count trial boots of a fresh update before anything can hang
+    let in_trial = store.as_ref().is_some_and(t_echo::ota::check_trial);
     info!("flash ready");
 
     // ---- radio
@@ -294,7 +296,7 @@ async fn main(spawner: Spawner) {
     busy_led.set_high();
     stage_led(GREEN, false);
     let seed = u64::from_le_bytes(entropy[..8].try_into().unwrap());
-    let platform = Nrf { sdc, seed, watchdog, store: store.clone() };
+    let platform = Nrf { sdc, seed, watchdog, store: store.clone(), in_trial };
     let cfg = Config {
         // the Omsk mesh (upstream builds: `LORA_FREQ` etc. of the variant)
         radio: RadioParams { freq_mhz: 868.731, bw_khz: 62.5, sf: 7, cr: 7 },
