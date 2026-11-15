@@ -71,9 +71,10 @@ jobs:
       - run: cargo test --locked -p meshcore
         env:
           RUSTFLAGS: --cfg curve25519_dalek_bits="32"
-      # deltas taken as plans to apply in place (the T114's firmware)
+      # deltas taken as plans to apply in place (the Pro Micro's and the T114's firmware)
       - run: cargo test --locked -p meshcore --features inplace --lib ota
-      # the Pro Micro's update installer: its swap, with the power going at any step
+      # the Pro Micro's update installer: the swap it took updates by before (the way back to
+      # them), with the power going at any step
       - run: cargo test --lib --locked --target x86_64-unknown-linux-gnu
         working-directory: firmware/models/promicro/installer
       # the T-Echo's: the same swap between its app flash and its QSPI flash
