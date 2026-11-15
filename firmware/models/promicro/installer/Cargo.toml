@@ -3,9 +3,16 @@ edition      = "2024"
 name         = "promicro-installer"
 rust-version = "1.88"
 version      = "0.1.0"
-description  = "Swaps a staged firmware update with the Pro Micro's app flash (both in its internal flash); resumes after a power loss"
+description  = "Applies a staged plan over the app flash in place (meshcore-inplace), or swaps a firmware back in as the Pro Micro took updates before; resumes after a power loss"
 
-# the swap itself, tested on the host: cargo test --lib --target <host triple>
+[features]
+# the swap the Pro Micro took its updates by before they went in place: its way back to then
+swap = []
+# the T114's LED
+t114 = []
+
+# the swap itself, tested on the host: cargo test --lib --target <host triple> (the plans with the
+# protocol core's: cargo test -p meshcore-inplace)
 [lib]
 bench = false
 
@@ -16,12 +23,13 @@ test = false
 bench = false
 
 [dependencies]
+meshcore-inplace = { path = "../../../../crates/inplace", default-features = false }
 # its compact backend (.cargo/config.toml): the unrolled one alone is 7 KB
 sha2 = { version = "0.11.1", default-features = false }
 
 [target.'cfg(target_os = "none")'.dependencies]
 cortex-m = "0.7.7"
-# set-vtor: faults go to our own handlers, not through the app's (half-copied) vector table
+# set-vtor: faults go to our own handlers, not through the app's (half-written) vector table
 cortex-m-rt = { version = "0.7.5", features = ["set-vtor"] }
 nrf-pac = { version = "0.4.0", features = ["nrf52840"] }
 

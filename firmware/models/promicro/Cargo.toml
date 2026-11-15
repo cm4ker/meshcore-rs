@@ -5,10 +5,13 @@ rust-version = "1.88"
 version      = "0.1.0"
 
 [features]
-# SHTC3 / SHT4X hand drivers. Off by default: the Pro Micro's UF2 region is at its ceiling with
-# AHTX0 + BME280 + BMP280 + INA219 + SHT3X + the descriptor engine, so these opt in on a board (or
-# a trimmed build) that has the room. Linear sensors need no feature — add them with `sensor add`.
+# SHTC3 / SHT4X hand drivers. Off by default: while nodes that took updates by the swap remain,
+# the Pro Micro's image must fit the 340 KiB app slot they had (src/ota.rs), so these opt in on a
+# board (or a trimmed build) that has the room. Linear sensors need no feature — add them with
+# `sensor add`.
 extra-sensors = ["meshcore-fw-core/extra-sensors"]
+# the T114's installer (its LED; no swap: it never took updates that way)
+t114 = []
 
 [lib]
 test = false
@@ -45,7 +48,10 @@ static_cell = "2.1.1"
 log = "0.4.27"
 heapless = "0.9"
 embedded-storage = "0.3"
-meshcore = { path = "../../../crates/meshcore" }
+# deltas applied in place (src/ota.rs)
+meshcore = { path = "../../../crates/meshcore", features = ["inplace"] }
+meshcore-inplace = { path = "../../../crates/inplace" }
+sha2 = { version = "0.11.1", default-features = false }
 meshcore-fw-core = { version = "0.1.0", path = "../../fw-core" }
 # the Diffie-Hellman of LE Secure Connections pairing (src/ble.rs)
 p256 = { version = "0.13.2", default-features = false, features = ["arithmetic"] }

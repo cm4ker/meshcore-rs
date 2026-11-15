@@ -32,7 +32,7 @@ use static_cell::StaticCell;
 use crate::board::{self, Battery, Led, Parts};
 use crate::companion::Nrf;
 use crate::flash::Flash;
-use crate::{DATA_REGION, Spec, console, sd, usb_frames};
+use crate::{COMPANION_ASIDE, COMPANION_REGION, DATA_REGION, Spec, console, sd, usb_frames};
 
 /// Without a pass of the main loop for this long, the watchdog restarts the board. Long, as the
 /// watchdog keeps running into the UF2 bootloader (the 1200 baud touch is a soft reset), which
@@ -131,8 +131,7 @@ where
 
     // ---- persistent state
     let flash = Flash::new(Nvmc::new(chip.nvmc));
-    let (region, aside, before) = spec.companion;
-    let mut store = Store::with_regions(flash, DATA_REGION, Some(region)).with_lending(aside, before);
+    let mut store = Store::with_regions(flash, DATA_REGION, Some(COMPANION_REGION)).with_lending(COMPANION_ASIDE, spec.companion_before);
     // a page takes ~85 ms to erase: the region (~7 s) fits in the watchdog's time
     match store.mount() {
         Mount::Ready | Mount::Fresh => {}

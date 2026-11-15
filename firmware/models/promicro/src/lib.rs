@@ -22,6 +22,8 @@ pub mod repeater_app;
 pub mod sd;
 pub mod usb_frames;
 
+use meshcore_fw_core::storage::Before;
+
 /// The board, as the repeater and the companion name and measure it.
 pub struct Spec {
     /// In the boot log.
@@ -37,12 +39,11 @@ pub struct Spec {
     pub batt_mv_per_lsb: f32,
     /// System OFF, which only the button ends; the radio is asleep, the SoftDevice off.
     pub system_off: fn() -> !,
-    /// How updates come in and go on ([`ota::SWAP`] on the Pro Micro).
+    /// How updates come in and go on ([`ota::IN_PLACE_AFTER_SWAP`] on the Pro Micro).
     pub updates: &'static dyn ota::Updates,
-    /// The companion's data, lent to its updates: its region, where it waits meanwhile, and the
-    /// region's size in the layout before the advert ring ([`COMPANION_REGION`],
-    /// [`COMPANION_ASIDE`], [`COMPANION_REGION_BEFORE`] on the Pro Micro).
-    pub companion: ((u32, u32), [(u32, u32); 2], u32),
+    /// Where the companion's data was laid out before ([`COMPANION_BEFORE`] on the Pro Micro),
+    /// moved from at the first start.
+    pub companion_before: Option<Before>,
     /// The binary's `BUILD_EPOCH` and `BUILD_DATE`.
     pub build_epoch: &'static str,
     pub build_date: &'static str,
@@ -60,18 +61,18 @@ pub const DATA_REGION: (u32, u32) = (0xDA000, 0x10000);
 pub const DATA_OVERFLOW: (u32, u32) = (0xD6000, 0x2000);
 
 /// The companion's data (identity, contacts, channels, paired phones): the repeater's staging area
-/// (`ota`), as much of it as an update of the whole app slot swaps (the slot and a spare page).
-/// Contacts need more room than the flash has besides, so the companion lends it to its updates
-/// (`Store::with_lending`): the data waits in [`COMPANION_ASIDE`] meanwhile. Going back to the
-/// repeater keeps its own data ([`DATA_REGION`], [`DATA_OVERFLOW`]); its next update takes the
-/// area over.
-pub const COMPANION_REGION: (u32, u32) = (0x7B000, 0xD1000 - 0x7B000);
+/// (`ota`), up to where the data waits while an update is there. Contacts need more room than the
+/// flash has besides, so the companion lends it to its updates (`Store::with_lending`): the data
+/// waits in [`COMPANION_ASIDE`] meanwhile. Going back to the repeater keeps its own data
+/// ([`DATA_REGION`], [`DATA_OVERFLOW`]); its next update takes the area over.
+pub const COMPANION_REGION: (u32, u32) = (0x8F000, 0xD1000 - 0x8F000);
 
 /// Where the companion's data waits while an update is in [`COMPANION_REGION`]: the rest of the
 /// staging area below the sensors' blob, and upstream's file system (which goes then: upstream's
 /// firmware put back makes a new identity).
 pub const COMPANION_ASIDE: [(u32, u32); 2] = [(0xD1000, 0xD6000 - 0xD1000), (0xED000, 0xF4000 - 0xED000)];
 
-/// [`COMPANION_REGION`] before the companion took updates (release #90 and before): up to the
-/// sensors' blob, its adverts in a table.
-pub const COMPANION_REGION_BEFORE: u32 = 0xD6000 - 0x7B000;
+/// The Pro Micro's [`COMPANION_REGION`] before its updates went in place: from 0x7B000, the end of
+/// its app slot then, to 0xD1000; before the companion took updates (release #90 and before), up
+/// to the sensors' blob, its adverts in a table.
+pub const COMPANION_BEFORE: Before = Before { base: 0x7B000, ring: 0xD1000 - 0x7B000, table: 0xD6000 - 0x7B000 };

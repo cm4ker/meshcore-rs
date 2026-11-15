@@ -948,6 +948,7 @@ dependencies = [
  "ed25519-dalek",
  "hmac",
  "libm",
+ "meshcore-inplace",
  "miniz_oxide",
  "sha2",
 ]
@@ -968,6 +969,10 @@ dependencies = [
  "meshcore",
  "meshcore-ui",
 ]
+
+[[package]]
+name = "meshcore-inplace"
+version = "0.1.0"
 
 [[package]]
 name = "meshcore-ui"
@@ -1100,7 +1105,9 @@ dependencies = [
  "log",
  "meshcore",
  "meshcore-fw-core",
+ "meshcore-inplace",
  "p256",
+ "sha2",
  "static_cell",
 ]
 

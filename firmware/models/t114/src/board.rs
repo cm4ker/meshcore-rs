@@ -27,8 +27,8 @@ pub const fn spec(build_epoch: &'static str, build_date: &'static str) -> Spec {
         usb: (0x239A, 0x8029, "HT-n5262"),
         batt_mv_per_lsb: BATT_MV_PER_LSB,
         system_off,
-        updates: &crate::ota::IN_PLACE,
-        companion: (crate::ota::COMPANION_REGION, promicro::COMPANION_ASIDE, crate::ota::COMPANION_REGION.1),
+        updates: &promicro::ota::IN_PLACE,
+        companion_before: None,
         build_epoch,
         build_date,
     }

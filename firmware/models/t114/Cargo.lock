@@ -1105,7 +1105,9 @@ dependencies = [
  "log",
  "meshcore",
  "meshcore-fw-core",
+ "meshcore-inplace",
  "p256",
+ "sha2",
  "static_cell",
 ]
 
@@ -1369,15 +1371,12 @@ dependencies = [
  "embassy-time",
  "embedded-alloc",
  "embedded-graphics",
- "embedded-storage",
  "heapless 0.9.3",
  "log",
  "meshcore",
  "meshcore-fw-core",
- "meshcore-inplace",
  "meshcore-ui",
  "promicro",
- "sha2",
  "static_cell",
 ]
 

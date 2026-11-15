@@ -1,5 +1,8 @@
-//! How the Pro Micro's installer puts a staged update in place, apart from the hardware
-//! (`main.rs`), so it runs on the host too: `cargo test --lib --target <host triple>`.
+//! How the Pro Micro took its updates before they went in place (`meshcore_inplace`), apart from
+//! the hardware (`main.rs`), so it runs on the host too: `cargo test --lib --target <host
+//! triple>`. Its app flash ended at 0x7B000 then, and the staging area began there. The first
+//! firmware with updates in place came this way, and the one it replaced is still whole in that
+//! staging area: going back to it is this swap, which that firmware asks for with this request.
 //!
 //! The update waits in the staging area, verified by the firmware, which then saved the first
 //! page of its own app flash at [`SAVED_FIRST`], pointed that page at the installer and reset.
@@ -16,9 +19,10 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub use meshcore_inplace::{Flash, Outcome};
 use sha2::{Digest, Sha256};
 
-// shared with the firmware (../src/ota.rs)
+// shared with the firmware (../src/ota.rs, `SWAP_*`)
 pub const APP_START: u32 = 0x26000;
 pub const APP_END: u32 = 0x7B000;
 pub const STAGING: u32 = 0x7B000;
@@ -36,23 +40,9 @@ const CHIP: u32 = 0x52840;
 pub const PAGE: u32 = 4096;
 const WORDS: usize = (PAGE / 4) as usize;
 
-/// The internal flash: memory-mapped reads, page erases, word writes (bits go from 1 to 0 only).
-pub trait Flash {
-    fn read(&self, addr: u32) -> u32;
-    fn erase(&mut self, page: u32);
-    fn write(&mut self, addr: u32, word: u32);
-    /// Long work in between: the watchdog.
-    fn feed(&mut self) {}
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    /// The new firmware is in place.
-    Installed,
-    /// Nothing valid to install: the firmware that ran is back as it was.
-    Kept,
-    /// The flash did not take a page, or there is no firmware to start: a UF2 over USB is needed.
-    Broken,
+/// The request is a swap's (rather than a plan's to apply in place).
+pub fn requested(f: &impl Flash) -> bool {
+    request(f).is_some()
 }
 
 pub fn install(f: &mut impl Flash) -> Outcome {

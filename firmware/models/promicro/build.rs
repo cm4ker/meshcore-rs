@@ -16,16 +16,18 @@ fn main() {
 }
 
 /// The update installer (installer/), built as its own program and carried as a flat image
-/// (src/ota.rs puts it in place before an update).
+/// (src/ota.rs puts it in place before an update): the Pro Micro's with the swap it took its
+/// updates by before, the T114's (feature `t114`) with its LED.
 fn build_installer(out: &Path) {
-    for f in ["installer/src", "installer/Cargo.toml", "installer/memory.x", "installer/build.rs", "installer/.cargo/config.toml"] {
+    for f in ["installer/src", "installer/Cargo.toml", "installer/memory.x", "installer/build.rs", "installer/.cargo/config.toml", "../../../crates/inplace/src"] {
         println!("cargo:rerun-if-changed={f}");
     }
+    let features = if std::env::var_os("CARGO_FEATURE_T114").is_some() { "t114" } else { "swap" };
     let target_dir = out.join("installer-target");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
     cmd.current_dir("installer")
-        .args(["build", "--release", "--target", "thumbv7em-none-eabihf", "--target-dir"])
+        .args(["build", "--release", "--target", "thumbv7em-none-eabihf", "--features", features, "--target-dir"])
         .arg(&target_dir);
     // our own build's settings are not the installer's
     for (k, _) in std::env::vars() {

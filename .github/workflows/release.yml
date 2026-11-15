@@ -257,6 +257,13 @@ jobs:
           cargo build --locked --release
           for role in repeater companion; do
             python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role $out/promicro-$role.uf2 --bin $out/promicro-$role.bin
+            # a node that still swaps its updates in (before 0.9.0-dev.4) takes an image of its app
+            # slot at most: 340 KiB (src/ota.rs)
+            size=$(stat -c %s $out/promicro-$role.bin)
+            if [ "$size" -gt 348160 ]; then
+              echo "::error::promicro-$role is $size bytes: Pro Micros that swap their updates in take 348160 at most"
+              exit 1
+            fi
           done
           # the companion for web flashers too (serial DFU); not the repeater: the bootloader stages
           # an image that size over the repeater's data, and keeps a CRC that turns its updates off
