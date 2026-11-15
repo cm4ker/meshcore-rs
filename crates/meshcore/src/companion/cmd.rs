@@ -215,6 +215,7 @@ impl Companion {
                 let secs = u32_at(1);
                 if secs >= ctx.current_time() {
                     ctx.set_current_time(secs);
+                    self.timesync.note_set(ctx, crate::timesync::Clock::Approx, None);
                     self.write_ok();
                 } else {
                     self.write_err(ERR_CODE_ILLEGAL_ARG);
@@ -679,6 +680,13 @@ impl Companion {
                         self.set_fem_rxgain(value.first() == Some(&b'1'));
                         self.write_ok();
                     }
+                    b"time_sync" => {
+                        let value = core::str::from_utf8(value).unwrap_or("").trim();
+                        match self.time_command(ctx, value) {
+                            Some(r) if !r.starts_with("Error") => self.write_ok(),
+                            _ => self.write_err(ERR_CODE_ILLEGAL_ARG),
+                        }
+                    }
                     b"fw_root" | b"fw_owner" | b"fw_auto" | b"fw_channel" | b"fw_source" | b"fw_do" => {
                         let name = core::str::from_utf8(name).unwrap_or("");
                         let value = core::str::from_utf8(value).unwrap_or("").trim();
@@ -1015,11 +1023,35 @@ impl Companion {
             false => alloc::format!("fw_source:{}", crate::util::to_hex(&self.prefs.fw_source)),
         });
         vars.push(alloc::format!("fw_channel:{}", release::channel_name(self.prefs.fw_channel)));
+        vars.push(alloc::format!("time_sync:{}", crate::timesync::Mode::from_code(self.prefs.time_sync).name()));
         // the custom variables are a comma-separated list, and in the app the hints are variables
         let status = self.fw_line(now).replace(',', ";").replace("set fw.root", "fw_root").replace("fw ", "fw_do ");
         vars.push(alloc::format!("fw_status:{status}"));
         vars.push(alloc::format!("fw_do:{}", if self.fw_done.is_empty() { "-" } else { &self.fw_done }));
         vars.join(",")
+    }
+
+    /// `set time.sync off|listen|auto` and `time sync` (`now`), the `time_sync` custom variable.
+    fn time_command(&mut self, ctx: &mut MeshCtx, value: &str) -> Option<String> {
+        use crate::timesync::Mode;
+        if value == "now" {
+            let r = self.timesync.ask_now(ctx);
+            return Some(if r.starts_with("Error") { r } else { format!("OK - {r}") });
+        }
+        let Some(mode) = Mode::parse(value) else {
+            return Some("Error: off, listen, auto or now".into());
+        };
+        self.prefs.time_sync = mode.code();
+        self.effects.save_prefs = true;
+        self.timesync.set_mode(ctx, mode);
+        Some(
+            match mode {
+                Mode::Off => "OK - the clock is set by the phone, by hand or GPS only",
+                Mode::Listen => "OK - the clock follows the time server's beacons, nothing is sent",
+                Mode::Auto => "OK - the clock follows the beacons and asks a gateway when they don't settle it",
+            }
+            .into(),
+        )
     }
 
     /// `set adc.multiplier` (the `adc_multiplier` custom variable) as upstream's `CommonCLI`: the
@@ -1308,6 +1340,7 @@ impl Companion {
             "sync" => match self.board.gps.filter(|g| g.valid).and_then(|g| g.time) {
                 Some(t) => {
                     ctx.set_current_time(t);
+                    self.timesync.note_set(ctx, crate::timesync::Clock::Trusted, Some(crate::timesync::Source::Gps));
                     "ok".into()
                 }
                 None => "no fix".into(),
@@ -1348,6 +1381,18 @@ impl Companion {
         }
         if let Some(r) = self.handle_fw_command(ctx, remote, cmd) {
             return Some(r);
+        }
+        if cmd == "time sync" {
+            return self.time_command(ctx, "now");
+        }
+        if cmd == "get time.status" {
+            return Some(format!("> {}", self.timesync.status(ctx)));
+        }
+        if cmd == "get time.sync" {
+            return Some(format!("> {}", crate::timesync::Mode::from_code(self.prefs.time_sync).name()));
+        }
+        if let Some(v) = cmd.strip_prefix("set time.sync ") {
+            return self.time_command(ctx, v.trim());
         }
         if cmd == "get adc.multiplier" {
             return Some(self.adc_multiplier().map_or("Error: unsupported".into(), |m| format!("> {}", Fixed(m as f64, 3))));

@@ -61,6 +61,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: The changelog has this release
+        if: github.event_name == 'workflow_dispatch'
+        run: tools/changelog-section.sh "$MCFW_VERSION" > /dev/null
       - run: cargo test --workspace --locked
       # the protocol core once more with the 32-bit curve arithmetic the boards run (a host build
       # takes the 64-bit one), as firmware/vendor/curve25519-dalek has it
@@ -495,6 +498,11 @@ jobs:
           root=$(awk '/fingerprint/{print $2}' out/root.txt)
           prerelease=$([ "$MCFW_CHANNEL" = dev ] && echo --prerelease || true)
           {
+            # what changed, from CHANGELOG.md (the test job made sure it has this version)
+            tools/changelog-section.sh "$MCFW_VERSION"
+            echo
+            echo "---"
+            echo
             echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo or Pro Micro image for the USB bootloader's drive; a .zip, the Pro Micro companion's for its serial DFU (web flashers' custom firmware). The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them. ota-app-* is the program that puts a .mcfw on a device over USB or BLE, for Windows, macOS and Linux (README, «ota-app»)."
             if [ -s unchanged.txt ]; then
               echo

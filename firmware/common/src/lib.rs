@@ -27,6 +27,7 @@ pub mod radio;
 pub mod repeater_app;
 pub mod reset;
 pub mod storage;
+pub mod timefetch;
 pub mod usb;
 pub mod wifi_ota;
 

@@ -29,11 +29,13 @@ use crate::radio::RadioParams;
 use crate::region::{REGION_DENY_FLOOD, RegionMap, TransportKey, is_name_char};
 use crate::rtc::DEFAULT_EPOCH;
 use crate::sensor::descriptor::Descriptor;
+use crate::timesync::{self, TimeFetch, TimeSync};
 use crate::util::{Fixed, atof, atoi, atoi_signed, epoch_to_datetime, from_hex, ftoa, parse_key_prefix, to_hex, truncate_str};
 use crate::{FIRMWARE_VERSION, MAX_ADVERT_DATA_SIZE, MAX_PACKET_PAYLOAD, MAX_PATH_SIZE, PRV_KEY_SIZE, PUB_KEY_SIZE};
 
 mod autoupdate;
 pub mod room;
+mod timeserve;
 pub use room::{FIRMWARE_ROLE_ROOM, MAX_POST_TEXT_LEN, RoomClient};
 
 pub const FIRMWARE_ROLE: &str = "repeater";
@@ -339,6 +341,12 @@ pub struct Repeater {
     /// (`set fw.auto on`), if the platform can fetch them.
     pub fw_store: Option<Box<dyn FwStore>>,
     autoupdate: autoupdate::AutoUpdate,
+    /// Network time (`time.sync`, see [`crate::timesync`]): what this node believes and asks.
+    pub timesync: TimeSync,
+    /// The time server over the node's link, if the platform has one: `time.serve` passes its
+    /// time on. Set it before [`Self::start`] (the boot advert tells the neighbours).
+    pub time_fetch: Option<Box<dyn TimeFetch>>,
+    timeserve: timeserve::TimeServe,
     /// Packets heard/sent, waiting for the MQTT observer (drained by the firmware).
     pub uplink: Vec<UplinkPacket>,
     /// Collect packets into `uplink` (an observer is connected).
@@ -384,6 +392,8 @@ impl Repeater {
         let pending_radio = prefs.radio;
         let bridge = Bridge::new(&prefs.bridge_secret);
         let ota = OtaEndpoint::new(prefs.ota_roots.clone(), prefs.ota_owners.clone(), release::role::REPEATER);
+        let mut timesync = TimeSync::new(timesync::Mode::from_code(prefs.time_sync), &prefs.time_keys);
+        timesync.remember(&prefs.time_gateway, 0);
         Self {
             prefs,
             board,
@@ -412,6 +422,9 @@ impl Repeater {
             ota,
             fw_store: None,
             autoupdate: autoupdate::AutoUpdate::new(),
+            timesync,
+            time_fetch: None,
+            timeserve: timeserve::TimeServe::new(),
             uplink: Vec::new(),
             uplink_enabled: false,
             room: None,
@@ -457,6 +470,11 @@ impl Repeater {
         self.update_advert_timer(ctx);
         self.update_flood_advert_timer(ctx);
         self.send_self_advertisement(ctx, BOOT_ADVERT_DELAY, false);
+        if self.room.is_some() {
+            self.timesync.mode = timesync::Mode::Off; // the room follows the repeater's clock
+        }
+        self.timesync.start(ctx);
+        self.time_serve_start(ctx);
     }
 
     pub fn take_effects(&mut self) -> Effects {
@@ -700,7 +718,10 @@ impl Repeater {
 
     fn build_advert_data(&self, out: &mut [u8; MAX_ADVERT_DATA_SIZE]) -> usize {
         let adv_type = if self.room.is_some() { ADV_TYPE_ROOM } else { ADV_TYPE_REPEATER };
-        let adv = AdvertData::new(adv_type, &self.prefs.node_name);
+        let mut adv = AdvertData::new(adv_type, &self.prefs.node_name);
+        if self.time_serving() {
+            adv.feat1 |= timesync::FEAT1_TIME_SERVER;
+        }
         let adv = match self.prefs.advert_loc_policy {
             ADVERT_LOC_NONE => adv,
             _ => adv.with_location(self.prefs.node_lat, self.prefs.node_lon),
@@ -1142,6 +1163,10 @@ impl MeshApp for Repeater {
         if self.autoupdate.peer().is_some_and(|(id, _)| id.is_hash_match_v1(hash)) {
             self.matching_peers.push(autoupdate::FW_PEER);
         }
+        // the gateway asked for the time, while its answer is awaited
+        if self.timesync.peer().is_some_and(|(id, _)| id.is_hash_match_v1(hash)) {
+            self.matching_peers.push(timesync::TIME_PEER);
+        }
         self.matching_peers.len()
     }
 
@@ -1150,10 +1175,14 @@ impl MeshApp for Repeater {
         if i == autoupdate::FW_PEER {
             return self.autoupdate.peer().map(|&(_, secret)| secret);
         }
+        if i == timesync::TIME_PEER {
+            return self.timesync.peer().map(|(_, secret)| *secret);
+        }
         self.acl.get(i).map(|c| c.shared_secret)
     }
 
     fn on_advert_recv(&mut self, ctx: &mut MeshCtx, pkt: &Packet, id: &Identity, timestamp: u32, app_data: &[u8]) {
+        self.timesync.on_advert(ctx, pkt, id, app_data);
         // zero-hop advert, not a 'share' (transport codes {0,0})
         let is_share = pkt.has_transport_codes() && pkt.transport_codes == [0, 0];
         if self.room.is_none()
@@ -1199,6 +1228,8 @@ impl MeshApp for Repeater {
             && matches!(kind, fwshare::ANON_REQ_TYPE_FW_QUERY | fwshare::ANON_REQ_TYPE_FW_GET)
         {
             self.fw_request(ctx, timestamp, kind, &data[5..], &mut reply)
+        } else if pkt.is_route_direct() && kind == timesync::ANON_REQ_TYPE_TIME {
+            self.time_request(ctx, timestamp, sender, secret, &data[5..], &mut reply)
         } else if pkt.is_route_direct() && kind == ANON_REQ_TYPE_BASIC {
             self.anon_prologue(ctx, timestamp, &data[5..], &mut reply) && {
                 let bridge = if self.bridge_active() { 0x03 } else { 0 }; // bridge, over ESP-NOW
@@ -1242,6 +1273,12 @@ impl MeshApp for Repeater {
         if i == autoupdate::FW_PEER {
             if payload_type == PAYLOAD_TYPE_RESPONSE {
                 self.auto_update_answer(ctx, data);
+            }
+            return;
+        }
+        if i == timesync::TIME_PEER {
+            if payload_type == PAYLOAD_TYPE_RESPONSE {
+                self.timesync.on_answer(ctx, data);
             }
             return;
         }
@@ -1438,10 +1475,36 @@ impl MeshApp for Repeater {
         }
         self.room_loop(ctx);
         self.auto_update_loop(ctx);
+        self.timesync.poll(ctx);
+        self.time_serve_loop(ctx);
+        if let Some(g) = self.timesync.take_remembered()
+            && g != self.prefs.time_gateway
+        {
+            self.prefs.time_gateway = g;
+            self.effects.save_prefs = true;
+        }
     }
 
     fn next_timer(&self) -> Option<u64> {
-        self.timers().chain(self.room.as_ref().and_then(|r| r.next_timer())).chain(self.auto_update_timer()).min()
+        self.timers()
+            .chain(self.room.as_ref().and_then(|r| r.next_timer()))
+            .chain(self.auto_update_timer())
+            .chain(self.timesync.timer())
+            .chain(self.time_serve_timer())
+            .min()
+    }
+
+    fn search_channels_by_hash(&mut self, _ctx: &mut MeshCtx, hash: u8) -> Vec<crate::mesh::GroupChannel> {
+        let ch = timesync::channel();
+        if self.room.is_none() && ch.hash == hash { alloc::vec![ch] } else { Vec::new() }
+    }
+
+    fn on_group_data_recv(
+        &mut self, ctx: &mut MeshCtx, pkt: &Packet, payload_type: u8, _channel: &crate::mesh::GroupChannel, data: &[u8],
+    ) {
+        if payload_type == PAYLOAD_TYPE_GRP_DATA && self.timesync.on_beacon(ctx, pkt, data) {
+            self.time_beacon_heard(ctx);
+        }
     }
 
     fn log_rx(&mut self, ctx: &MeshCtx, pkt: &Packet, len: usize, score: f32) {
@@ -1629,6 +1692,7 @@ impl Repeater {
             let curr = ctx.current_time();
             return if ts > curr {
                 ctx.set_current_time(ts + 1);
+                self.timesync.note_set(ctx, timesync::Clock::Approx, None);
                 format!("OK - clock set: {}", fmt_time(ctx.current_time()))
             } else {
                 "ERR: clock cannot go backwards".into()
@@ -1671,11 +1735,16 @@ impl Repeater {
         if cmd.starts_with("clock") {
             return fmt_time(ctx.current_time());
         }
+        if cmd == "time sync" {
+            let r = self.timesync.ask_now(ctx);
+            return if r.starts_with("Error") { r } else { format!("OK - {r}") };
+        }
         if let Some(v) = cmd.strip_prefix("time ") {
             let secs = atoi(v);
             // the local console may also correct a clock that ran ahead
             return if secs > ctx.current_time() || (serial && secs > DEFAULT_EPOCH) {
                 ctx.set_current_time(secs);
+                self.timesync.note_set(ctx, timesync::Clock::Approx, None);
                 format!("OK - clock set: {}", fmt_time(ctx.current_time()))
             } else {
                 "(ERR: clock cannot go backwards)".into()
@@ -1901,6 +1970,7 @@ impl Repeater {
             "sync" => match self.board.gps.filter(|g| g.valid).and_then(|g| g.time) {
                 Some(t) => {
                     ctx.set_current_time(t);
+                    self.timesync.note_set(ctx, timesync::Clock::Trusted, Some(timesync::Source::Gps));
                     "ok".into()
                 }
                 None => "no fix".into(),
@@ -2107,6 +2177,9 @@ impl Repeater {
         if let Some(r) = self.handle_get_network(cfg) {
             return r;
         }
+        if let Some(r) = self.handle_get_time(ctx, cfg) {
+            return r;
+        }
         if cfg.starts_with("fw.root") {
             return self.ota_root_status();
         }
@@ -2275,6 +2348,9 @@ impl Repeater {
 
     fn handle_set(&mut self, ctx: &mut MeshCtx, serial: bool, cfg: &str) -> String {
         if let Some(r) = self.handle_set_network(cfg) {
+            return r;
+        }
+        if let Some(r) = self.handle_set_time(ctx, serial, cfg) {
             return r;
         }
         if let Some(v) = cfg.strip_prefix("fw.root ") {

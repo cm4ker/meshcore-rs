@@ -1091,9 +1091,9 @@ fn repeater_ota_owner_cli() {
 }
 
 /// The update variables of a companion that pins no root key, after the keys.
-const NO_ROOT_VARS: &str = "fw_auto:off,fw_source:auto,fw_channel:stable,fw_status:needs a release key: fw_root,fw_do:-";
+const NO_ROOT_VARS: &str = "fw_auto:off,fw_source:auto,fw_channel:stable,time_sync:listen,fw_status:needs a release key: fw_root,fw_do:-";
 /// And of one that pins one, but has no slot to update into.
-const NO_SLOT_VARS: &str = "fw_auto:off,fw_source:auto,fw_channel:stable,fw_status:no update slot: update over USB,fw_do:-";
+const NO_SLOT_VARS: &str = "fw_auto:off,fw_source:auto,fw_channel:stable,time_sync:listen,fw_status:no update slot: update over USB,fw_do:-";
 
 #[test]
 fn gps_setting_position_and_telemetry() {
@@ -1519,7 +1519,7 @@ fn companion_pulls_an_update_from_a_neighbouring_repeater() {
     assert_eq!(c.app.fw_line(c.ctx.now), format!("0.5.2 #5 ready ({kb} KB): fw install"));
     assert!(!slot.borrow().1, "fw.auto download: nothing installed until the user says so");
     let fp = meshcore::release::fingerprint_hex(&meshcore::release::fingerprint(root.pub_key()));
-    let vars = format!("fw_root:{}..,fw_owner:off,fw_auto:download,fw_source:auto,fw_channel:stable,fw_status:0.5.2 #5 ready ({kb} KB): fw_do install,fw_do:-", &fp[..16]);
+    let vars = format!("fw_root:{}..,fw_owner:off,fw_auto:download,fw_source:auto,fw_channel:stable,time_sync:listen,fw_status:0.5.2 #5 ready ({kb} KB): fw_do install,fw_do:-", &fp[..16]);
     assert_eq!(String::from_utf8_lossy(&cmd(&mut c, &[CMD_GET_CUSTOM_VARS])[0][1..]), vars);
 
     assert_eq!(cmd(&mut c, b"\x29fw_do:install")[0][0], RESP_CODE_OK);
@@ -2206,4 +2206,34 @@ fn a_repeater_restarts_into_its_update_only_once_a_neighbour_has_loaded_its_own(
     assert!(c.app.fw_line(c.ctx.now).starts_with("0.5.2 #5 ready"));
     assert!(own_slot.borrow().1, "installed");
     assert!(r.app.handle_command(&mut r.ctx, 0, "fw").contains("installing 0.5.2 #5"));
+}
+
+#[test]
+fn companion_takes_the_time_from_a_beacon_and_the_app_does_not_see_it() {
+    use meshcore::timesync::{self, Clock, Token};
+    let mut c = companion(1, "Alice");
+    frames(&mut c);
+    let server = LocalIdentity::from_seed(&[0x5E; 32]);
+    c.app.timesync.set_keys(&[*server.pub_key()]);
+    assert_eq!(c.app.timesync.clock(), Clock::Unknown);
+
+    let server_ms = (T0 as u64 + 86_400) * 1000 + 250;
+    let gateway = LocalIdentity::from_seed(&[0x40; 32]);
+    let data = timesync::beacon(&gateway.id, &Token::signed(&server, server_ms, [1; 8]));
+    let mut pkt = c.ctx.create_group_datagram(PAYLOAD_TYPE_GRP_DATA, &timesync::channel(), &data).unwrap();
+    pkt.set_route_type(ROUTE_TYPE_FLOOD);
+    let mut raw = [0u8; 255];
+    let n = pkt.write_to(&mut raw).unwrap();
+    c.rx(1000, &raw[..n]);
+    c.poll(1000);
+    assert_eq!(c.app.timesync.clock(), Clock::Trusted);
+    assert!(c.ctx.current_time_ms().abs_diff(server_ms) < 2_000);
+    assert!(frames(&mut c).iter().all(|f| f[0] != RESP_CODE_CHANNEL_DATA_RECV), "not a channel of the app's");
+
+    // the phone setting the clock makes it approximate again: any signed time may correct it
+    let now = c.ctx.current_time() + 10;
+    assert_eq!(cmd(&mut c, &[&[CMD_SET_DEVICE_TIME][..], &now.to_le_bytes()].concat())[0][0], RESP_CODE_OK);
+    assert_eq!(c.app.timesync.clock(), Clock::Approx);
+    assert_eq!(&cmd(&mut c, b"\x29time_sync:auto")[0][..1], &[RESP_CODE_OK]);
+    assert_eq!(c.app.prefs.time_sync, timesync::Mode::Auto.code());
 }

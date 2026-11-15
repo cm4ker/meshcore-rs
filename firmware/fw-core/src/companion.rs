@@ -28,6 +28,7 @@ use meshcore::mesh::{Mesh, MeshCtx};
 use meshcore::ota::FirmwareTarget;
 use meshcore::prefs::NodePrefs;
 use meshcore::radio::RadioParams;
+use meshcore::timesync::{Clock, Source};
 use meshcore::util::to_hex;
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE};
 
@@ -739,6 +740,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             && t.abs_diff(mesh.ctx.current_time()) > 2
         {
             mesh.ctx.set_current_time(t);
+            mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
         }
         if links.tcp {
             mesh.app.board.wifi_ip = ip;
@@ -766,6 +768,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
                     {
                         next_gps_time = now + GPS_TIME_SYNC_MS;
                         mesh.ctx.set_current_time(t);
+                        mesh.app.timesync.note_set(&mesh.ctx, Clock::Trusted, Some(Source::Gps));
                     }
                 }
                 None => gps_fix_secs = 0,

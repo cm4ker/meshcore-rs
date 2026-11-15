@@ -96,6 +96,13 @@ pub struct CompanionPrefs {
     pub fw_source: Vec<u8>,
     /// The release channel followed (`release::channel`): stable by default.
     pub fw_channel: u8,
+    /// What this node does about network time (`time_sync`, `crate::timesync::Mode`): it takes
+    /// beacons by default, and sends nothing.
+    pub time_sync: u8,
+    /// The time server's keys; none = the built-in ones (`crate::timesync::TIME_KEYS`).
+    pub time_keys: Vec<[u8; 32]>,
+    /// The gateway that last answered, asked first after a boot.
+    pub time_gateway: String,
 }
 
 impl Default for CompanionPrefs {
@@ -145,6 +152,9 @@ impl Default for CompanionPrefs {
             fw_server: "nw.ommesh.ru".into(),
             fw_source: Vec::new(),
             fw_channel: 0,
+            time_sync: crate::timesync::Mode::Listen.code(),
+            time_keys: Vec::new(),
+            time_gateway: String::new(),
         }
     }
 }
@@ -224,6 +234,9 @@ impl CompanionPrefs {
         let _ = writeln!(s, "fw_server={}", escape(&self.fw_server));
         let _ = writeln!(s, "fw_source={}", crate::util::to_hex(&self.fw_source));
         let _ = writeln!(s, "fw_channel={}", self.fw_channel);
+        let _ = writeln!(s, "time_sync={}", self.time_sync);
+        let _ = writeln!(s, "time_keys={}", crate::prefs::join_keys(&self.time_keys));
+        let _ = writeln!(s, "time_gateway={}", self.time_gateway);
         s
     }
 
@@ -294,6 +307,9 @@ impl CompanionPrefs {
                         p.fw_source = key;
                     }
                 }
+                "time_sync" => p.time_sync = crate::timesync::Mode::from_code(u8v()).code(),
+                "time_keys" => p.time_keys = crate::prefs::parse_keys(v).unwrap_or_default(),
+                "time_gateway" => p.time_gateway = v.into(),
                 _ => {}
             }
         }

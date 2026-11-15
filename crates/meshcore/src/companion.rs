@@ -25,6 +25,7 @@ use crate::release;
 use crate::packet::*;
 use crate::radio::RadioParams;
 use crate::region::TransportKey;
+use crate::timesync::{self, TimeSync};
 use crate::{MAX_PACKET_PAYLOAD, MAX_PATH_SIZE, MAX_TRANS_UNIT, PRV_KEY_SIZE, PUB_KEY_SIZE};
 
 mod cmd;
@@ -582,6 +583,8 @@ pub struct Companion {
     fwpull: fwpull::FwPull,
     /// What the last `fw_do` did, for the custom variable's value.
     fw_done: String,
+    /// Network time (`time_sync`, see [`crate::timesync`]): what this node believes and asks.
+    pub timesync: TimeSync,
     /// Transient slots first (`MAX_ANON_CONTACTS`), then the real contacts, like upstream.
     contacts: Vec<ContactInfo>,
     matching_peers: Vec<usize>,
@@ -625,6 +628,8 @@ fn c_str(b: &[u8]) -> &[u8] {
 impl Companion {
     pub fn new(prefs: CompanionPrefs, board: Board) -> Self {
         let ota = OtaEndpoint::new(prefs.ota_roots.clone(), prefs.ota_owners.clone(), release::role::COMPANION);
+        let mut timesync = TimeSync::new(timesync::Mode::from_code(prefs.time_sync), &prefs.time_keys);
+        timesync.remember(&prefs.time_gateway, 0);
         let mut c = Self {
             prefs,
             board,
@@ -638,6 +643,7 @@ impl Companion {
             fw_store: None,
             fwpull: fwpull::FwPull::default(),
             fw_done: String::new(),
+            timesync,
             contacts: Vec::new(),
             matching_peers: Vec::new(),
             channels: alloc::vec![Channel::default(); MAX_GROUP_CHANNELS],
@@ -679,6 +685,7 @@ impl Companion {
         }
         self.update_advert_timer(ctx);
         self.update_flood_advert_timer(ctx);
+        self.timesync.start(ctx);
     }
 
     /// Arm the local (zero-hop) self-advert timer from `prefs.advert_interval` (minutes / 2).
@@ -1390,11 +1397,18 @@ impl MeshApp for Companion {
                 self.matching_peers.push(i);
             }
         }
+        // the gateway asked for the time, while its answer is awaited
+        if self.timesync.peer().is_some_and(|(id, _)| id.is_hash_match_v1(hash)) {
+            self.matching_peers.push(timesync::TIME_PEER);
+        }
         self.matching_peers.len()
     }
 
     fn peer_shared_secret(&mut self, ctx: &mut MeshCtx, peer_idx: usize) -> Option<Secret> {
         let i = *self.matching_peers.get(peer_idx)?;
+        if i == timesync::TIME_PEER {
+            return self.timesync.peer().map(|(_, secret)| *secret);
+        }
         Some(self.secret_of(ctx, i))
     }
 
@@ -1404,6 +1418,12 @@ impl MeshApp for Companion {
         let Some(&idx) = self.matching_peers.get(sender_idx) else {
             return;
         };
+        if idx == timesync::TIME_PEER {
+            if payload_type == PAYLOAD_TYPE_RESPONSE {
+                self.timesync.on_answer(ctx, data);
+            }
+            return;
+        }
         let len = data.len();
         if payload_type == PAYLOAD_TYPE_TXT_MSG && len > 5 {
             let sender_timestamp = read_u32(data, 0);
@@ -1512,6 +1532,9 @@ impl MeshApp for Companion {
         let Some(&idx) = self.matching_peers.get(sender_idx) else {
             return false;
         };
+        if idx == timesync::TIME_PEER {
+            return false;
+        }
         if extra_type == PAYLOAD_TYPE_RESPONSE && extra.len() > 4 && read_u32(extra, 0) == self.pending_discovery {
             self.pending_discovery = 0;
             if Packet::is_valid_path_len(pkt.path_len) && Packet::is_valid_path_len(path_len) {
@@ -1540,6 +1563,7 @@ impl MeshApp for Companion {
     }
 
     fn on_advert_recv(&mut self, ctx: &mut MeshCtx, pkt: &Packet, id: &Identity, timestamp: u32, app_data: &[u8]) {
+        self.timesync.on_advert(ctx, pkt, id, app_data);
         let Some(adv) = AdvertData::parse(app_data) else {
             return;
         };
@@ -1615,10 +1639,31 @@ impl MeshApp for Companion {
 
     fn search_channels_by_hash(&mut self, _ctx: &mut MeshCtx, hash: u8) -> Vec<GroupChannel> {
         // empty slots have an all-zero key, which would accept null-key traffic
-        self.channels.iter().filter(|c| !c.is_empty() && c.hash == hash).map(Channel::group).collect()
+        let mut found: Vec<GroupChannel> =
+            self.channels.iter().filter(|c| !c.is_empty() && c.hash == hash).map(Channel::group).collect();
+        let time = timesync::channel();
+        if time.hash == hash && !found.iter().any(|c| c.secret == time.secret) {
+            found.push(time); // the beacons, whether or not the app has the channel
+        }
+        found
     }
 
     fn on_group_data_recv(&mut self, ctx: &mut MeshCtx, pkt: &Packet, payload_type: u8, channel: &GroupChannel, data: &[u8]) {
+        if payload_type == PAYLOAD_TYPE_GRP_DATA && channel.secret == timesync::channel().secret {
+            if self.timesync.on_beacon(ctx, pkt, data) {
+                // a gateway known by its prefix only may be in the contacts
+                let unknown: Vec<[u8; timesync::GATEWAY_PREFIX]> = self.timesync.unknown_gateways().copied().collect();
+                for prefix in unknown {
+                    if let Some(i) = self.lookup_contact(&prefix) {
+                        let id = self.contacts[i].id;
+                        self.timesync.learn(&id);
+                    }
+                }
+            }
+            if !self.channels.iter().any(|c| !c.is_empty() && c.secret == channel.secret) {
+                return; // not a channel of the app's
+            }
+        }
         let channel_idx = self.find_channel_idx(channel);
         let path_len = if pkt.is_route_flood() { pkt.path_len } else { 0xFF };
         if payload_type == PAYLOAD_TYPE_GRP_TXT {
@@ -1711,6 +1756,13 @@ impl MeshApp for Companion {
             self.update_advert_timer(ctx);
         }
         self.fw_pull_loop(ctx);
+        self.timesync.poll(ctx);
+        if let Some(g) = self.timesync.take_remembered()
+            && g != self.prefs.time_gateway
+        {
+            self.prefs.time_gateway = g;
+            self.effects.save_prefs = true;
+        }
     }
 
     fn next_timer(&self) -> Option<u64> {
@@ -1719,6 +1771,7 @@ impl MeshApp for Companion {
             (self.next_local_advert != 0).then_some(self.next_local_advert),
             (self.next_flood_advert != 0).then_some(self.next_flood_advert),
             self.fw_pull_timer(),
+            self.timesync.timer(),
         ]
         .into_iter()
         .flatten()

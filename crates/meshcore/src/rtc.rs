@@ -24,6 +24,24 @@ impl RtcClock {
         self.base_ms = now_ms;
     }
 
+    /// Milliseconds since the UNIX epoch.
+    pub fn current_time_ms(&self, now_ms: u64) -> u64 {
+        self.base_epoch as u64 * 1000 + now_ms.saturating_sub(self.base_ms)
+    }
+
+    /// Set the clock to `unix_ms`, to the millisecond: the next second begins when it should.
+    pub fn set_current_time_ms(&mut self, now_ms: u64, unix_ms: u64) {
+        let (secs, frac) = (unix_ms / 1000, unix_ms % 1000);
+        if now_ms >= frac {
+            self.base_epoch = secs as u32;
+            self.base_ms = now_ms - frac;
+        } else {
+            // so soon after boot that the second began before it: count from the next one
+            self.base_epoch = secs as u32 + 1;
+            self.base_ms = now_ms + 1000 - frac;
+        }
+    }
+
     /// Strictly increasing timestamp (`getCurrentTimeUnique`).
     pub fn current_time_unique(&mut self, now_ms: u64) -> u32 {
         let t = self.current_time(now_ms);

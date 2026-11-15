@@ -271,6 +271,14 @@ impl MeshCtx {
         self.rtc.set_current_time(self.now, epoch);
     }
 
+    pub fn current_time_ms(&self) -> u64 {
+        self.rtc.current_time_ms(self.now)
+    }
+
+    pub fn set_current_time_ms(&mut self, unix_ms: u64) {
+        self.rtc.set_current_time_ms(self.now, unix_ms);
+    }
+
     pub fn outbound_len(&self) -> usize {
         self.outbound.len()
     }

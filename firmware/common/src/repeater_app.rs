@@ -30,6 +30,7 @@ use meshcore::identity::LocalIdentity;
 use meshcore::mesh::{Mesh, MeshCtx};
 use meshcore::prefs::{NAME_MAX, NodePrefs};
 use meshcore::repeater::{BLE_OTA_WINDOW_MINS, BoardInfo, Repeater};
+use meshcore::timesync::{Clock, Source};
 use meshcore::util::{Shortest, to_hex};
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE, uplink};
 use meshcore_ui::refresh::oled::Oled as ScreenPolicy;
@@ -42,7 +43,7 @@ use crate::ble::{self, BLE_CONNECTED, BLE_OUT, BONDS_CHANGED};
 use crate::frames::FRAMES_IN;
 use crate::ota::{self, FlashTarget, SharedStore};
 use crate::storage::{Blob, CompBlob};
-use crate::{broker, clock_cell, espnow, fwstore, net, reset, wifi_ota};
+use crate::{broker, clock_cell, espnow, fwstore, net, reset, timefetch, wifi_ota};
 use crate::net::BrokerState;
 use crate::noise::NoiseFloor;
 
@@ -628,6 +629,8 @@ where
         }),
         _ => None,
     };
+    // before the start: the boot advert tells whether this node passes the time on
+    mesh.app.time_fetch = Some(Box::new(timefetch::HttpTimeFetch));
     info!("boot: mesh");
     mesh.begin(now_ms());
     mesh.app.start(&mut mesh.ctx);
@@ -742,6 +745,9 @@ where
     }
     if let (Some(stack), Some(s), Some(region)) = (station, &store, fw_region) {
         spawner.spawn(fwstore::fetch_task(stack, s.clone(), region).unwrap());
+    }
+    if let Some(stack) = station {
+        spawner.spawn(timefetch::fetch_task(stack).unwrap());
     }
     let mut fw_store_seen = 0u32;
     let uplink_pub = net::UPLINK.publisher().unwrap();
@@ -979,6 +985,7 @@ where
                         info!("GPS: clock set to {t}");
                         mesh.ctx.set_current_time(t);
                     }
+                    mesh.app.timesync.note_set(&mesh.ctx, Clock::Trusted, Some(Source::Gps));
                 }
             }
             None => gps_fix_since = None,
@@ -1072,6 +1079,7 @@ where
         {
             info!("SNTP: clock set to {t}");
             mesh.ctx.set_current_time(t);
+            mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
         }
         if let Some(stack) = station {
             let ip = net::ipv4(&stack);
@@ -1083,6 +1091,7 @@ where
             );
             let online = net::WIFI_UP.load(Ordering::Relaxed) && ip.is_some();
             fwstore::sync(online, &mesh.app.prefs.fw_server);
+            timefetch::sync(online, &mesh.app.prefs.time_server);
             mesh.app.board.wifi_ip = ip;
         } else if !mesh.app.prefs.wifi_enabled && !mesh.app.prefs.wifi_ssid.is_empty() {
             mesh.app.board.wifi_status = String::from("off (set wifi.enabled on)");

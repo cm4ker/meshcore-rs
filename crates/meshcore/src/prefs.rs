@@ -118,6 +118,22 @@ pub struct NodePrefs {
     /// neighbouring repeater's key (`set fw.source`), asked over LoRa; empty = the best neighbour
     /// heard directly that answers.
     pub fw_source: Vec<u8>,
+    /// What this node does about network time (`set time.sync`, `crate::timesync::Mode`): it
+    /// takes beacons by default, and sends nothing.
+    pub time_sync: u8,
+    /// Pass the time server's signed time on (`set time.serve on`): beacons, and answers to
+    /// requests, fetched from `time_server` over the Wi-Fi link. Off by default.
+    pub time_serve: bool,
+    /// Host of the time server (plain HTTP: what it serves is signed).
+    pub time_server: String,
+    /// Beacons a day a gateway sends (`set time.beacon`); 0 = answers to requests only.
+    pub time_beacons: u8,
+    /// The time server's keys (`set time.key`, on the serial console only); none = the built-in
+    /// ones (`crate::timesync::TIME_KEYS`).
+    pub time_keys: Vec<[u8; 32]>,
+    /// The gateway that last answered, asked first after a boot
+    /// (`crate::timesync::TimeSync::take_remembered`).
+    pub time_gateway: String,
 }
 
 impl Default for NodePrefs {
@@ -182,8 +198,38 @@ impl Default for NodePrefs {
             fw_mode: crate::fwstate::mode::OFF,
             fw_channel: 0,
             fw_source: Vec::new(),
+            time_sync: crate::timesync::Mode::Listen.code(),
+            time_serve: false,
+            time_server: "nw.ommesh.ru".into(),
+            time_beacons: 4,
+            time_keys: Vec::new(),
+            time_gateway: String::new(),
         }
     }
+}
+
+/// Keys as comma-separated hex.
+pub(crate) fn join_keys(keys: &[[u8; 32]]) -> String {
+    let mut s = String::new();
+    for (i, k) in keys.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&crate::util::to_hex(k).to_ascii_lowercase());
+    }
+    s
+}
+
+/// Comma-separated hex keys; `None` if one is not a key.
+pub(crate) fn parse_keys(v: &str) -> Option<Vec<[u8; 32]>> {
+    v.split(',')
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(|k| {
+            let mut key = [0u8; 32];
+            (k.len() == 64 && crate::util::from_hex(&mut key, k)).then_some(key)
+        })
+        .collect()
 }
 
 pub(crate) fn escape(s: &str) -> String {
@@ -306,6 +352,12 @@ impl NodePrefs {
         let _ = writeln!(s, "fw_mode={}", self.fw_mode);
         let _ = writeln!(s, "fw_channel={}", self.fw_channel);
         let _ = writeln!(s, "fw_source={}", crate::util::to_hex(&self.fw_source));
+        let _ = writeln!(s, "time_sync={}", self.time_sync);
+        let _ = writeln!(s, "time_serve={}", b(self.time_serve));
+        let _ = writeln!(s, "time_server={}", escape(&self.time_server));
+        let _ = writeln!(s, "time_beacons={}", self.time_beacons);
+        let _ = writeln!(s, "time_keys={}", join_keys(&self.time_keys));
+        let _ = writeln!(s, "time_gateway={}", self.time_gateway);
         s
     }
 
@@ -386,6 +438,12 @@ impl NodePrefs {
                         p.fw_source = key;
                     }
                 }
+                "time_sync" => p.time_sync = crate::timesync::Mode::from_code(u8v()).code(),
+                "time_serve" => p.time_serve = flag(),
+                "time_server" => p.time_server = unescape(v),
+                "time_beacons" => p.time_beacons = u8v().min(24),
+                "time_keys" => p.time_keys = parse_keys(v).unwrap_or_default(),
+                "time_gateway" => p.time_gateway = v.into(),
                 _ => {}
             }
         }
