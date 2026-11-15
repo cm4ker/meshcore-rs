@@ -32,8 +32,8 @@ static SPEC: Spec = board::spec(env!("BUILD_EPOCH"), BUILD_DATE);
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
     CLOCK_POWER => usb::vbus_detect::InterruptHandler;
+    TWISPI1 => spim::InterruptHandler<peripherals::TWISPI1>;
     SPI2 => spim::InterruptHandler<peripherals::SPI2>;
-    SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
     SAADC => saadc::InterruptHandler;
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
     TEMP => temp::InterruptHandler;
@@ -74,8 +74,8 @@ async fn main(spawner: Spawner) {
     for irq in [
         interrupt::USBD,
         interrupt::CLOCK_POWER,
+        interrupt::TWISPI1,
         interrupt::SPI2,
-        interrupt::SPIM3,
         interrupt::UARTE0,
         interrupt::SAADC,
         interrupt::TWISPI0,

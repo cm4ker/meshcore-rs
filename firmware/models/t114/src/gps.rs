@@ -1,5 +1,6 @@
 //! The T114's GPS socket: a Quectel L76K at 9600 baud on UARTE0 (it sends on P1.05, listens on
-//! P1.07), powered by P0.21 (the I2C connector's supply too), reset through P1.06 (active low),
+//! P1.07), powered by VEXT (`board::vext`, the screen's and the I2C connector's supply too), reset
+//! through P1.06 (active low),
 //! kept awake by P1.02 (Meshtastic's `PIN_GPS_STANDBY`). Read by plain DMA in short pieces: the
 //! buffered UART's PPI is the SoftDevice's business while it runs, and a sentence cut between two
 //! pieces only fails its checksum.
@@ -25,8 +26,6 @@ pub struct Gps {
     pub uarte: Peri<'static, UARTE0>,
     pub rx: Peri<'static, P1_05>,
     pub tx: Peri<'static, P1_07>,
-    /// High = powered.
-    pub power: Output<'static>,
     /// Low = held in reset.
     pub reset: Output<'static>,
     /// High = awake.
@@ -52,7 +51,7 @@ pub fn reading() -> Option<meshcore::gps::GpsReading> {
 pub async fn task(mut g: Gps) {
     loop {
         while !GPS_ON.wait().await {}
-        g.power.set_high();
+        crate::board::vext::want(crate::board::vext::GPS, true);
         g.wake.set_high();
         g.reset.set_low();
         Timer::after_millis(10).await;
@@ -84,7 +83,7 @@ pub async fn task(mut g: Gps) {
         }
         g.reset.set_low();
         g.wake.set_low();
-        g.power.set_low();
+        crate::board::vext::want(crate::board::vext::GPS, false);
         gps::clear();
     }
 }

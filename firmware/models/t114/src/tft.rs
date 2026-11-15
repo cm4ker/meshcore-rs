@@ -2,7 +2,8 @@
 //! pages in the TFT layout ([`Class::Tft240x135`]), white on black, drawn in their own task.
 //! Set up as upstream's `ST7789Spi`: 16-bit colour, rows and columns swapped and mirrored, colours
 //! inverted, the panel's 240 x 135 at (40, 52) of the controller's 320 x 240. The screen's supply
-//! and its light go off with it ([`SCREEN`] `None`); it starts afresh when it comes back.
+//! (its own switch and VEXT) and its light go off with it ([`SCREEN`] `None`); it starts afresh
+//! when it comes back.
 
 use embassy_nrf::gpio::Output;
 use embassy_nrf::spim::Spim;
@@ -63,7 +64,7 @@ impl DrawTarget for Frame {
 }
 
 pub struct Tft {
-    /// SPIM3, the only one that runs at 32 MHz.
+    /// SPIM2, at 8 MHz: a page in ~65 ms.
     pub spi: Spim<'static>,
     pub cs: Output<'static>,
     pub dc: Output<'static>,
@@ -88,10 +89,11 @@ impl Tft {
 
     /// Power, reset and set the controller up (upstream's `ST7789Spi::sendInitCommands`).
     async fn init(&mut self) {
+        crate::board::vext::want(crate::board::vext::SCREEN, true);
         self.power.set_low();
         self.cs.set_high();
         self.reset.set_high();
-        Timer::after_millis(5).await;
+        Timer::after_millis(100).await; // VEXT and the screen's own supply come up
         self.reset.set_low();
         Timer::after_millis(10).await;
         self.reset.set_high();
@@ -130,6 +132,7 @@ impl Tft {
     fn off(&mut self) {
         self.light.set_high();
         self.power.set_high();
+        crate::board::vext::want(crate::board::vext::SCREEN, false);
         self.cs.set_low();
         self.dc.set_low();
         self.reset.set_low();
