@@ -323,9 +323,17 @@ dependencies = [
  "hex",
  "hmac",
  "libm",
+ "meshcore-inplace",
  "miniz_oxide 0.9.1",
  "sha2",
  "zopfli",
+]
+
+[[package]]
+name = "meshcore-inplace"
+version = "0.1.0"
+dependencies = [
+ "bsdiff",
 ]
 
 [[package]]

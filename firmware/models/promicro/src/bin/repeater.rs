@@ -31,6 +31,8 @@ static SPEC: Spec = Spec {
     usb: board::USB_ID,
     batt_mv_per_lsb: board::BATT_MV_PER_LSB,
     system_off: board::system_off,
+    updates: &promicro::ota::SWAP,
+    companion: (promicro::COMPANION_REGION, promicro::COMPANION_ASIDE, promicro::COMPANION_REGION_BEFORE),
     build_epoch: env!("BUILD_EPOCH"),
     build_date: env!("BUILD_DATE"),
 };

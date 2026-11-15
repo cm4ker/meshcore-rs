@@ -11,6 +11,9 @@
 //! Transfers can be zlib-compressed, and over LoRa also a delta: a zlib-compressed bsdiff patch
 //! (format of the `bsdiff` crate) against the running firmware, which turns a typical update
 //! from ~1 MB into tens of KB. The base is checked by SHA-256 before anything is transferred.
+//! A target with no room for the image a delta makes beside the running one (the Heltec T114)
+//! takes the delta as a plan instead, which its installer applies over the running image
+//! ([`FirmwareTarget::in_place_shift`], `meshcore_inplace`).
 //!
 //! Once the device pins a root key ([`OtaEndpoint::roots`]), a session only begins after the
 //! envelope of a signed release (see [`crate::release`]) for this board and role, and for the
@@ -96,6 +99,12 @@ pub trait FirmwareTarget {
     /// Select the verified `size`-byte image for the next boot (on trial, where the platform can
     /// roll back).
     fn activate(&mut self, size: u32) -> bool;
+    /// A target that applies deltas in place, over the running image, which its installer first
+    /// moves up by this many bytes: a delta comes into it as a plan (`meshcore_inplace`), and
+    /// [`Self::capacity`] is the plan's room. Full images it does not take.
+    fn in_place_shift(&self) -> Option<u32> {
+        None
+    }
     /// Size of the running firmware's slot (the base of delta updates); 0 if it can't be read.
     fn running_capacity(&self) -> u32 {
         0
@@ -255,6 +264,20 @@ impl OtaSession {
         if running_hash(target, base_len)? != base_sha256 {
             return Err(OtaError::BaseMismatch);
         }
+        // no room for the image: planned as it comes, chunks in order, the plan from the slot's start
+        #[cfg(feature = "inplace")]
+        if let Some(shift) = target.in_place_shift() {
+            let room = target.running_capacity();
+            let planner = meshcore_inplace::Planner::new(base_len, raw_size, shift).ok_or(OtaError::TooLarge)?;
+            if raw_size > room || base_len + shift > room {
+                return Err(OtaError::TooLarge);
+            }
+            let mut s = Self::new(size, Some(sha256), chunk_size, 0, Some(raw_size))?;
+            let patcher = Patcher::planning(raw_size, base_len, planner);
+            s.stream = Some(Box::new(Stream { inflater: Inflater::new(), patcher, next: 0 }));
+            s.base_len = Some(base_len);
+            return Ok(s);
+        }
         let mut s = match Self::begin_compressed(target, size, raw_size, Some(sha256), chunk_size) {
             // no room for the patch beside the image it makes: apply it as it comes, chunks in
             // order, to the start of the slot (pulled from a neighbour, they come in order)
@@ -402,6 +425,13 @@ impl OtaSession {
         if !self.is_complete() {
             return Err(OtaError::Incomplete);
         }
+        // planned as it came: the image it makes was hashed on the way
+        #[cfg(feature = "inplace")]
+        if let Some(Out::Plan(plan)) = self.stream.as_deref().map(|s| &s.patcher.out) {
+            let raw = self.raw_size.unwrap_or(0);
+            verify_planned(&*target, raw, self.sha256, plan)?;
+            return if target.activate(raw) { Ok(()) } else { Err(OtaError::FlashError) };
+        }
         let image_size = match (self.raw_size, self.base_len) {
             // applied as it came: complete, it is in the slot already
             (Some(raw), Some(_)) if self.stream.is_some() => raw,
@@ -484,9 +514,9 @@ enum PatchState {
     Copy { left: u64, seek: i64 },
 }
 
-/// Applies a bsdiff patch stream against the running firmware, writing the new image.
+/// Applies a bsdiff patch stream against the running firmware, writing the new image (or its plan).
 struct Patcher {
-    out: ImageWriter,
+    out: Out,
     base_len: u32,
     base_pos: u32,
     state: PatchState,
@@ -495,8 +525,18 @@ struct Patcher {
 
 impl Patcher {
     fn new(size: u32, base_len: u32) -> Self {
+        Self::with_out(Out::Image(ImageWriter::new(size)), base_len)
+    }
+
+    /// The plan of the new image, for a target that applies it in place.
+    #[cfg(feature = "inplace")]
+    fn planning(size: u32, base_len: u32, planner: meshcore_inplace::Planner) -> Self {
+        Self::with_out(Out::Plan(Box::new(PlanWriter::new(size, planner))), base_len)
+    }
+
+    fn with_out(out: Out, base_len: u32) -> Self {
         Self {
-            out: ImageWriter::new(size),
+            out,
             base_len,
             base_pos: 0,
             state: PatchState::Control { record: [0; 24], have: 0 },
@@ -540,9 +580,9 @@ impl Sink for Patcher {
                     for (o, d) in self.old[..n].iter_mut().zip(data) {
                         *o = o.wrapping_add(*d);
                     }
+                    self.out.mix(target, self.base_pos, &data[..n], &self.old[..n])?;
                     self.base_pos += n as u32;
                     data = &data[n..];
-                    self.out.put(target, &self.old[..n])?;
                 }
                 PatchState::Copy { left: 0, seek } => {
                     let pos = self.base_pos as i64 + *seek;
@@ -555,7 +595,7 @@ impl Sink for Patcher {
                 PatchState::Copy { left, .. } => {
                     let n = data.len().min(*left as usize);
                     *left -= n as u64;
-                    self.out.put(target, &data[..n])?;
+                    self.out.literal(target, &data[..n])?;
                     data = &data[n..];
                 }
             }
@@ -571,6 +611,185 @@ impl Sink for Patcher {
             | PatchState::Copy { left: 0, .. } => self.out.finish(target),
             _ => Err(OtaError::BadImage),
         }
+    }
+}
+
+/// Where a patch's output goes: the new image into the slot, or its plan.
+enum Out {
+    Image(ImageWriter),
+    #[cfg(feature = "inplace")]
+    Plan(Box<PlanWriter>),
+}
+
+impl Out {
+    /// `new` made by adding `diff` to the base's bytes from `from`.
+    fn mix(&mut self, target: &mut dyn FirmwareTarget, from: u32, diff: &[u8], new: &[u8]) -> Result<(), OtaError> {
+        let _ = (from, diff); // the plan's
+        match self {
+            Out::Image(w) => w.put(target, new),
+            #[cfg(feature = "inplace")]
+            Out::Plan(p) => p.mix(target, from, diff, new),
+        }
+    }
+
+    fn literal(&mut self, target: &mut dyn FirmwareTarget, new: &[u8]) -> Result<(), OtaError> {
+        match self {
+            Out::Image(w) => w.put(target, new),
+            #[cfg(feature = "inplace")]
+            Out::Plan(p) => p.literal(target, new),
+        }
+    }
+
+    /// Bytes the image still takes.
+    fn room(&self) -> u64 {
+        match self {
+            Out::Image(w) => w.room(),
+            #[cfg(feature = "inplace")]
+            Out::Plan(p) => (p.size - p.made) as u64,
+        }
+    }
+
+    fn finish(&mut self, target: &mut dyn FirmwareTarget) -> Result<(), OtaError> {
+        match self {
+            Out::Image(w) => w.finish(target),
+            #[cfg(feature = "inplace")]
+            Out::Plan(p) => p.finish(target),
+        }
+    }
+}
+
+/// A delta's plan (`meshcore_inplace`) for a target that applies it in place: its records written
+/// to the slot from its second page on as they are made, its first page last; the image it makes
+/// hashed on the way, as [`verify_nrf`] would hash it from the slot.
+#[cfg(feature = "inplace")]
+struct PlanWriter {
+    planner: Option<meshcore_inplace::Planner>,
+    /// The new image's size, and how much of it is made.
+    size: u32,
+    made: u32,
+    whole: Sha256,
+    app: Sha256,
+    /// The new image's last bytes: its trailer.
+    tail: [u8; NRF_TRAILER_LEN as usize],
+    /// Records on their way to the slot, a sector at a time.
+    sector: Vec<u8>,
+    written: u32,
+    /// Once finished: the image's hash, and its app's.
+    hashes: Option<([u8; 32], [u8; 32])>,
+}
+
+#[cfg(feature = "inplace")]
+impl PlanWriter {
+    fn new(size: u32, planner: meshcore_inplace::Planner) -> Self {
+        let tail = [0; NRF_TRAILER_LEN as usize];
+        Self { planner: Some(planner), size, made: 0, whole: Sha256::new(), app: Sha256::new(), tail, sector: Vec::new(), written: 0, hashes: None }
+    }
+
+    /// The image's bytes `new` are made: hash them, keep the trailer.
+    fn hash(&mut self, new: &[u8]) -> Result<(), OtaError> {
+        let end = self.made as u64 + new.len() as u64;
+        if end > self.size as u64 {
+            return Err(OtaError::BadImage);
+        }
+        self.whole.update(new);
+        let app_len = self.size.saturating_sub(NRF_TRAILER_LEN);
+        if self.made < app_len {
+            self.app.update(&new[..(app_len - self.made).min(new.len() as u32) as usize]);
+        }
+        for (i, &b) in new.iter().enumerate() {
+            let at = self.made + i as u32;
+            if at >= app_len {
+                self.tail[(at - app_len) as usize] = b;
+            }
+        }
+        self.made = end as u32;
+        Ok(())
+    }
+
+    fn mix(&mut self, target: &mut dyn FirmwareTarget, from: u32, diff: &[u8], new: &[u8]) -> Result<(), OtaError> {
+        self.hash(new)?;
+        let planner = self.planner.as_mut().ok_or(OtaError::BadImage)?;
+        let (sector, written) = (&mut self.sector, &mut self.written);
+        let mut ok = true;
+        let planned = planner.mix(from, diff, new, &mut |r| {
+            ok = ok && put_record(target, sector, written, r);
+            ok
+        });
+        if !ok { Err(OtaError::TooLarge) } else if !planned { Err(OtaError::BadImage) } else { Ok(()) }
+    }
+
+    fn literal(&mut self, target: &mut dyn FirmwareTarget, new: &[u8]) -> Result<(), OtaError> {
+        self.hash(new)?;
+        let planner = self.planner.as_mut().ok_or(OtaError::BadImage)?;
+        let (sector, written) = (&mut self.sector, &mut self.written);
+        let mut ok = true;
+        let planned = planner.literal(new, &mut |r| {
+            ok = ok && put_record(target, sector, written, r);
+            ok
+        });
+        if !ok { Err(OtaError::TooLarge) } else if !planned { Err(OtaError::BadImage) } else { Ok(()) }
+    }
+
+    fn finish(&mut self, target: &mut dyn FirmwareTarget) -> Result<(), OtaError> {
+        if self.made != self.size {
+            return Err(OtaError::BadImage);
+        }
+        let whole: [u8; 32] = core::mem::take(&mut self.whole).finalize().into();
+        let app: [u8; 32] = core::mem::take(&mut self.app).finalize().into();
+        let first = self.planner.take().and_then(|p| p.finish(whole)).ok_or(OtaError::BadImage)?;
+        if !self.sector.is_empty() {
+            let at = meshcore_inplace::PAGE + self.written;
+            if at + self.sector.len() as u32 > target.capacity() {
+                return Err(OtaError::TooLarge);
+            }
+            write_fresh(target, at, &self.sector)?;
+            self.sector.clear();
+        }
+        write_fresh(target, 0, &first)?;
+        self.hashes = Some((whole, app));
+        Ok(())
+    }
+}
+
+/// A plan's records into the slot from its second page on, a sector at a time.
+#[cfg(feature = "inplace")]
+fn put_record(target: &mut dyn FirmwareTarget, sector: &mut Vec<u8>, written: &mut u32, mut record: &[u8]) -> bool {
+    while !record.is_empty() {
+        let n = record.len().min(SECTOR_SIZE as usize - sector.len());
+        sector.extend_from_slice(&record[..n]);
+        record = &record[n..];
+        if sector.len() == SECTOR_SIZE as usize {
+            let at = meshcore_inplace::PAGE + *written;
+            if at + SECTOR_SIZE > target.capacity() || write_fresh(target, at, sector).is_err() {
+                return false;
+            }
+            *written += SECTOR_SIZE;
+            sector.clear();
+        }
+    }
+    true
+}
+
+/// A planned image: its trailer, the app's hash in it, and the expected hash, from what
+/// [`PlanWriter`] hashed on the way.
+#[cfg(feature = "inplace")]
+fn verify_planned(target: &dyn FirmwareTarget, size: u32, expected: Option<[u8; 32]>, plan: &PlanWriter) -> Result<(), OtaError> {
+    let ImageFormat::Nrf { chip, load } = target.format() else {
+        return Err(OtaError::BadImage);
+    };
+    let Some((whole, app)) = plan.hashes else {
+        return Err(OtaError::Incomplete);
+    };
+    let app_len = size.checked_sub(NRF_TRAILER_LEN).ok_or(OtaError::BadImage)?;
+    if !nrf_trailer_ok(&plan.tail, app_len, chip, load) {
+        return Err(OtaError::BadImage);
+    }
+    if app[..] != plan.tail[32..] {
+        return Err(OtaError::HashMismatch);
+    }
+    match expected {
+        Some(e) if whole != e => Err(OtaError::HashMismatch),
+        _ => Ok(()),
     }
 }
 
@@ -659,12 +878,13 @@ impl OtaEndpoint {
     }
 
     /// The largest delta the slot takes: any whose image fits, as one with no room beside that
-    /// image is applied as it comes; 0 without a slot or a readable running image.
+    /// image is applied as it comes; 0 without a slot or a readable running image. A target that
+    /// applies deltas in place keeps their plan, about half as large again as the delta.
     pub fn delta_room(&mut self) -> u32 {
         if self.running().is_none() {
             return 0;
         }
-        self.target.as_deref().map_or(0, |t| t.capacity())
+        self.target.as_deref().map_or(0, |t| if t.in_place_shift().is_some() { t.capacity() / 3 * 2 } else { t.capacity() })
     }
 
     /// An update has begun and is neither committed nor aborted.
@@ -1137,11 +1357,13 @@ mod tests {
         /// The running slot (base of delta updates).
         running: Vec<u8>,
         format: ImageFormat,
+        /// Deltas come in as plans (`FirmwareTarget::in_place_shift`).
+        shift: Option<u32>,
     }
 
     impl RamTarget {
         fn new(size: usize, fill: u8, running: Vec<u8>) -> Self {
-            Self { mem: vec![fill; size], erases: 0, activated: false, running, format: ImageFormat::Esp(9) }
+            Self { mem: vec![fill; size], erases: 0, activated: false, running, format: ImageFormat::Esp(9), shift: None }
         }
     }
 
@@ -1181,6 +1403,9 @@ mod tests {
         fn read_running(&mut self, offset: u32, buf: &mut [u8]) -> bool {
             buf.copy_from_slice(&self.running[offset as usize..offset as usize + buf.len()]);
             true
+        }
+        fn in_place_shift(&self) -> Option<u32> {
+            self.shift
         }
     }
 
@@ -1230,6 +1455,64 @@ mod tests {
         let t = RamTarget::new(1 << 20, 0, Vec::new());
         assert_eq!(OtaSession::begin(&t, 65_535 * 4 + 4, None, 4).err(), Some(OtaError::BadParams));
         assert!(OtaSession::begin(&t, 65_535 * 4, None, 4).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "inplace")]
+    fn a_delta_comes_into_a_target_with_no_room_for_its_image_as_a_plan() {
+        let code: Vec<u8> = (0..150_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+        let old = nrf_image(&code);
+        let mut code2 = code;
+        code2.splice(70_000..70_000, (0..9_000u32).map(|i| (i.wrapping_mul(40_503) >> 5) as u8));
+        let new = nrf_image(&code2);
+        let mut running = old.clone();
+        running.resize(256 * 1024, 0xFF);
+        // room for the plan only: a third of the image
+        let mut t = RamTarget::new(64 * 1024, 0x55, running);
+        (t.format, t.shift) = (ImageFormat::Nrf { chip: NRF_CHIP_NRF52840, load: 0x26000 }, Some(32 * 1024));
+        let (base_len, base_sha) = running_image(&mut t).unwrap();
+        let mut patch = Vec::new();
+        bsdiff::diff(&old, &new, &mut patch).unwrap();
+        let packed = miniz_oxide::deflate::compress_to_vec_zlib(&patch, 9);
+        let sha: [u8; 32] = Sha256::digest(&new).into();
+        let begin = |t: &mut RamTarget, sha: [u8; 32]| {
+            OtaSession::begin_delta(t, packed.len() as u32, new.len() as u32, sha, 152, base_len, base_sha)
+        };
+        let mut s = begin(&mut t, sha).unwrap();
+        send_all(&mut s, &mut t, &packed);
+        s.commit(&mut t).unwrap();
+        assert!(t.activated);
+        // the plan in the slot makes the new image from the old one
+        let h = meshcore_inplace::Header::parse(&t.mem[..4096]).unwrap();
+        assert_eq!((h.old_len, h.new_len, h.new_sha256), (old.len() as u32, new.len() as u32, sha));
+        let mut made = vec![0u8; new.len()];
+        for p in 0..h.pages {
+            let (from, to) = h.record(&t.mem, p).unwrap();
+            let mut old_at = |at: u32, out: &mut [u8]| {
+                out.copy_from_slice(&old[at as usize..at as usize + out.len()]);
+                true
+            };
+            let page = &mut made[(p * 4096) as usize..(p * 4096 + h.page_len(p)) as usize];
+            meshcore_inplace::make_page(&h, p, &t.mem[from as usize..to as usize], &mut old_at, page).unwrap();
+        }
+        assert!(made == new);
+
+        // an image other than the expected one is refused at commit
+        t.activated = false;
+        let mut s = begin(&mut t, [1; 32]).unwrap();
+        send_all(&mut s, &mut t, &packed);
+        assert_eq!(s.commit(&mut t), Err(OtaError::HashMismatch));
+        assert!(!t.activated);
+        // a whole image it does not take; a plan larger than its room stops the session
+        assert_eq!(OtaSession::begin_compressed(&t, 100_000, new.len() as u32, Some(sha), 152).err(), Some(OtaError::TooLarge));
+        let mut small = RamTarget::new(8 * 1024, 0x55, t.running.clone());
+        (small.format, small.shift) = (t.format, t.shift);
+        let mut s = begin(&mut small, sha).unwrap();
+        for i in 0..s.total_chunks() {
+            let a = (i * 152) as usize;
+            let _ = s.write_chunk(&mut small, i, &packed[a..(a + 152).min(packed.len())]);
+        }
+        assert!(!s.is_complete());
     }
 
     /// Fake nRF52840 image: app bytes, then the trailer, like tools/uf2/elf2uf2.py writes it.

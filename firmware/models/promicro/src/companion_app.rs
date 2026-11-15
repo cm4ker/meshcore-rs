@@ -32,7 +32,7 @@ use static_cell::StaticCell;
 use crate::board::{self, Battery, Led, Parts};
 use crate::companion::Nrf;
 use crate::flash::Flash;
-use crate::{COMPANION_ASIDE, COMPANION_REGION, COMPANION_REGION_BEFORE, DATA_REGION, Spec, console, ota, sd, usb_frames};
+use crate::{DATA_REGION, Spec, console, sd, usb_frames};
 
 /// Without a pass of the main loop for this long, the watchdog restarts the board. Long, as the
 /// watchdog keeps running into the UF2 bootloader (the 1200 baud touch is a soft reset), which
@@ -131,8 +131,8 @@ where
 
     // ---- persistent state
     let flash = Flash::new(Nvmc::new(chip.nvmc));
-    let mut store =
-        Store::with_regions(flash, DATA_REGION, Some(COMPANION_REGION)).with_lending(COMPANION_ASIDE, COMPANION_REGION_BEFORE);
+    let (region, aside, before) = spec.companion;
+    let mut store = Store::with_regions(flash, DATA_REGION, Some(region)).with_lending(aside, before);
     // a page takes ~85 ms to erase: the region (~7 s) fits in the watchdog's time
     match store.mount() {
         Mount::Ready | Mount::Fresh => {}
@@ -142,9 +142,9 @@ where
     }
     let store = Rc::new(RefCell::new(store));
     // an install request left behind (the installer only runs when the app hands over)
-    ota::clear_request(&store);
+    spec.updates.clear_request(&store);
     // count trial boots of a fresh update before anything can hang
-    let in_trial = ota::check_trial(&store);
+    let in_trial = spec.updates.check_trial(&store);
     // an update given up, or gone back from: the data goes back in place
     let lent = store.borrow().lent();
     if lent && !in_trial && !store.borrow_mut().take_back() {
@@ -167,7 +167,7 @@ where
     let sensors = Sensors::probe(i2c).await;
     let board = board(BoardParts { led, rxen, button, battery, temp: chip.temp, sensors, hold });
     let seed = u64::from_le_bytes(entropy[..8].try_into().unwrap()) ^ u64::from_le_bytes(entropy[8..16].try_into().unwrap());
-    let platform = Nrf { watchdog, seed, store: store.clone(), in_trial, stays_aside: false };
+    let platform = Nrf { watchdog, seed, store: store.clone(), in_trial, stays_aside: false, updates: spec.updates };
     let cfg = Config {
         // the Omsk mesh, as on the T-Echo (the repeater firmware's settings win, if it ran here)
         radio: RadioParams { freq_mhz: 868.731, bw_khz: 62.5, sf: 7, cr: 7 },

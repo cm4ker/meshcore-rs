@@ -948,6 +948,7 @@ dependencies = [
  "ed25519-dalek",
  "hmac",
  "libm",
+ "meshcore-inplace",
  "miniz_oxide",
  "sha2",
 ]
@@ -968,6 +969,10 @@ dependencies = [
  "meshcore",
  "meshcore-ui",
 ]
+
+[[package]]
+name = "meshcore-inplace"
+version = "0.1.0"
 
 [[package]]
 name = "meshcore-ui"
@@ -1364,12 +1369,15 @@ dependencies = [
  "embassy-time",
  "embedded-alloc",
  "embedded-graphics",
+ "embedded-storage",
  "heapless 0.9.3",
  "log",
  "meshcore",
  "meshcore-fw-core",
+ "meshcore-inplace",
  "meshcore-ui",
  "promicro",
+ "sha2",
  "static_cell",
 ]
 

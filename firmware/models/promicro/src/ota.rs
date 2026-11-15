@@ -16,6 +16,7 @@
 //! The companion keeps its data in the staging area and lends it to an update as one begins
 //! ([`StagingTarget::lending`]): the data waits aside until the update is kept or given up.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -33,8 +34,8 @@ const APP_END: u32 = 0x7B000;
 const STAGING: u32 = 0x7B000;
 /// Up to the sensors' blob (`DATA_OVERFLOW`); firmware from before it stages up to [`RECORD`].
 const STAGING_END: u32 = crate::DATA_OVERFLOW.0;
-const SAVED_FIRST: u32 = 0xD8000;
-const RECORD: u32 = 0xD9000;
+pub const SAVED_FIRST: u32 = 0xD8000;
+pub const RECORD: u32 = 0xD9000;
 pub const INSTALLER: u32 = 0xEA000;
 const RECORD_MAGIC: &[u8; 8] = b"MCRS-IN2";
 
@@ -94,14 +95,14 @@ impl<const LENDS: bool> StagingTarget<LENDS> {
 
 /// The bootloader starts whatever app is in place: it checks a CRC of the app only when its
 /// settings hold one (UF2 copies and 0.9.2-OTAFIX's serial DFU leave it out, 0).
-fn no_app_crc() -> bool {
+pub fn no_app_crc() -> bool {
     let settings = unsafe { core::ptr::read_volatile(BOOTLOADER_SETTINGS as *const u32) };
     let crc = settings >> 16;
     crc == 0 || crc == 0xFFFF
 }
 
 /// The watchdog, while a long flash job (inflating, patching) holds up the main loop.
-fn feed_watchdog() {
+pub fn feed_watchdog() {
     pac::WDT.rr(0).write(|w| w.set_rr(pac::wdt::vals::Rr::Reload));
 }
 
@@ -120,7 +121,12 @@ fn flash_bytes(addr: u32, len: u32) -> &'static [u8] {
 /// trailer names. The trailer is the first one naming its own offset as the app's length, as
 /// `meshcore::ota` finds the running image's.
 fn image_at(base: u32) -> Option<(u32, [u8; 32])> {
-    let flash = flash_bytes(base, APP_END - APP_START);
+    image_in(base, APP_END - APP_START)
+}
+
+/// [`image_at`] in the `len` bytes from `base`: a board with its own layout (the T114).
+pub fn image_in(base: u32, len: u32) -> Option<(u32, [u8; 32])> {
+    let flash = flash_bytes(base, len);
     let u32_at = |t: &[u8], i: usize| u32::from_le_bytes(t[i..i + 4].try_into().unwrap());
     (0..flash.len() - NRF_TRAILER_LEN as usize).step_by(4).find_map(|at| {
         let t = &flash[at..at + NRF_TRAILER_LEN as usize];
@@ -148,21 +154,21 @@ fn staged(hash: &[u8; 32]) -> Option<u32> {
 /// app hash of the firmware on trial, first 8 bytes][the app hash of the firmware in the staging
 /// area 32][its name, UTF-8, to the end]`.
 #[derive(Default)]
-struct FwRecord {
-    trial: Option<u8>,
+pub struct FwRecord {
+    pub trial: Option<u8>,
     /// The node went back by itself from the firmware in the staging area.
-    failed: bool,
-    skip: u32,
-    trial_hash: [u8; 8],
-    prev_hash: [u8; 32],
-    prev: String,
+    pub failed: bool,
+    pub skip: u32,
+    pub trial_hash: [u8; 8],
+    pub prev_hash: [u8; 32],
+    pub prev: String,
 }
 
 const NO_TRIAL: u8 = 0xFF;
 const FAILED: u8 = 0xFE;
 
 impl FwRecord {
-    fn load(store: &mut NrfStore) -> Self {
+    pub fn load(store: &mut NrfStore) -> Self {
         let Some(r) = store.load(Blob::OtaTrial).filter(|r| r.len() >= 45) else {
             return Self::default();
         };
@@ -176,7 +182,7 @@ impl FwRecord {
         }
     }
 
-    fn save(&self, store: &mut NrfStore) -> bool {
+    pub fn save(&self, store: &mut NrfStore) -> bool {
         let mut r = Vec::from([self.trial.unwrap_or(if self.failed { FAILED } else { NO_TRIAL })]);
         r.extend_from_slice(&self.skip.to_le_bytes());
         r.extend_from_slice(&self.trial_hash);
@@ -186,7 +192,7 @@ impl FwRecord {
     }
 
     /// This firmware is left for the one in the staging area: not installed by itself again.
-    fn left(own: Option<(u32, [u8; 32])>) -> Self {
+    pub fn left(own: Option<(u32, [u8; 32])>) -> Self {
         Self {
             skip: meshcore::release::release_counter(),
             prev_hash: own.map_or([0; 32], |(_, h)| h),
@@ -371,14 +377,20 @@ pub fn clear_request(store: &SharedStore<Flash>) {
 /// first page for it, point that page at it, reset. Interrupts stay off from here: this firmware
 /// is gone once its first page is.
 pub fn hand_over() -> ! {
+    hand_over_with(INSTALLER_BIN)
+}
+
+/// [`hand_over`] to the installer `installer` (a flat image for [`INSTALLER`]): a board with its
+/// own (the T114's applies deltas in place).
+pub fn hand_over_with(installer: &[u8]) -> ! {
     // the flash controller is the SoftDevice's while it runs
     crate::sd::disable();
     cortex_m::interrupt::disable();
     let flash = |addr: u32| unsafe { core::ptr::read_volatile(addr as *const u32) };
-    let words = INSTALLER_BIN.len().div_ceil(4);
+    let words = installer.len().div_ceil(4);
     let word = |i: usize| {
         let mut w = [0xFFu8; 4];
-        let b = &INSTALLER_BIN[4 * i..(4 * i + 4).min(INSTALLER_BIN.len())];
+        let b = &installer[4 * i..(4 * i + 4).min(installer.len())];
         w[..b.len()].copy_from_slice(b);
         u32::from_le_bytes(w)
     };
@@ -427,4 +439,70 @@ fn nvmc_write(addr: u32, word: u32) {
     unsafe { core::ptr::write_volatile(addr as *mut u32, word) };
     while !pac::NVMC.ready().read().ready() {}
     pac::NVMC.config().write(|w| w.set_wen(pac::nvmc::vals::Wen::Ren));
+}
+
+/// How a board takes its firmware updates: the Pro Micro swaps the image with the app ([`SWAP`],
+/// this module), the T114 applies a delta in place (`t114::ota`).
+pub trait Updates: Sync {
+    /// At start: a request left behind has been carried out, or was never handed over.
+    fn clear_request(&self, store: &SharedStore<Flash>);
+    /// Run at boot, before anything that could hang: `true` while on a trial boot.
+    fn check_trial(&self, store: &SharedStore<Flash>) -> bool;
+    /// Where an update comes in; `lends`: the companion's, its data lent to the update.
+    fn target(&self, store: SharedStore<Flash>, lends: bool) -> Option<Box<dyn FirmwareTarget>>;
+    /// What `fw` knows of the firmware to go back to (see [`previous`]).
+    fn previous(&self, store: &SharedStore<Flash>) -> (bool, String, u32, bool);
+    fn rollback(&self, store: &SharedStore<Flash>) -> bool;
+    fn confirm(&self, store: &SharedStore<Flash>);
+    /// The firmware to go back to is still there: no update has come in over it.
+    fn previous_kept(&self) -> bool;
+    /// An update is staged and verified: the reboot hands over to the installer.
+    fn install_pending(&self) -> bool;
+    fn hand_over(&self) -> !;
+}
+
+/// The Pro Micro's: the staging area swapped with the app.
+pub struct Swap;
+
+pub static SWAP: Swap = Swap;
+
+impl Updates for Swap {
+    fn clear_request(&self, store: &SharedStore<Flash>) {
+        clear_request(store)
+    }
+
+    fn check_trial(&self, store: &SharedStore<Flash>) -> bool {
+        check_trial(store)
+    }
+
+    fn target(&self, store: SharedStore<Flash>, lends: bool) -> Option<Box<dyn FirmwareTarget>> {
+        match lends {
+            true => StagingTarget::lending(store).map(|t| Box::new(t) as Box<dyn FirmwareTarget>),
+            false => StagingTarget::new(store).map(|t| Box::new(t) as Box<dyn FirmwareTarget>),
+        }
+    }
+
+    fn previous(&self, store: &SharedStore<Flash>) -> (bool, String, u32, bool) {
+        previous(store)
+    }
+
+    fn rollback(&self, store: &SharedStore<Flash>) -> bool {
+        rollback(store)
+    }
+
+    fn confirm(&self, store: &SharedStore<Flash>) {
+        confirm(store)
+    }
+
+    fn previous_kept(&self) -> bool {
+        PREVIOUS_KEPT.load(Ordering::Relaxed)
+    }
+
+    fn install_pending(&self) -> bool {
+        INSTALL_PENDING.load(Ordering::Relaxed)
+    }
+
+    fn hand_over(&self) -> ! {
+        hand_over()
+    }
 }

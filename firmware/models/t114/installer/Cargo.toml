@@ -1,0 +1,35 @@
+[package]
+edition      = "2024"
+name         = "t114-installer"
+rust-version = "1.88"
+version      = "0.1.0"
+description  = "Applies a staged plan over the T114's app flash in place (meshcore-inplace); resumes after a power loss"
+
+[[bin]]
+name = "installer"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+cortex-m = "0.7.7"
+# set-vtor: faults go to our own handlers, not through the app's (half-written) vector table
+cortex-m-rt = { version = "0.7.5", features = ["set-vtor"] }
+nrf-pac = { version = "0.4.0", features = ["nrf52840"] }
+# its tests run with the protocol core's (cargo test -p meshcore-inplace)
+meshcore-inplace = { path = "../../../../crates/inplace", default-features = false }
+
+# its own build, not part of the firmware's
+[workspace]
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = "fat"
+# it has to fit in three pages
+opt-level     = "z"
+panic         = "abort"
+
+[profile.dev]
+opt-level = "s"
+panic     = "abort"

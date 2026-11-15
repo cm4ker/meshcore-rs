@@ -36,6 +36,7 @@ pub struct Nrf {
     pub in_trial: bool,
     /// The data could not be put back in the region: it stays aside until the next start.
     pub stays_aside: bool,
+    pub updates: &'static dyn ota::Updates,
 }
 
 impl Platform for Nrf {
@@ -48,15 +49,14 @@ impl Platform for Nrf {
     }
 
     fn reboot(&mut self) -> ! {
-        if ota::INSTALL_PENDING.load(Ordering::Relaxed) {
-            ota::hand_over();
+        if self.updates.install_pending() {
+            self.updates.hand_over();
         }
         cortex_m::peripheral::SCB::sys_reset()
     }
 
     fn ota_target(&mut self) -> Option<Box<dyn FirmwareTarget>> {
-        let target = ota::StagingTarget::lending(self.store.clone())?;
-        Some(Box::new(target))
+        self.updates.target(self.store.clone(), true)
     }
 
     fn in_trial(&self) -> bool {
@@ -64,23 +64,23 @@ impl Platform for Nrf {
     }
 
     fn confirm_trial(&mut self) {
-        ota::confirm(&self.store);
+        self.updates.confirm(&self.store);
         self.in_trial = false;
         log::info!("OTA: new firmware confirmed");
     }
 
     fn other_slot(&mut self) -> (bool, String, u32) {
-        let (kept, prev, skip, _) = ota::previous(&self.store);
+        let (kept, prev, skip, _) = self.updates.previous(&self.store);
         (kept, prev, skip)
     }
 
     fn rollback(&mut self) -> bool {
-        ota::rollback(&self.store)
+        self.updates.rollback(&self.store)
     }
 
     fn poll_slot(&mut self, update: bool) -> bool {
         let mut store = self.store.borrow_mut();
-        if !store.lent() || update || self.in_trial || self.stays_aside || ota::INSTALL_PENDING.load(Ordering::Relaxed) {
+        if !store.lent() || update || self.in_trial || self.stays_aside || self.updates.install_pending() {
             return false;
         }
         self.stays_aside = !store.take_back();

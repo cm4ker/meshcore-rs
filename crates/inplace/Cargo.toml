@@ -1,0 +1,15 @@
+[package]
+edition      = "2024"
+name         = "meshcore-inplace"
+rust-version = "1.88"
+version      = "0.1.0"
+description  = "A firmware delta applied over the firmware it replaces, page by page, for a flash with no room for a second image (the Heltec T114); resumes after a power loss"
+
+[features]
+default = ["plan"]
+# turning a delta into a plan, on the device that receives it (needs an allocator); the installer
+# only applies plans (default-features = false)
+plan = []
+
+[dev-dependencies]
+bsdiff = "0.2.1"

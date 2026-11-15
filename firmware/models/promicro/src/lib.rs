@@ -37,6 +37,12 @@ pub struct Spec {
     pub batt_mv_per_lsb: f32,
     /// System OFF, which only the button ends; the radio is asleep, the SoftDevice off.
     pub system_off: fn() -> !,
+    /// How updates come in and go on ([`ota::SWAP`] on the Pro Micro).
+    pub updates: &'static dyn ota::Updates,
+    /// The companion's data, lent to its updates: its region, where it waits meanwhile, and the
+    /// region's size in the layout before the advert ring ([`COMPANION_REGION`],
+    /// [`COMPANION_ASIDE`], [`COMPANION_REGION_BEFORE`] on the Pro Micro).
+    pub companion: ((u32, u32), [(u32, u32); 2], u32),
     /// The binary's `BUILD_EPOCH` and `BUILD_DATE`.
     pub build_epoch: &'static str,
     pub build_date: &'static str,

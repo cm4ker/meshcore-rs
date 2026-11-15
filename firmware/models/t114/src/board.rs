@@ -5,7 +5,7 @@
 //! P0.04 (AIN2) behind a divider that P0.06 switches on; I2C on SDA P0.26, SCL P0.27; the ST7789
 //! screen on SPIM3 ([`crate::tft`]); the GPS socket on UARTE0 ([`crate::gps`]), powered with the
 //! I2C connector by P0.21. The types, the clock and the rest are the Pro Micro's
-//! (`promicro::board`): the same chip, bootloader and flash layout.
+//! (`promicro::board`): the same chip and bootloader.
 
 use embassy_nrf::pac;
 use promicro::Spec;
@@ -27,6 +27,8 @@ pub const fn spec(build_epoch: &'static str, build_date: &'static str) -> Spec {
         usb: (0x239A, 0x8029, "HT-n5262"),
         batt_mv_per_lsb: BATT_MV_PER_LSB,
         system_off,
+        updates: &crate::ota::IN_PLACE,
+        companion: (crate::ota::COMPANION_REGION, promicro::COMPANION_ASIDE, crate::ota::COMPANION_REGION.1),
         build_epoch,
         build_date,
     }

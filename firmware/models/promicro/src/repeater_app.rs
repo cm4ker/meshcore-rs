@@ -5,7 +5,6 @@
 //! (`board_parts!`) and hands over to [`run`]; what a board adds (the T114's screen and GPS) comes
 //! in through [`Extras`]. No Wi-Fi.
 
-use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -42,7 +41,7 @@ use static_cell::StaticCell;
 use crate::board::{self, Parts};
 use crate::console::UsbDriver;
 use crate::flash::Flash;
-use crate::{DATA_OVERFLOW, DATA_REGION, Spec, ble, console, ota, println, sd};
+use crate::{DATA_OVERFLOW, DATA_REGION, Spec, ble, console, println, sd};
 
 /// Without a pass of the main loop for this long, the watchdog restarts the board. The longest
 /// legitimate stall is one max-length SF12 transmission (~10 s); long anyway, as the watchdog
@@ -254,11 +253,12 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
     let flash = Flash::new(Nvmc::new(chip.nvmc));
     let store = Store::with_regions(flash, DATA_REGION, None).with_overflow(DATA_OVERFLOW);
     let store: NrfStore = Some(Rc::new(RefCell::new(store)));
+    let updates = spec.updates;
     if let Some(s) = &store {
-        ota::clear_request(s);
+        updates.clear_request(s);
     }
     // count trial boots of a fresh update before anything can hang
-    let in_trial = store.as_ref().is_some_and(ota::check_trial);
+    let in_trial = store.as_ref().is_some_and(|s| updates.check_trial(s));
     let prefs = load(&store, Blob::Prefs)
         .map(|d| NodePrefs::deserialize(&String::from_utf8_lossy(&d)))
         .unwrap_or_else(|| NodePrefs { tx_power_dbm: DEFAULT_TX_DBM, ..Default::default() });
@@ -362,13 +362,13 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
         mesh.app.sensors_load(&String::from_utf8_lossy(&sensors));
     }
     mesh.app.ota.build.board = spec.release_board;
-    match store.clone().and_then(ota::StagingTarget::new) {
-        Some(t) => mesh.app.ota.target = Some(Box::new(t)),
+    match store.clone().and_then(|s| updates.target(s, false)) {
+        Some(t) => mesh.app.ota.target = Some(t),
         None => warn!("OTA: the bootloader checks this app's CRC (BLE DFU): updates over USB only"),
     }
     if let Some(s) = &store {
         let b = &mut mesh.app.board;
-        (b.fw_rollback, b.fw_prev, b.fw_skip, b.fw_prev_failed) = ota::previous(s);
+        (b.fw_rollback, b.fw_prev, b.fw_skip, b.fw_prev_failed) = updates.previous(s);
     }
     mesh.begin(now_ms());
     mesh.app.start(&mut mesh.ctx);
@@ -681,14 +681,14 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
             reboot_at = Some(now + 3000);
         }
         if fx.fw_rollback {
-            if store.as_ref().is_some_and(ota::rollback) {
+            if store.as_ref().is_some_and(|s| updates.rollback(s)) {
                 reboot_at = Some(now + 3000);
             } else {
                 warn!("fw rollback: no firmware to go back to");
             }
         }
         // an update coming in takes the staging area over from the firmware to go back to
-        mesh.app.board.fw_rollback &= ota::PREVIOUS_KEPT.load(core::sync::atomic::Ordering::Relaxed);
+        mesh.app.board.fw_rollback &= updates.previous_kept();
         if let Some(r) = room.as_mut() {
             let rfx = r.app.take_effects();
             for line in &rfx.console {
@@ -723,7 +723,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
 
         if in_trial && now >= confirm_at {
             if let Some(s) = &store {
-                ota::confirm(s);
+                updates.confirm(s);
             }
             in_trial = false;
             mesh.app.board.fw_trial_until = None;
@@ -732,8 +732,8 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
 
         if reboot_at.is_some_and(|t| now >= t) {
             save(&store, Blob::Clock, &mesh.ctx.current_time().to_le_bytes());
-            if ota::INSTALL_PENDING.load(core::sync::atomic::Ordering::Relaxed) {
-                ota::hand_over();
+            if updates.install_pending() {
+                updates.hand_over();
             }
             cortex_m::peripheral::SCB::sys_reset();
         }
