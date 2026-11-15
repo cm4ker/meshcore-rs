@@ -10,8 +10,9 @@
 //! writes it anew from the records, then erases the header: a power loss on the way repeats it.
 //!
 //! With lending the partition keeps its adverts in a short ring (only the newest are worth
-//! moving) and marks its layout (`CompBlob::Layout`): one laid out before, with the advert table,
-//! moves to the ring by way of the area at the first start ([`Store::mount`]).
+//! moving) and marks its layout (`CompBlob::Layout`). Data laid out before ([`Before`]: with the
+//! advert table, or where the partition began elsewhere) moves to it by way of the area at the
+//! first start ([`Store::mount`]).
 
 use alloc::vec::Vec;
 
@@ -41,11 +42,20 @@ const LAYOUT_RING: &[u8] = b"ring";
 const ALL_BLOBS: [CompBlob; 6] =
     [CompBlob::Identity, CompBlob::Prefs, CompBlob::Channels, CompBlob::Clock, CompBlob::Bonds, CompBlob::Layout];
 
+/// Where a layout before kept the companion's data, moved from at the first start: the partition's
+/// start, its size with the adverts in the ring, and its size before that, with the advert table.
+#[derive(Clone, Copy, Debug)]
+pub struct Before {
+    pub base: u32,
+    pub ring: u32,
+    pub table: u32,
+}
+
 pub(super) struct Lending {
     /// The area: two pieces `(address, length)`, sector-aligned, read as one.
     area: [(u32, u32); 2],
-    /// The partition's size in the layout before the ring, to move it from.
-    legacy_size: u32,
+    /// The layout before, to move the data from.
+    before: Option<Before>,
     /// While the partition is lent: where the next record goes, from the area's start.
     head: Option<u32>,
 }
@@ -125,11 +135,11 @@ pub(super) fn unpack(data: &[u8]) -> Vec<u8> {
 
 impl<F: NorFlash> Store<F> {
     /// The companion partition is lent to firmware updates: its data moves to `area` (two
-    /// pieces, `(address, length)`) meanwhile. `legacy_size`: the partition's size in the layout
-    /// before (the advert table), moved from at the first start. [`Self::mount`] comes next.
-    pub fn with_lending(mut self, area: [(u32, u32); 2], legacy_size: u32) -> Self {
+    /// pieces, `(address, length)`) meanwhile. `before`: where the data was laid out before,
+    /// moved from at the first start. [`Self::mount`] comes next.
+    pub fn with_lending(mut self, area: [(u32, u32); 2], before: Option<Before>) -> Self {
         self.ring = true;
-        self.lending = Some(Lending { area, legacy_size, head: None });
+        self.lending = Some(Lending { area, before, head: None });
         self
     }
 
@@ -146,9 +156,14 @@ impl<F: NorFlash> Store<F> {
         if self.comp_load(CompBlob::Layout).is_some() {
             return Mount::Ready;
         }
-        if self.comp_load(CompBlob::Identity).is_some() {
-            info!("companion region: moving to the advert ring");
-            return if self.lend_legacy() && self.take_back() { Mount::Moved } else { Mount::Failed };
+        if let Some(b) = self.lending.as_ref().and_then(|l| l.before) {
+            // in the ring where the partition began before, or with the advert table
+            for (size, ring) in [(b.ring, true), (b.table, false)] {
+                if self.laid_out_at(b.base, ring) {
+                    info!("companion region: moving from the layout before");
+                    return if self.lend_from((b.base, size), ring) && self.take_back() { Mount::Moved } else { Mount::Failed };
+                }
+            }
         }
         // the repeater's firmware to go back to, an update it received, upstream's files
         let blank = (base..base + size)
@@ -310,19 +325,32 @@ impl<F: NorFlash> Store<F> {
         ALL_BLOBS.iter().filter_map(|&b| Some((TAG_BLOB, b as u8, self.comp_load(b)?))).collect()
     }
 
-    /// Lend the partition as laid out before the ring: the advert table and a longer log. A
-    /// contact list too long for the area loses its tail (the adverts go first) rather than all.
-    fn lend_legacy(&mut self) -> bool {
-        let (Some((base, size)), Some(legacy)) = (self.comp, self.lending.as_ref().map(|l| l.legacy_size)) else {
+    /// The companion's data is laid out from `base`, its adverts in the ring or the table.
+    fn laid_out_at(&mut self, base: u32, ring: bool) -> bool {
+        let comp = self.comp.replace((base, 0));
+        let found = self.comp_load(CompBlob::Identity).is_some() && self.comp_load(CompBlob::Layout).is_some() == ring;
+        self.comp = comp;
+        found
+    }
+
+    /// Lend the data as a layout before left it: in `region`, its adverts in the ring or the
+    /// table. A contact list too long for the area loses its tail (the adverts go first) rather
+    /// than all.
+    pub(super) fn lend_from(&mut self, region: (u32, u32), ring: bool) -> bool {
+        let (comp, ring_now) = (self.comp, self.ring);
+        (self.comp, self.ring, self.log_head, self.ring_head) = (Some(region), ring, None, None);
+        let blobs = self.blob_records();
+        let mut contacts = self.comp_log_latest();
+        let mut adverts = match ring {
+            true => self.ring_newest(ADVERTS_MOVED).into_iter().rev().collect(),
+            false => self.table_newest(ADVERTS_MOVED),
+        };
+        (self.comp, self.ring, self.log_head, self.ring_head) = (comp, ring_now, None, None);
+        let Some(cap) = self.lending.as_ref().map(|l| l.capacity()) else {
             return false;
         };
-        (self.comp, self.ring, self.log_head) = (Some((base, legacy)), false, None);
-        let mut contacts = self.comp_log_latest();
-        let mut adverts = self.table_newest(ADVERTS_MOVED);
-        (self.comp, self.ring, self.log_head) = (Some((base, size)), true, None);
-        let cap = self.lending.as_ref().unwrap().capacity();
         loop {
-            let mut recs = self.blob_records();
+            let mut recs = blobs.clone();
             for (key, data) in &adverts {
                 recs.push((TAG_ADVERT, 0, [&key[..], data].concat()));
             }

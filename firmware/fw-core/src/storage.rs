@@ -17,7 +17,7 @@
 
 mod lend;
 
-pub use lend::Mount;
+pub use lend::{Before, Mount};
 
 use alloc::rc::Rc;
 use alloc::vec;
@@ -742,13 +742,22 @@ mod tests {
     const COMP: (u32, u32) = (COMP_AT, 86 * SECTOR);
     const LEGACY: u32 = 91 * SECTOR;
     const AREA: [(u32, u32); 2] = [(COMP_AT + 86 * SECTOR, 5 * SECTOR), (COMP_AT + 91 * SECTOR, 7 * SECTOR)];
+    const BEFORE: Before = Before { base: COMP_AT, ring: COMP.1, table: LEGACY };
 
     fn lending_flash() -> RamFlash {
         RamFlash(vec![0xFF; (16 + 98) as usize * SECTOR as usize])
     }
 
     fn lending(flash: RamFlash) -> Store<RamFlash> {
-        Store::with_regions(flash, (0, 16 * SECTOR), Some(COMP)).with_lending(AREA, LEGACY)
+        Store::with_regions(flash, (0, 16 * SECTOR), Some(COMP)).with_lending(AREA, Some(BEFORE))
+    }
+
+    // the Pro Micro since its updates went in place: the partition 20 sectors further on, to the
+    // same end
+    const MOVED: (u32, u32) = (COMP_AT + 20 * SECTOR, 66 * SECTOR);
+
+    fn moved(flash: RamFlash) -> Store<RamFlash> {
+        Store::with_regions(flash, (0, 16 * SECTOR), Some(MOVED)).with_lending(AREA, Some(BEFORE))
     }
 
     fn key(i: u32) -> [u8; 32] {
@@ -910,6 +919,64 @@ mod tests {
         let mut store = lending(core::mem::replace(store.flash(), RamFlash(Vec::new())));
         assert_eq!(store.mount(), Mount::Ready);
         assert_eq!(store.comp_log_latest(), Some(contacts(305)));
+    }
+
+    #[test]
+    fn the_data_follows_the_partition_where_it_begins_now() {
+        let mut old = lending(lending_flash());
+        assert_eq!(old.mount(), Mount::Fresh);
+        assert!(old.comp_save(CompBlob::Identity, &[6; 96]));
+        assert!(old.comp_save(CompBlob::Prefs, b"name=c"));
+        for i in 0..30 {
+            assert!(old.advert_put(&key(i), &[i as u8; 80]));
+        }
+        for n in 200..204 {
+            assert!(old.comp_log_append(&contacts(n)));
+        }
+        let mut store = moved(core::mem::replace(old.flash(), RamFlash(Vec::new())));
+        assert_eq!(store.mount(), Mount::Moved);
+        assert_eq!(store.comp_load(CompBlob::Identity), Some(vec![6; 96]));
+        assert_eq!(store.comp_load(CompBlob::Prefs).as_deref(), Some(&b"name=c"[..]));
+        assert_eq!(store.comp_log_latest(), Some(contacts(203)));
+        assert_eq!(store.advert_get(&key(29)), Some(vec![29; 80]));
+        assert_eq!(store.advert_get(&key(9)), None, "only the newest 20 move");
+        let mut store = moved(core::mem::replace(store.flash(), RamFlash(Vec::new())));
+        assert_eq!(store.mount(), Mount::Ready);
+        assert_eq!(store.comp_log_latest(), Some(contacts(203)));
+        assert!(store.lend() && store.take_back());
+        assert_eq!(store.comp_load(CompBlob::Identity), Some(vec![6; 96]));
+    }
+
+    #[test]
+    fn a_move_cut_short_is_done_again() {
+        let mut old = lending(lending_flash());
+        old.mount();
+        assert!(old.comp_save(CompBlob::Identity, &[7; 96]));
+        assert!(old.comp_log_append(&contacts(120)));
+        // the power went with the new partition half written: the area holds the data
+        let mut store = moved(core::mem::replace(old.flash(), RamFlash(Vec::new())));
+        assert!(store.lend_from((COMP_AT, COMP.1), true));
+        store.flash().0[MOVED.0 as usize..(MOVED.0 + 10 * SECTOR) as usize].fill(0xFF);
+        let mut store = moved(core::mem::replace(store.flash(), RamFlash(Vec::new())));
+        assert_eq!(store.mount(), Mount::Lent);
+        assert!(store.take_back());
+        assert_eq!(store.comp_load(CompBlob::Identity), Some(vec![7; 96]));
+        assert_eq!(store.comp_log_latest(), Some(contacts(120)));
+    }
+
+    #[test]
+    fn the_table_layout_follows_the_partition_too() {
+        let mut old = Store::with_regions(lending_flash(), (0, 16 * SECTOR), Some((COMP_AT, LEGACY)));
+        assert!(old.comp_save(CompBlob::Identity, &[8; 96]));
+        for i in 0..10 {
+            assert!(old.advert_put(&key(i), &[i as u8; 60]));
+        }
+        assert!(old.comp_log_append(&contacts(77)));
+        let mut store = moved(core::mem::replace(old.flash(), RamFlash(Vec::new())));
+        assert_eq!(store.mount(), Mount::Moved);
+        assert_eq!(store.comp_load(CompBlob::Identity), Some(vec![8; 96]));
+        assert_eq!(store.comp_log_latest(), Some(contacts(77)));
+        assert_eq!((0..10).filter(|&i| store.advert_get(&key(i)).is_some()).count(), 10);
     }
 
     #[test]
