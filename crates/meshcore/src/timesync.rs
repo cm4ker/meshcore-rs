@@ -780,6 +780,19 @@ mod tests {
         assert!(!forged.verify(&[*key.pub_key()]));
     }
 
+    /// The same token as meshmap's `time.test.ts` makes: the server and the firmware agree.
+    #[test]
+    fn token_matches_the_servers_test_vector() {
+        let key = LocalIdentity::from_seed(&[7; 32]);
+        assert_eq!(to_hex(key.pub_key()).to_ascii_lowercase(), "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c");
+        let t = Token::signed(&key, 1_792_800_000_000, [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            to_hex(&t.to_bytes()).to_ascii_lowercase(),
+            "010008356ba10100000001020304050607fe812c1256bf46c8ced2ca0f7364f921ef62023a056e6117392c6e860165ad3657a921d5cdf85c4866b3324a079a5a927907fccd217801cbefe09d5a1cd5300a4503000a"
+        );
+        assert!(t.verify(&[*key.pub_key()]));
+    }
+
     #[test]
     fn key_id_is_the_fingerprint_start() {
         assert_eq!(key_id(&TIME_KEYS[0]), [0xbe, 0x02, 0x83, 0x3c]);
