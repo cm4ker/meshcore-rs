@@ -1074,12 +1074,15 @@ where
         }
 
         // network: SNTP time, observer uplink, status lines for the CLI
-        if let Some(t) = net::TIME_SYNC.try_take()
-            && t.abs_diff(mesh.ctx.current_time()) > 2
-        {
-            info!("SNTP: clock set to {t}");
-            mesh.ctx.set_current_time(t);
-            mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
+        if let Some(t) = net::TIME_SYNC.try_take() {
+            if t.abs_diff(mesh.ctx.current_time()) > 2 {
+                info!("SNTP: clock set to {t}");
+                mesh.ctx.set_current_time(t);
+                mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
+            } else if mesh.app.timesync.clock() == Clock::Unknown {
+                // the clock kept across a reset was right: as good as SNTP's
+                mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
+            }
         }
         if let Some(stack) = station {
             let ip = net::ipv4(&stack);

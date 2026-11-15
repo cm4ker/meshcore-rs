@@ -736,11 +736,14 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
 
         // network: SNTP time, address for `get wifi.*`, the release server for the update store
         let (time, ip) = platform.poll_network(&mesh.app.prefs.fw_server);
-        if let Some(t) = time
-            && t.abs_diff(mesh.ctx.current_time()) > 2
-        {
-            mesh.ctx.set_current_time(t);
-            mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
+        if let Some(t) = time {
+            if t.abs_diff(mesh.ctx.current_time()) > 2 {
+                mesh.ctx.set_current_time(t);
+                mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
+            } else if mesh.app.timesync.clock() == Clock::Unknown {
+                // the clock kept across a reset was right: as good as SNTP's
+                mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
+            }
         }
         if links.tcp {
             mesh.app.board.wifi_ip = ip;
