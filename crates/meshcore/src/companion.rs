@@ -1424,6 +1424,13 @@ impl MeshApp for Companion {
             }
             return;
         }
+        // the gateway asked for the time is often a contact too: its key decrypts the answer first
+        if payload_type == PAYLOAD_TYPE_RESPONSE
+            && self.timesync.peer().is_some_and(|(id, _)| *id == self.contacts[idx].id)
+            && self.timesync.on_answer(ctx, data)
+        {
+            return;
+        }
         let len = data.len();
         if payload_type == PAYLOAD_TYPE_TXT_MSG && len > 5 {
             let sender_timestamp = read_u32(data, 0);

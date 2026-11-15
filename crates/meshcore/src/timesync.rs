@@ -317,6 +317,8 @@ pub struct TimeSync {
     best_rtt: Option<u64>,
     ahead_asked: Option<u64>,
     beacon_heard: Option<u64>,
+    /// How far this clock was ahead of the last beacon's time (ms; behind if negative).
+    beacon_ahead_ms: i64,
     /// A gateway answered that [`Self::take_remembered`] has not handed out yet.
     remember_changed: bool,
 }
@@ -346,6 +348,7 @@ impl TimeSync {
             best_rtt: None,
             ahead_asked: None,
             beacon_heard: None,
+            beacon_ahead_ms: 0,
             remember_changed: false,
         };
         t.set_keys(keys);
@@ -479,16 +482,21 @@ impl TimeSync {
         let air = ctx.radio.est_airtime_ms(pkt.raw_length()) as u64;
         let est = token.unix_ms + air * (hops + 1).min(MAX_CORRECTED_HOPS) as u64;
         let local = ctx.current_time_ms();
+        self.beacon_ahead_ms = local as i64 - est as i64;
         if est >= local + MIN_STEP_MS {
             self.apply(ctx, est, Source::Beacon { gateway: prefix, hops: hops as u8 }, 0);
-        } else if local > est + AHEAD_MS
-            && self.mode == Mode::Auto
-            && self.pending.is_none()
-            && self.ahead_asked.is_none_or(|t| ctx.now - t >= AHEAD_EVERY_MS)
-        {
-            self.ahead_asked = Some(ctx.now);
-            self.note = format!("a beacon is {} s behind this clock: asking a gateway", (local - est) / 1000);
-            self.begin_round(ctx.now, Why::Ahead);
+        } else if local > est + AHEAD_MS {
+            if self.mode == Mode::Auto
+                && self.pending.is_none()
+                && self.ahead_asked.is_none_or(|t| ctx.now - t >= AHEAD_EVERY_MS)
+            {
+                self.ahead_asked = Some(ctx.now);
+                self.note = format!("a beacon is {} s behind this clock: asking a gateway", (local - est) / 1000);
+                self.begin_round(ctx.now, Why::Ahead);
+            }
+        } else if self.clock == Clock::Unknown {
+            // at most a minute ahead of the server's time: right enough to call approximate
+            self.clock = Clock::Approx;
         }
         true
     }
@@ -736,7 +744,14 @@ impl TimeSync {
             text.push_str(&format!("; {known} gateway{}", if known == 1 { "" } else { "s" }));
         }
         if let Some(t) = self.beacon_heard {
-            text.push_str(&format!("; last beacon {} min ago", (ctx.now - t) / 60_000));
+            let a = self.beacon_ahead_ms;
+            let side = if a >= 0 { "ahead of" } else { "behind" };
+            text.push_str(&format!(
+                "; last beacon {} min ago, this clock {}.{} s {side} it",
+                (ctx.now - t) / 60_000,
+                a.unsigned_abs() / 1000,
+                a.unsigned_abs() % 1000 / 100
+            ));
         }
         if !self.note.is_empty() {
             text.push_str("; ");

@@ -2237,3 +2237,43 @@ fn companion_takes_the_time_from_a_beacon_and_the_app_does_not_see_it() {
     assert_eq!(&cmd(&mut c, b"\x29time_sync:auto")[0][..1], &[RESP_CODE_OK]);
     assert_eq!(c.app.prefs.time_sync, timesync::Mode::Auto.code());
 }
+
+/// The time server for a gateway in these tests: it answers at once, always with the same time.
+struct InstantTimeServer(LocalIdentity, u64, std::collections::VecDeque<[u8; 8]>);
+
+impl meshcore::timesync::TimeFetch for InstantTimeServer {
+    fn start(&mut self, nonce: [u8; 8]) -> bool {
+        self.2.push_back(nonce);
+        true
+    }
+
+    fn take(&mut self) -> Option<([u8; 8], Option<[u8; meshcore::timesync::TOKEN_LEN]>)> {
+        let n = self.2.pop_front()?;
+        Some((n, Some(meshcore::timesync::Token::signed(&self.0, self.1, n).to_bytes())))
+    }
+}
+
+#[test]
+fn companion_takes_the_answer_of_a_gateway_that_is_one_of_its_contacts() {
+    use meshcore::timesync::Clock;
+    let server = LocalIdentity::from_seed(&[0x5E; 32]);
+    let server_ms = (T0 as u64 + 86_400) * 1000;
+    let mut r = repeater(2);
+    r.app.prefs.time_serve = true;
+    r.app.prefs.time_keys = vec![*server.pub_key()];
+    r.app.timesync.set_keys(&[*server.pub_key()]);
+    r.app.time_fetch = Some(Box::new(InstantTimeServer(LocalIdentity::from_seed(&[0x5E; 32]), server_ms, Default::default())));
+    r.app.start(&mut r.ctx);
+    let mut c = companion(1, "Alice");
+    c.app.timesync.set_keys(&[*server.pub_key()]);
+    let mut air = Air::new();
+    air.link(0, 1);
+    air.run(&mut [&mut r, &mut c], 20_000); // the gateway's boot advert: a contact, and a gateway
+    assert!(c.app.contacts().iter().any(|x| x.id == r.ctx.self_id.id), "the repeater is a contact");
+    // its key decrypts the answer as the contact's first: the answer must still reach the clock
+    let reply = c.app.handle_command(&mut c.ctx, false, "time sync");
+    assert!(reply.starts_with("OK - asking"), "{reply}");
+    air.run(&mut [&mut r, &mut c], 5_000);
+    assert_eq!(c.app.timesync.clock(), Clock::Trusted);
+    assert!(c.ctx.current_time_ms().abs_diff(server_ms) < 10_000);
+}

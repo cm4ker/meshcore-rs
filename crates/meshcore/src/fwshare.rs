@@ -746,12 +746,12 @@ mod tests {
         }
     }
 
-    /// The release workflow and the delta report of every build warn about deltas over the same
-    /// limit.
+    /// The release's deltas (release.yml and promote.yml run tools/release/deltas.sh) and the delta
+    /// report of every build warn about deltas over the same limit.
     #[test]
     fn the_release_workflow_knows_the_lora_limit() {
-        let workflow = include_str!("../../../.github/workflows/release.yml");
-        assert!(workflow.contains(&alloc::format!("lora_max={MAX_LORA_FILE}")), "release.yml: lora_max={MAX_LORA_FILE}");
+        let deltas = include_str!("../../../tools/release/deltas.sh");
+        assert!(deltas.contains(&alloc::format!("lora_max={MAX_LORA_FILE}")), "deltas.sh: lora_max={MAX_LORA_FILE}");
         let report = include_str!("../../../tools/delta-report/delta_report.py");
         assert!(report.contains(&alloc::format!("LORA_MAX = {MAX_LORA_FILE}")), "delta_report.py: LORA_MAX = {MAX_LORA_FILE}");
     }
