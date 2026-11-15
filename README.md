@@ -17,7 +17,7 @@
 | Seeed XIAO ESP32-C6 + Waveshare Core2021-HF | `firmware/models/xiao-c6` | ESP32-C6, Semtech LR2021, flash 4 МБ | нет | да: room server, Wi-Fi и MQTT; батарею не меряет | да | BLE или Wi-Fi (не вместе; TCP пока ненадёжен), USB | через подключение приложения; два слота по 1,75 МБ, целый образ без сжатия |
 | LilyGO T-Echo | `firmware/models/t-echo` | nRF52840, SX1262, QSPI-флешка | e-paper 200×200 | нет | да, с GPS L76K | BLE, USB | через подключение приложения; один слот, без отката; первая прошивка — UF2 |
 | nRF52840 Pro Micro («Faketec», upstream `promicro`) | `firmware/models/promicro` | nRF52840, SX1262 (HT-RA62, E22), только внутренняя flash | нет | да: room server, датчики на I2C в телеметрии; без Wi-Fi; BLE только для обновлений (`fw ble`) | да, до 350 контактов, датчики в телеметрии | репитер: USB (консоль); компаньон: BLE и USB | репитер: LoRa (подписанный релиз, дельта) или BLE, откат на прежнюю; компаньон: дельта от репитера по LoRa или через подключение приложения, откат на время пробного запуска; первая прошивка — UF2 |
-| Heltec Mesh Node T114 | `firmware/models/t114` | nRF52840, SX1262, внутренняя flash | TFT 240×135 | да, как Pro Micro, с экраном и GPS | да, как Pro Micro, с экраном и GPS | как Pro Micro | как Pro Micro; первая прошивка — UF2 (диск `HT-n5262`) |
+| Heltec Mesh Node T114 | `firmware/models/t114` | nRF52840, SX1262, внутренняя flash | TFT 240×135 | да, как Pro Micro, с экраном и GPS | да, как Pro Micro, с экраном и GPS | как Pro Micro | дельтой на месте с откатом (полный образ — UF2); первая прошивка — UF2 (диск `HT-n5262`) |
 
 В выпуске на GitHub у каждой сборки свой файл `<плата>-<роль>-<версия>-r<номер>.mcfw`
 (`heltec-v4-repeater`, `heltec-v3-companion`, `xiao-c6-repeater`, `t-echo-companion`…), у T-Echo,
@@ -307,18 +307,26 @@ python ..\..\..\tools\uf2\elf2uf2.py target\thumbv7em-none-eabihf\release\compan
 python ..\..\..\tools\uf2\flash_uf2.py companion.uf2 --drive PROMICRO --vid 0x239A --pid 0x00B3
 ```
 
-Heltec Mesh Node T114 — тот же nRF52840 с SX1262, тот же загрузчик Adafruit (0.9.0, S140 6.1.1) и
-та же раскладка flash, поэтому прошивка — библиотека promicro (`repeater_app`, `companion_app`) со
-своей платой в `firmware/models/t114` (пины в `src/board.rs` по upstream `variants/heltec_t114` и
-Meshtastic): радио на SPI P0.19/P0.22/P0.23,
-NSS P0.24, RESET P0.25, BUSY P0.17, DIO1 P0.20, TCXO 1,8 В и DIO2 как у Pro Micro, RXEN нет;
-светодиод P1.03 (горит по низкому), кнопка P1.10, батарея P0.04 через делитель 4,9, который
-включает P0.06; I2C на P0.26/P0.27. Экран ST7789 240×135 на SPIM3 (SCK P1.08, MOSI P1.09, CS
-P0.11, DC P0.12, RESET P0.02, питание P0.03 и подсветка P0.15 — обе по низкому), страницы класса
-`Tft240x135`; GPS L76K на UARTE0 (P1.05 от GPS, P1.07 к нему, сброс P1.06, пробуждение P1.02),
-питание GPS и разъёма I2C — P0.21. Внешней флешки у T114 V2 нет: раскладка и предел приложения
-(340 КБ) — как у Pro Micro. Всё остальное — как у Pro Micro выше: репитер и компаньон,
-обновления, BLE; PIN компаньона по BLE — на экране, новый на каждое сопряжение.
+Heltec Mesh Node T114 — тот же nRF52840 с SX1262 и тот же загрузчик Adafruit (0.9.0, S140 6.1.1),
+поэтому прошивка — библиотека promicro (`repeater_app`, `companion_app`) со своей платой в
+`firmware/models/t114` (пины в `src/board.rs` по upstream `variants/heltec_t114` и Meshtastic):
+радио на SPIM1 (SCK P0.19, MOSI P0.22, MISO P0.23), NSS P0.24, RESET P0.25, BUSY P0.17, DIO1
+P0.20, TCXO 1,8 В и DIO2 как у Pro Micro, RXEN нет; светодиод P1.03 (горит по низкому), кнопка
+P1.10, батарея P0.04 через делитель 4,9, который включает P0.06; I2C на P0.26/P0.27. Экран ST7789
+240×135 на SPIM2 (SCK P1.08, MOSI P1.09, CS P0.11, DC P0.12, RESET P0.02, питание P0.03 и
+подсветка P0.15 — обе по низкому), страницы класса `Tft240x135`; не на SPIM3: тот при работе
+процессора с тем же блоком RAM портит передаваемое (errata 198). GPS L76K на UARTE0 (P1.05 от GPS,
+P1.07 к нему, сброс P1.06, пробуждение P1.02). VEXT (P0.21) питает экран (без него подсветка не
+горит), GPS и разъём I2C: он включён, пока нужен экрану или GPS. PIN компаньона по BLE — на экране,
+новый на каждое сопряжение.
+
+Внешней флешки у T114 V2 нет, и обновления у него свои (`src/ota.rs`, `crates/inplace`): дельта
+приходит как на Pro Micro, но раскладывается в постраничный план, а установщик (`installer/`)
+пишет новую прошивку поверх старой, сдвинув её на 32 КБ вверх; план обратно, построенный до
+установки, даёт откат (сам после трёх неудачных пробных запусков или `fw rollback`). Прошивке
+отведено 0x26000..0x8F000 (420 КБ, образ до 388 КБ), планам — 0x8F000..0xD6000 (там же данные
+компаньона, как на Pro Micro); дальше — как у Pro Micro. Полный образ по воздуху не помещается:
+только дельта от одного из последних выпусков, полный — файлом `.uf2`.
 
 ```powershell
 cd firmware\models\t114
@@ -328,8 +336,8 @@ python ..\..\..\tools\uf2\flash_uf2.py t114-repeater.uf2 --drive HT-n5262 --pid 
 ```
 
 Первый раз — двойное нажатие RST (диск `HT-n5262`): прошивка upstream по касанию 1200 бод уходит в
-serial DFU. Дальше `flash_uf2.py` перезапускает плату в загрузчик сам. Пакета .zip для serial DFU у
-T114 пока нет: неизвестно, пишет ли его загрузчик CRC, который выключает обновления по воздуху.
+serial DFU. Дальше `flash_uf2.py` перезапускает плату в загрузчик сам (однажды загрузчик ушёл вместо
+UF2 в «BLE OTA»: тогда двойное нажатие RST). Пакета .zip для serial DFU у T114 нет.
 
 Веб-флешеры (кастомная прошивка) берут `promicro-companion.zip` из выпуска: тот же образ, пакетом
 для serial DFU загрузчика, как у upstream (`elf2uf2.py --dfu-zip`). Загрузчик 0.9.2-OTAFIX пишет его
