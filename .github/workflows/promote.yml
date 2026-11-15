@@ -1,0 +1,99 @@
+# A dev release becomes stable: once it has run for SOAK_DAYS (7) days on the test nodes without a
+# rollback, the devices that follow stable get the very same images. Daily, the newest dev release
+# is promoted if it is that old, newer than the last stable one, and not held (a line `hold` in its
+# notes on GitHub); see tools/release/promote_pick.py. By hand, any dev release newer than the last
+# stable one, held or not; `force` skips the wait.
+#
+# Nothing is built: the dev release's images are taken from its .mcfw files, signed again with a
+# stable manifest under the same release number and the stable name (0.9.0-dev.3 -> 0.9.0), and
+# published with deltas from the last releases, as the release run publishes them. The devices on
+# dev run these bytes already and take nothing.
+
+name: promote to stable
+
+on:
+  schedule:
+    - cron: "30 2 * * *" # 08:30 in Omsk
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The dev release to promote, e.g. v0.9.0-dev.3-r136 (default: the newest, once 7 days old)"
+        required: false
+      version:
+        description: "Its stable name (default: the dev name without -dev.N)"
+        required: false
+      force:
+        description: "Promote before the 7 days are up"
+        type: boolean
+        default: false
+
+env:
+  MCFW_RELEASE_ROOT: 7da3cdc4aca52140a5e650646d58df737625536027bd16e78fa50f1b88a012ea
+  SOAK_DAYS: 7
+  CARGO_TERM_COLOR: always
+
+concurrency: release
+
+jobs:
+  promote:
+    name: Promote a dev release to stable
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: The release to promote
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
+          FORCE: ${{ inputs.force }}
+        run: python3 tools/release/promote_pick.py 2> >(tee -a "$GITHUB_STEP_SUMMARY" >&2) | tee -a "$GITHUB_OUTPUT"
+      - if: steps.pick.outputs.tag
+        run: cargo build --locked --release -p ota-sign
+      - name: Sign its images again for stable
+        if: steps.pick.outputs.tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MCFW_ROOT_KEY: ${{ secrets.MCFW_ROOT_KEY }}
+          PROMOTE_TAG: ${{ steps.pick.outputs.tag }}
+          DEV_VERSION: ${{ steps.pick.outputs.dev_version }}
+          MCFW_VERSION: ${{ steps.pick.outputs.version }}
+          MCFW_COUNTER: ${{ steps.pick.outputs.counter }}
+        run: tools/release/promote.sh
+      - name: Deltas from the last releases
+        if: steps.pick.outputs.tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MCFW_VERSION: ${{ steps.pick.outputs.version }}
+          MCFW_COUNTER: ${{ steps.pick.outputs.counter }}
+          MCFW_CHANNEL: stable
+        run: tools/release/deltas.sh
+      - name: Publish
+        if: steps.pick.outputs.tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTE_TAG: ${{ steps.pick.outputs.tag }}
+          DEV_VERSION: ${{ steps.pick.outputs.dev_version }}
+          DEV_VERSIONS: ${{ steps.pick.outputs.dev_versions }}
+          MCFW_VERSION: ${{ steps.pick.outputs.version }}
+          MCFW_COUNTER: ${{ steps.pick.outputs.counter }}
+        run: |
+          root=$(awk '/fingerprint/{print $2}' out/root.txt)
+          {
+            echo "Stable: the images of $DEV_VERSION (release #$MCFW_COUNTER, $PROMOTE_TAG), which ran on dev for $SOAK_DAYS days, signed again for the devices that follow stable. The devices on dev run them already."
+            # what changed since the last stable release: the sections of the dev releases since
+            for v in $DEV_VERSIONS; do
+              if section=$(tools/changelog-section.sh "$v" 2> /dev/null); then
+                printf '\n## %s\n\n%s\n' "$v" "$section"
+              fi
+            done
+            echo
+            echo "---"
+            echo
+            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo or Pro Micro image for the USB bootloader's drive; a .zip, the Pro Micro companion's for its serial DFU (web flashers' custom firmware). The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them. ota-app-* is the program that puts a .mcfw on a device over USB or BLE, for Windows, macOS and Linux (README, «ota-app»)."
+          } > notes.md
+          gh release create "v$MCFW_VERSION-r$MCFW_COUNTER" out/* --latest \
+            --title "$MCFW_VERSION (release #$MCFW_COUNTER, stable)" \
+            --notes-file notes.md
