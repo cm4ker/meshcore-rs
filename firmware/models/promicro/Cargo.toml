@@ -9,6 +9,9 @@ version      = "0.1.0"
 # AHTX0 + BME280 + BMP280 + INA219 + SHT3X + the descriptor engine, so these opt in on a board (or
 # a trimmed build) that has the room. Linear sensors need no feature — add them with `sensor add`.
 extra-sensors = ["meshcore-fw-core/extra-sensors"]
+# The Heltec Mesh Node T114 instead of the Pro Micro: the same chip, bootloader and flash layout,
+# its own pins (src/board.rs). Built into target/t114 (`--target-dir`), next to the Pro Micro's.
+t114 = []
 
 [lib]
 test = false

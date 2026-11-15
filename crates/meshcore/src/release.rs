@@ -47,6 +47,8 @@ pub mod board {
     /// nRF52840 Pro Micro with an SX1262 module ("Faketec", upstream `variants/promicro`).
     pub const PROMICRO: u8 = 5;
     pub const HELTEC_PAPER: u8 = 6;
+    /// Heltec Mesh Node T114: nRF52840 and SX1262, built with the Pro Micro's code.
+    pub const HELTEC_T114: u8 = 7;
 }
 
 /// What the image runs as.
@@ -160,12 +162,13 @@ pub fn board_name(board: u8) -> &'static str {
         board::T_ECHO => "t-echo",
         board::PROMICRO => "promicro",
         board::HELTEC_PAPER => "heltec-paper",
+        board::HELTEC_T114 => "heltec-t114",
         _ => "?",
     }
 }
 
 pub fn board_by_name(name: &str) -> Option<u8> {
-    [board::HELTEC_V4, board::HELTEC_V3, board::XIAO_C6, board::T_ECHO, board::PROMICRO, board::HELTEC_PAPER]
+    [board::HELTEC_V4, board::HELTEC_V3, board::XIAO_C6, board::T_ECHO, board::PROMICRO, board::HELTEC_PAPER, board::HELTEC_T114]
         .into_iter()
         .find(|&b| board_name(b) == name)
 }

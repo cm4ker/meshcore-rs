@@ -1,4 +1,5 @@
-//! MeshCore repeater firmware for an nRF52840 Pro Micro with an SX1262 module, in Rust.
+//! MeshCore repeater firmware for an nRF52840 Pro Micro with an SX1262 module (or the Heltec
+//! T114, `--features t114`), in Rust.
 //!
 //! The repeater and its CLI are the same as on the Heltec boards (`meshcore::repeater`); this is
 //! the board under them: the radio, the console on the USB port, the node's data in the internal
@@ -21,14 +22,11 @@ use core::panic::PanicInfo;
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either4, select4};
-use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::rng::Rng;
-use embassy_nrf::saadc::{self, ChannelConfig, Saadc};
-use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::temp::{self, Temp};
-use embassy_nrf::twim::{self, Twim};
+use embassy_nrf::{saadc, spim, twim};
 use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::wdt::{self, Watchdog};
@@ -47,10 +45,9 @@ use meshcore::util::{Shortest, to_hex};
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE};
 use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT};
 use meshcore_fw_core::noise::NoiseFloor;
-use meshcore_fw_core::radio::{LoraRadio, RxEvent, WaitIrq};
+use meshcore_fw_core::radio::{LoraRadio, RxEvent};
 use meshcore_fw_core::storage::{Blob, SharedStore, Store};
-use meshcore_fw_core::sx1262::Sx1262;
-use promicro::board::{self, Battery};
+use promicro::board;
 use promicro::flash::Flash;
 use meshcore_fw_core::sensors::Sensors;
 use promicro::{DATA_OVERFLOW, DATA_REGION, ble, console, ota, println, sd};
@@ -68,7 +65,7 @@ const WATCHDOG_SECS: u32 = 60;
 /// A trial firmware that keeps running this long is kept.
 const TRIAL_HEALTHY_MS: u64 = 120_000;
 
-/// Upstream's Pro Micro build transmits at 22 dBm (`LORA_TX_POWER`).
+/// Upstream's Pro Micro and T114 builds transmit at 22 dBm (`LORA_TX_POWER`).
 const DEFAULT_TX_DBM: i8 = 22;
 
 /// Wear-friendly: two sectors alternate, ~24 erases per sector per day.
@@ -238,10 +235,10 @@ async fn main(spawner: Spawner) {
 
     // ---- the console on USB first: the boot log waits there for a host
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
-    // the IDs and serial number of upstream's Pro Micro firmware: the host keeps its COM port
-    let mut usb_cfg = embassy_usb::Config::new(0x239A, 0x00B3);
+    // the IDs and serial number of upstream's firmware for the board: the host keeps its COM port
+    let mut usb_cfg = embassy_usb::Config::new(board::USB_ID.0, board::USB_ID.1);
     usb_cfg.manufacturer = Some("MeshCore-rs");
-    usb_cfg.product = Some("ProMicro NRF52840");
+    usb_cfg.product = Some(board::USB_ID.2);
     static SERIAL: StaticCell<heapless::String<16>> = StaticCell::new();
     usb_cfg.serial_number = Some(SERIAL.init(board::usb_serial()).as_str());
     usb_cfg.max_power = 100;
@@ -264,7 +261,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(console::tx_task(tx).unwrap());
     console::init_logger();
     println!();
-    println!("MeshCore repeater (Rust) {} {} for ProMicro", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(BUILD_DATE));
+    println!("MeshCore repeater (Rust) {} {} for {}", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(BUILD_DATE), board::NAME);
     if let Some(crash) = console::take_crash() {
         warn!("last reset: {crash}");
     }
@@ -282,23 +279,9 @@ async fn main(spawner: Spawner) {
         .map(|d| NodePrefs::deserialize(&String::from_utf8_lossy(&d)))
         .unwrap_or_else(|| NodePrefs { tx_power_dbm: DEFAULT_TX_DBM, ..Default::default() });
 
-    // ---- radio: its supply, the receive side of the antenna switch, the chip
-    let mut led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
-    let _radio_power = Output::new(p.P0_13, Level::High, OutputDrive::Standard);
-    let mut rxen = Output::new(p.P0_17, Level::High, OutputDrive::Standard);
+    // ---- the board on its pins; the radio: its supply, the receive side of the antenna switch, the chip
+    let board::Parts { mut radio, mut led, mut rxen, button: _button, mut battery, i2c, hold: _hold } = promicro::board_parts!(p, Irqs);
     Timer::after_millis(10).await; // the radio powers up
-    let mut scfg = spim::Config::default();
-    // upstream's speed (RadioLib's 2 MHz): some modules and boards do not take 8
-    scfg.frequency = spim::Frequency::M2;
-    let spi = Spim::new(p.SPI2, Irqs, p.P1_11, p.P0_02, p.P1_15, scfg);
-    let mut radio = Sx1262::new(
-        spi,
-        Output::new(p.P1_13, Level::High, OutputDrive::Standard),
-        Output::new(p.P0_09, Level::High, OutputDrive::Standard),
-        Input::new(p.P0_29, Pull::None),
-        WaitIrq(Input::new(p.P0_10, Pull::Down)),
-    )
-    .without_rx_patch();
     if let Err(e) = radio.init(prefs.radio, prefs.tx_power_dbm, prefs.rx_boosted_gain).await {
         println!("ERROR: radio init failed: {e:?}");
         // a firmware on trial that cannot use the radio counts as one that did not start
@@ -347,21 +330,13 @@ async fn main(spawner: Spawner) {
     };
     println!("Repeater ID: {}", to_hex(self_id.pub_key()));
 
-    // ---- battery
-    let mut battery = Battery { adc: Saadc::new(p.SAADC, Irqs, saadc::Config::default(), [ChannelConfig::single_ended(p.P0_31)]) };
+    // ---- battery; the button (in `Parts`) wakes the board from `poweroff`
     let batt_mv = battery.read_mv(if prefs.adc_multiplier > 0.0 { prefs.adc_multiplier } else { board::BATT_MV_PER_LSB }).await;
-    // the button wakes the board from `poweroff`
-    let _button = Input::new(p.P1_00, Pull::Up);
     // the chip's own thermometer, as upstream's nRF52 boards report
     let mut mcu_temp = Temp::new(p.TEMP, Irqs);
     let mcu_temp_c = mcu_temp.read().await.to_bits() as f32 / 4.0;
 
     // ---- sensors on the I2C (upstream scans for them the same way: present or not)
-    let mut icfg = twim::Config::default();
-    icfg.sda_pullup = true;
-    icfg.scl_pullup = true;
-    static TWIM_BUF: StaticCell<[u8; 8]> = StaticCell::new();
-    let i2c = Twim::new(p.TWISPI0, Irqs, p.P1_04, p.P0_11, icfg, TWIM_BUF.init([0; 8]));
     let mut sensors = Sensors::probe(i2c).await;
 
     // ---- mesh
@@ -376,7 +351,7 @@ async fn main(spawner: Spawner) {
     board::clock_store(epoch);
     let ctx = MeshCtx::new(self_id.clone(), rng_seed, prefs.radio, epoch);
     let board_info = BoardInfo {
-        manufacturer: "ProMicro DIY".into(),
+        manufacturer: board::MANUFACTURER.into(),
         batt_mv,
         mcu_temp_c: Some(mcu_temp_c),
         build_date: BUILD_DATE.into(),
@@ -401,7 +376,7 @@ async fn main(spawner: Spawner) {
     if let Some(sensors) = load(&store, Blob::Sensors) {
         mesh.app.sensors_load(&String::from_utf8_lossy(&sensors));
     }
-    mesh.app.ota.build.board = meshcore::release::board::PROMICRO;
+    mesh.app.ota.build.board = board::RELEASE_BOARD;
     match store.clone().and_then(ota::StagingTarget::new) {
         Some(t) => mesh.app.ota.target = Some(Box::new(t)),
         None => warn!("OTA: the bootloader checks this app's CRC (BLE DFU): updates over USB only"),
@@ -464,11 +439,15 @@ async fn main(spawner: Spawner) {
                     let _ = radio.set_frame_cr(frame.cr);
                 }
                 // DIO2 turns the antenna switch to TX; its receive side is ours to turn off
-                rxen.set_low();
-                led.set_high();
+                if let Some(r) = &mut rxen {
+                    r.set_low();
+                }
+                led.on();
                 let res = radio.transmit(frame.bytes(), frame.timeout_ms).await;
-                led.set_low();
-                rxen.set_high();
+                led.off();
+                if let Some(r) = &mut rxen {
+                    r.set_high();
+                }
                 if frame.cr.is_some() {
                     let _ = radio.set_frame_cr(None);
                 }

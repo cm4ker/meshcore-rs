@@ -193,7 +193,7 @@ jobs:
             *.content
 
   nrf52840:
-    name: LilyGO T-Echo and Pro Micro (nRF52840), ${{ matrix.build }}
+    name: LilyGO T-Echo, Pro Micro and Heltec T114 (nRF52840), ${{ matrix.build }}
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -257,6 +257,21 @@ jobs:
           if [ "${{ matrix.build }}" = images ]; then
             python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion $out/promicro-companion.uf2 --dfu-zip $out/promicro-companion.zip
           fi
+      # the Pro Micro's code with the T114's pins (src/board.rs), beside it in target/t114
+      - name: Heltec T114
+        working-directory: firmware/models/promicro
+        run: |
+          out=../../..
+          if [ "${{ matrix.build }}" = content ]; then
+            export MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0
+            out=../../../content
+          fi
+          cargo build --locked --release --features t114 --target-dir target/t114
+          # no .zip for serial DFU: whether its bootloader (0.9.0) keeps a CRC that turns updates off
+          # is not known yet; the .uf2 is safe
+          for role in repeater companion; do
+            python3 ../../../tools/uf2/elf2uf2.py target/t114/thumbv7em-none-eabihf/release/$role $out/heltec-t114-$role.uf2 --bin $out/heltec-t114-$role.bin
+          done
       - name: Content hashes
         if: matrix.build == 'content'
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
@@ -415,7 +430,7 @@ jobs:
             echo
             echo "---"
             echo
-            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo or Pro Micro image for the USB bootloader's drive; a .zip, the Pro Micro companion's for its serial DFU (web flashers' custom firmware). The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them. ota-app-* is the program that puts a .mcfw on a device over USB or BLE, for Windows, macOS and Linux (README, «ota-app»)."
+            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo, Pro Micro or Heltec T114 image for the USB bootloader's drive; a .zip, the Pro Micro companion's for its serial DFU (web flashers' custom firmware). The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them. ota-app-* is the program that puts a .mcfw on a device over USB or BLE, for Windows, macOS and Linux (README, «ota-app»)."
             if [ -s unchanged.txt ]; then
               echo
               echo "The same code as in $(cat prev-tag.txt): $(paste -sd, unchanged.txt | sed 's/,/, /g'). They come out all the same, so every device runs the same release; their delta is about a kilobyte. content.txt lists the code of every board and role."

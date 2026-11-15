@@ -1,4 +1,5 @@
-//! MeshCore companion radio firmware for an nRF52840 Pro Micro with an SX1262 module, in Rust.
+//! MeshCore companion radio firmware for an nRF52840 Pro Micro with an SX1262 module (or the
+//! Heltec T114, `--features t114`), in Rust.
 //!
 //! The companion loop is the one of the other boards (`meshcore_fw_core::companion`): an app
 //! talks to it over BLE (the SoftDevice the bootloader keeps, running all the time: `promicro::ble`,
@@ -17,14 +18,11 @@ use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
 
 use embassy_executor::Spawner;
-use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::rng::Rng;
-use embassy_nrf::saadc::{self, ChannelConfig, Saadc};
-use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::temp::{self, Temp};
-use embassy_nrf::twim::{self, Twim};
+use embassy_nrf::{saadc, spim, twim};
 use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::wdt::{self, Watchdog};
@@ -36,10 +34,8 @@ use embedded_alloc::LlffHeap as Heap;
 use log::{info, warn};
 use meshcore::radio::RadioParams;
 use meshcore_fw_core::companion::{self, Config};
-use meshcore_fw_core::radio::WaitIrq;
 use meshcore_fw_core::storage::{Mount, Store};
-use meshcore_fw_core::sx1262::Sx1262;
-use promicro::board::{self, Battery};
+use promicro::board;
 use promicro::companion::{Nrf, ProMicro};
 use promicro::flash::Flash;
 use meshcore_fw_core::sensors::Sensors;
@@ -134,10 +130,10 @@ async fn main(spawner: Spawner) {
 
     // ---- USB: the boot log, then the app's frames
     let driver = Driver::new(p.USBD, Irqs, &*vbus);
-    // the IDs and serial number of upstream's Pro Micro firmware: the host keeps its COM port
-    let mut usb_cfg = embassy_usb::Config::new(0x239A, 0x00B3);
+    // the IDs and serial number of upstream's firmware for the board: the host keeps its COM port
+    let mut usb_cfg = embassy_usb::Config::new(board::USB_ID.0, board::USB_ID.1);
     usb_cfg.manufacturer = Some("MeshCore-rs");
-    usb_cfg.product = Some("ProMicro NRF52840");
+    usb_cfg.product = Some(board::USB_ID.2);
     static SERIAL: StaticCell<heapless::String<16>> = StaticCell::new();
     usb_cfg.serial_number = Some(SERIAL.init(board::usb_serial()).as_str());
     usb_cfg.max_power = 100;
@@ -160,7 +156,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(usb_frames::tx_task(tx).unwrap());
     usb_frames::init_logger();
     Timer::after_millis(1500).await; // time for the host to open the port
-    info!("MeshCore companion (Rust) {} {} for ProMicro", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(BUILD_DATE));
+    info!("MeshCore companion (Rust) {} {} for {}", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(BUILD_DATE), board::NAME);
     if let Some(crash) = last_crash {
         warn!("last reset: {crash}");
     }
@@ -190,23 +186,9 @@ async fn main(spawner: Spawner) {
         warn!("companion data: could not put it back, it stays aside");
     }
 
-    // ---- radio: its supply, the receive side of the antenna switch, the chip
-    let led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
-    let _radio_power = Output::new(p.P0_13, Level::High, OutputDrive::Standard);
-    let rxen = Output::new(p.P0_17, Level::High, OutputDrive::Standard);
+    // ---- the board on its pins; the radio: its supply, the receive side of the antenna switch, the chip
+    let board::Parts { radio, led, rxen, button, battery, i2c, hold } = promicro::board_parts!(p, Irqs);
     Timer::after_millis(10).await; // the radio powers up
-    let mut scfg = spim::Config::default();
-    // upstream's speed (RadioLib's 2 MHz): some modules and boards do not take 8
-    scfg.frequency = spim::Frequency::M2;
-    let spi = Spim::new(p.SPI2, Irqs, p.P1_11, p.P0_02, p.P1_15, scfg);
-    let radio = Sx1262::new(
-        spi,
-        Output::new(p.P1_13, Level::High, OutputDrive::Standard),
-        Output::new(p.P0_09, Level::High, OutputDrive::Standard),
-        Input::new(p.P0_29, Pull::None),
-        WaitIrq(Input::new(p.P0_10, Pull::Down)),
-    )
-    .without_rx_patch();
 
     // ---- entropy: the hardware RNG (the SoftDevice's while it runs)
     let mut entropy = [0u8; 32];
@@ -217,15 +199,9 @@ async fn main(spawner: Spawner) {
         Rng::new_blocking(p.RNG).blocking_fill_bytes(&mut entropy);
     }
 
-    let battery = Battery { adc: Saadc::new(p.SAADC, Irqs, saadc::Config::default(), [ChannelConfig::single_ended(p.P0_31)]) };
     // ---- sensors on the I2C, for telemetry
-    let mut icfg = twim::Config::default();
-    icfg.sda_pullup = true;
-    icfg.scl_pullup = true;
-    static TWIM_BUF: StaticCell<[u8; 8]> = StaticCell::new();
-    let i2c = Twim::new(p.TWISPI0, Irqs, p.P1_04, p.P0_11, icfg, TWIM_BUF.init([0; 8]));
     let sensors = Sensors::probe(i2c).await;
-    let board = ProMicro { led, rxen, button: Input::new(p.P1_00, Pull::Up), battery, temp: Temp::new(p.TEMP, Irqs), sensors };
+    let board = ProMicro { led, rxen, button, battery, temp: Temp::new(p.TEMP, Irqs), sensors, _hold: hold };
     let seed = u64::from_le_bytes(entropy[..8].try_into().unwrap()) ^ u64::from_le_bytes(entropy[8..16].try_into().unwrap());
     let platform = Nrf { watchdog, seed, store: store.clone(), in_trial, stays_aside: false };
     let cfg = Config {

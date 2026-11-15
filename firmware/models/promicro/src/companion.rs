@@ -18,7 +18,7 @@ use meshcore_fw_core::companion::{BleSetup, Board, Links, Platform};
 use meshcore_fw_core::sensors::Sensors;
 use meshcore_fw_core::storage::SharedStore;
 
-use crate::board::{self, Battery};
+use crate::board::{self, Battery, Led};
 use crate::flash::Flash;
 use crate::usb_frames::{USB_HOST, USB_OUT};
 use crate::{ble, ota, sd};
@@ -124,25 +124,28 @@ impl Platform for Nrf {
     }
 }
 
-/// The board around the radio (`board`): the LED lit while transmitting, the receive side of the
-/// antenna switch, the button, the battery, the chip's thermometer, the sensors on the I2C.
+/// The board around the radio (`board`; the Pro Micro or the T114): the LED lit while
+/// transmitting, the receive side of the antenna switch, the button, the battery, the chip's
+/// thermometer, the sensors on the I2C.
 pub struct ProMicro {
-    pub led: Output<'static>,
-    pub rxen: Output<'static>,
+    pub led: Led,
+    pub rxen: Option<Output<'static>>,
     pub button: Input<'static>,
     pub battery: Battery,
     /// Read while the SoftDevice is off; it has the TEMP peripheral while it runs.
     pub temp: Temp<'static>,
     pub sensors: Sensors<Twim<'static>>,
+    /// The outputs that stay as they are (`board::Parts::hold`).
+    pub _hold: heapless::Vec<Output<'static>, 4>,
 }
 
 impl Board for ProMicro {
     fn manufacturer(&self) -> &str {
-        "ProMicro DIY"
+        board::MANUFACTURER
     }
 
     fn release_board(&self) -> u8 {
-        meshcore::release::board::PROMICRO
+        board::RELEASE_BOARD
     }
 
     fn max_tx_power_dbm(&self) -> i8 {
@@ -150,13 +153,17 @@ impl Board for ProMicro {
     }
 
     fn on_tx_start(&mut self) {
-        self.rxen.set_low();
-        self.led.set_high();
+        if let Some(r) = &mut self.rxen {
+            r.set_low();
+        }
+        self.led.on();
     }
 
     fn on_tx_end(&mut self) {
-        self.led.set_low();
-        self.rxen.set_high();
+        self.led.off();
+        if let Some(r) = &mut self.rxen {
+            r.set_high();
+        }
     }
 
     fn power_off(&mut self) {
