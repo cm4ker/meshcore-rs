@@ -108,6 +108,10 @@ pub async fn ble_task(sdc: SoftdeviceController<'static>, params: Params) {
     loop {
         // switched off on the device: no advertising, and the app is dropped
         host.enable(BLE_ENABLED.load(Ordering::Relaxed));
+        // the repeater's update window, opened with a new PIN
+        if let Some(pin) = crate::repeater::WINDOW_PIN.try_take() {
+            host.set_passkey(Some(pin));
+        }
         host.tick(Instant::now().as_secs() as u32);
         while let Some(out) = host.transmit() {
             trace(">", &out);

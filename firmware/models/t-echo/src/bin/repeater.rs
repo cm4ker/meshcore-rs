@@ -1,0 +1,282 @@
+//! MeshCore repeater firmware for the LilyGO T-Echo, in Rust: the chip set up and the parts on
+//! their pins as for the companion (`companion.rs` has the wiring), then the repeater
+//! (`t_echo::repeater`). A new firmware comes over LoRa, in the BLE update window, or goes on as
+//! UF2 over USB (`tools/uf2/flash_uf2.py`). No Wi-Fi.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use alloc::rc::Rc;
+use core::cell::RefCell;
+use core::mem::MaybeUninit;
+use core::panic::PanicInfo;
+
+use embassy_executor::Spawner;
+use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
+use embassy_nrf::mode::Blocking;
+use embassy_nrf::qspi::{self, Qspi};
+use embassy_nrf::rng::Rng;
+use embassy_nrf::saadc::{self, ChannelConfig, Saadc};
+use embassy_nrf::spim::{self, Spim};
+use embassy_nrf::twim::{self, Twim};
+use embassy_nrf::usb::Driver;
+use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
+use embassy_nrf::wdt::{self, Watchdog};
+use embassy_nrf::{bind_interrupts, config, peripherals, usb};
+use embassy_time::Timer;
+use embassy_usb::Builder;
+use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use embedded_alloc::LlffHeap as Heap;
+use log::warn;
+use meshcore_fw_core::radio::WaitIrq;
+use meshcore_fw_core::storage::Store;
+use meshcore_fw_core::sx1262::Sx1262;
+use nrf_sdc::mpsl::{self, MultiprotocolServiceLayer};
+use nrf_sdc::{self as sdc};
+use static_cell::StaticCell;
+use t_echo::epaper::{self, Epaper};
+use t_echo::gps::{self, Gps};
+use t_echo::repeater::{self, Parts};
+use t_echo::{DATA_OVERFLOW, DATA_REGION, WATCHDOG_SECS, board, console, diag, println};
+
+const BUILD_EPOCH: &str = env!("BUILD_EPOCH");
+const BUILD_DATE: &str = env!("BUILD_DATE");
+
+const HEAP_SIZE: usize = 144 * 1024;
+
+/// The 2 MB QSPI flash (`t_echo::DATA_REGION` and on).
+const FLASH_SIZE: u32 = 2 * 1024 * 1024;
+
+/// The BLE controller's buffers for the update window: one connection, 3 x 251-byte L2CAP
+/// packets each way, as the companion's.
+const L2CAP_MTU: u16 = 251;
+const L2CAP_TXQ: u8 = 3;
+const L2CAP_RXQ: u8 = 3;
+const SDC_MEM_SIZE: usize = 8192;
+
+fn build_sdc(
+    p: sdc::Peripherals<'static>, rng: &'static mut Rng<'static, Blocking>, mpsl: &'static MultiprotocolServiceLayer<'static>,
+    mem: &'static mut sdc::Mem<SDC_MEM_SIZE>,
+) -> Result<sdc::SoftdeviceController<'static>, sdc::Error> {
+    sdc::Builder::new()?
+        .support_adv()
+        .support_peripheral()
+        .peripheral_count(1)?
+        .buffer_cfg(L2CAP_MTU, L2CAP_MTU, L2CAP_TXQ, L2CAP_RXQ)?
+        .build(p, rng, mpsl, mem)
+}
+
+#[embassy_executor::task]
+async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
+    mpsl.run().await
+}
+
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
+
+bind_interrupts!(struct Irqs {
+    USBD => usb::InterruptHandler<peripherals::USBD>;
+    CLOCK_POWER => usb::vbus_detect::InterruptHandler, mpsl::ClockInterruptHandler;
+    EGU0_SWI0 => mpsl::LowPrioInterruptHandler;
+    RADIO => mpsl::HighPrioInterruptHandler;
+    TIMER0 => mpsl::HighPrioInterruptHandler;
+    RTC0 => mpsl::HighPrioInterruptHandler;
+    QSPI => qspi::InterruptHandler<peripherals::QSPI>;
+    SPI2 => spim::InterruptHandler<peripherals::SPI2>;
+    SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
+    SAADC => saadc::InterruptHandler;
+    TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+});
+
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    diag::record_crash(&diag::panic_text(info));
+    cortex_m::peripheral::SCB::sys_reset()
+}
+
+#[cortex_m_rt::exception]
+unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
+    let mut s: heapless::String<120> = heapless::String::new();
+    let _ = core::fmt::write(&mut s, format_args!("hard fault at pc {:#010x} lr {:#010x}", frame.pc(), frame.lr()));
+    diag::record_crash(&s);
+    cortex_m::peripheral::SCB::sys_reset()
+}
+
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    {
+        static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
+        // SAFETY: called once, before anything allocates
+        unsafe { HEAP.init(&raw mut HEAP_MEM as usize, HEAP_SIZE) }
+    }
+    // the clocks are MPSL's (the BLE controller's service layer), as in the companion
+    let mut ncfg = config::Config::default();
+    ncfg.lfclk_source = config::LfclkSource::ExternalXtal;
+    ncfg.dcdc.reg1 = true; // the DC/DC converter instead of the LDO (upstream `NRF52BoardDCDC`)
+    let p = embassy_nrf::init(ncfg);
+    // a watchdog still running from before a soft reset is taken over with the same settings
+    let mut wcfg = wdt::Config::default();
+    wcfg.timeout_ticks = 32_768 * WATCHDOG_SECS;
+    let watchdog = match Watchdog::try_new::<_, 1>(p.WDT, wcfg) {
+        Ok((_, [handle])) => Some(handle),
+        Err(_) => None, // running with other settings: it restarts the board, and starts afresh
+    };
+    let mpsl_p = mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
+    let lfclk = mpsl::raw::mpsl_clock_lfclk_cfg_t {
+        source: mpsl::raw::MPSL_CLOCK_LF_SRC_XTAL as u8,
+        rc_ctiv: 0,
+        rc_temp_ctiv: 0,
+        accuracy_ppm: 20,
+        skip_wait_lfclk_started: false,
+    };
+    static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
+    let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk).unwrap());
+    spawner.spawn(mpsl_task(mpsl).unwrap());
+    // USB needs the HF crystal all the time: the guard lives as long as the firmware
+    if let Ok(hfclk) = mpsl.request_hfclk().await {
+        let _ = mpsl::Hfclk::wait().await;
+        core::mem::forget(hfclk);
+    }
+
+    // ---- the console on USB first: the boot log waits there for a host
+    let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
+    let mut usb_cfg = embassy_usb::Config::new(0x239A, 0x8029);
+    usb_cfg.manufacturer = Some("LilyGO");
+    usb_cfg.product = Some("T-Echo MeshCore-rs");
+    usb_cfg.max_power = 100;
+    static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+    static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+    static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
+    static STATE: StaticCell<State> = StaticCell::new();
+    let mut builder = Builder::new(
+        driver,
+        usb_cfg,
+        CONFIG_DESC.init([0; 256]),
+        BOS_DESC.init([0; 256]),
+        &mut [],
+        CONTROL_BUF.init([0; 64]),
+    );
+    let class = CdcAcmClass::new(&mut builder, STATE.init(State::new()), 64);
+    let (tx, rx, control) = class.split_with_control();
+    spawner.spawn(t_echo::usb::device_task(builder.build()).unwrap());
+    spawner.spawn(console::rx_task(rx, control).unwrap());
+    spawner.spawn(console::tx_task(tx).unwrap());
+    console::init_logger();
+    println!();
+    println!("MeshCore repeater (Rust) {} {} for T-Echo", meshcore::FIRMWARE_VERSION, meshcore::release::build_label(BUILD_DATE));
+    if let Some(crash) = diag::take_crash() {
+        warn!("last reset: {crash}");
+    }
+
+    // ---- power: peripherals, TCXO; the GPS off and in reset until `gps on`
+    let power = Output::new(p.P0_12, Level::High, OutputDrive::Standard);
+    core::mem::forget(power);
+    let _tcxo = Output::new(p.P0_21, Level::High, OutputDrive::Standard);
+    let gps_enable = Output::new(p.P1_02, Level::Low, OutputDrive::Standard);
+    let gps_reset = Output::new(p.P1_05, Level::Low, OutputDrive::Standard);
+    let _red = Output::new(p.P0_13, Level::High, OutputDrive::Standard);
+    let _blue = Output::new(p.P0_14, Level::High, OutputDrive::Standard);
+    Timer::after_millis(10).await; // the radio powers up
+
+    // ---- the node's data in the QSPI flash; the companion's region stays as it is
+    let mut qcfg = qspi::Config::default();
+    qcfg.capacity = FLASH_SIZE;
+    qcfg.read_opcode = qspi::ReadOpcode::Fastread;
+    qcfg.write_opcode = qspi::WriteOpcode::Pp;
+    qcfg.frequency = qspi::Frequency::M16;
+    let flash = Qspi::new(p.QSPI, Irqs, p.P1_14, p.P1_15, p.P1_12, p.P1_13, p.P0_07, p.P0_05, qcfg);
+    let store = Rc::new(RefCell::new(Store::with_regions(flash, DATA_REGION, None).with_overflow(DATA_OVERFLOW)));
+
+    // ---- radio
+    let mut scfg = spim::Config::default();
+    scfg.frequency = spim::Frequency::M8;
+    let spi = Spim::new(p.SPI2, Irqs, p.P0_19, p.P0_23, p.P0_22, scfg);
+    let radio = Sx1262::new(
+        spi,
+        Output::new(p.P0_24, Level::High, OutputDrive::Standard),
+        Output::new(p.P0_25, Level::High, OutputDrive::Standard),
+        Input::new(p.P0_17, Pull::None),
+        WaitIrq(Input::new(p.P0_20, Pull::Down)),
+    );
+
+    // ---- entropy, BLE controller (it keeps the hardware RNG)
+    static RNG: StaticCell<Rng<'static, Blocking>> = StaticCell::new();
+    let rng = RNG.init(Rng::new_blocking(p.RNG));
+    let mut entropy = [0u8; 48];
+    rng.blocking_fill_bytes(&mut entropy);
+    let sdc_p = sdc::Peripherals::new(
+        p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23, p.PPI_CH24, p.PPI_CH25, p.PPI_CH26,
+        p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
+    );
+    static SDC_MEM: StaticCell<sdc::Mem<SDC_MEM_SIZE>> = StaticCell::new();
+    let sdc = match build_sdc(sdc_p, rng, mpsl, SDC_MEM.init(sdc::Mem::new())) {
+        Ok(sdc) => Some(sdc),
+        Err(e) => {
+            warn!("BLE controller: {e:?}");
+            None
+        }
+    };
+    // the window's PIN changes with each window, which meshcore-ble's host takes
+    // (`repeater::WINDOW_PIN`); a build with trouble-host (`ble-trouble`, for the companion) has
+    // no window
+    #[cfg(feature = "ble-trouble")]
+    let sdc: Option<sdc::SoftdeviceController> = sdc.and(None);
+
+    // ---- battery: 0..3 V full scale (internal 0.6 V reference, gain 1/5), as upstream's
+    // `AR_INTERNAL_3_0`
+    let mut vbat = ChannelConfig::single_ended(p.P0_04);
+    vbat.gain = saadc::Gain::Gain1_5;
+    let battery = Saadc::new(p.SAADC, Irqs, saadc::Config::default(), [vbat]);
+
+    // ---- sensors' I2C (SDA P0.26, SCL P0.27, upstream `PIN_WIRE_SDA`/`SCL`)
+    let mut icfg = twim::Config::default();
+    icfg.sda_pullup = true;
+    icfg.scl_pullup = true;
+    static TWIM_BUF: StaticCell<[u8; 8]> = StaticCell::new();
+    let i2c = Twim::new(p.TWISPI0, Irqs, p.P0_26, p.P0_27, icfg, TWIM_BUF.init([0; 8]));
+
+    // ---- the GPS, the screen's light (the touch pad), the e-paper in its own task
+    let gps = Gps {
+        uarte: p.UARTE1,
+        timer: p.TIMER1,
+        ppi_ch1: p.PPI_CH0,
+        ppi_ch2: p.PPI_CH1,
+        ppi_group: p.PPI_GROUP0,
+        rx: p.P1_09,
+        tx: p.P1_08,
+        enable: gps_enable,
+        reset: gps_reset,
+    };
+    spawner.spawn(gps::task(gps).unwrap());
+    let touch = Input::new(p.P0_11, Pull::Up);
+    let light = Output::new(p.P1_11, Level::Low, OutputDrive::Standard);
+    spawner.spawn(board::backlight_task(touch, light).unwrap());
+    let mut ecfg = spim::Config::default();
+    ecfg.frequency = spim::Frequency::M4;
+    let epd = Epaper {
+        spi: Spim::new_txonly(p.SPI3, Irqs, p.P0_31, p.P0_29, ecfg),
+        cs: Output::new(p.P0_30, Level::High, OutputDrive::Standard),
+        dc: Output::new(p.P0_28, Level::High, OutputDrive::Standard),
+        reset: Output::new(p.P0_02, Level::High, OutputDrive::Standard),
+        busy: Input::new(p.P0_03, Pull::None),
+    };
+    spawner.spawn(epaper::task(epd).unwrap());
+
+    let parts = Parts {
+        radio,
+        tx_led: Output::new(p.P0_15, Level::High, OutputDrive::Standard),
+        button: Input::new(p.P1_10, Pull::Up),
+        battery,
+        i2c,
+        watchdog,
+        store,
+        sdc,
+        mpsl,
+        entropy,
+        build_epoch: BUILD_EPOCH,
+        build_date: BUILD_DATE,
+    };
+    repeater::run(spawner, parts).await
+}

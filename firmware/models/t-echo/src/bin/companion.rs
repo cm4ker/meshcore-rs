@@ -47,15 +47,13 @@ use t_echo::epaper::{self, Epaper};
 use t_echo::gps::{self, Gps};
 use t_echo::usb as frames_usb;
 use t_echo::platform::Nrf;
+use t_echo::{COMPANION_REGION, DATA_REGION};
 
 const BUILD_EPOCH: &str = env!("BUILD_EPOCH");
 const BUILD_DATE: &str = env!("BUILD_DATE");
 
-/// The 2 MB QSPI flash: the node's blobs in the first 64 KiB, the companion's data in the next
-/// megabyte.
+/// The 2 MB QSPI flash (`t_echo::DATA_REGION` and on).
 const FLASH_SIZE: u32 = 2 * 1024 * 1024;
-const DATA_REGION: (u32, u32) = (0, 0x1_0000);
-const COMPANION_REGION: (u32, u32) = (0x1_0000, 0x10_0000);
 
 /// The BLE controller's buffers: one connection, 3 x 251-byte L2CAP packets each way.
 const L2CAP_MTU: u16 = 251;

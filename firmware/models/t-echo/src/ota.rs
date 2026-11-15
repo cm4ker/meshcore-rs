@@ -27,9 +27,11 @@ use sha2::{Digest, Sha256};
 // shared with the installer (installer/src/lib.rs)
 pub const APP_START: u32 = 0x26000;
 pub const INSTALLER: u32 = 0xED000;
-/// The staging area in the QSPI flash, after the companion's region, up to the page the installer
-/// takes the app's first page from, then the install request.
+/// The staging area in the QSPI flash, after the companion's region, up to the repeater's sensors
+/// (`DATA_OVERFLOW`); then the page the installer takes the app's first page from, and the install
+/// request.
 const STAGING: u32 = 0x11_0000;
+const STAGING_END: u32 = crate::DATA_OVERFLOW.0;
 const SAVED_FIRST: u32 = 0x1F_E000;
 const RECORD: u32 = 0x1F_F000;
 const RECORD_MAGIC: &[u8; 8] = b"MCRS-IN2";
@@ -307,7 +309,7 @@ fn go_back(store: &SharedStore<Qspi<'static>>, failed: bool) -> bool {
 
 impl FirmwareTarget for StagingTarget {
     fn capacity(&self) -> u32 {
-        SAVED_FIRST - STAGING
+        STAGING_END - STAGING
     }
 
     // a staged update waits for the restart as verified: nothing may write over it
@@ -421,3 +423,6 @@ fn nvmc_write(addr: u32, word: u32) {
     while !pac::NVMC.ready().read().ready() {}
     pac::NVMC.config().write(|w| w.set_wen(pac::nvmc::vals::Wen::Ren));
 }
+
+// the swap takes the larger image's pages and a spare one; the sensors and the saved page stay
+const _: () = assert!(STAGING_END - STAGING >= INSTALLER - APP_START + PAGE && STAGING_END + crate::DATA_OVERFLOW.1 <= SAVED_FIRST);

@@ -248,7 +248,9 @@ jobs:
             mkdir -p $out
           fi
           cargo build --locked --release
-          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion $out/t-echo-companion.uf2 --bin $out/t-echo-companion.bin
+          for role in repeater companion; do
+            python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role $out/t-echo-$role.uf2 --bin $out/t-echo-$role.bin
+          done
       - name: Pro Micro
         working-directory: firmware/models/promicro
         run: |

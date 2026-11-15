@@ -1,5 +1,7 @@
 //! The LilyGO T-Echo around the radio: LEDs, the user button, the battery, power, the screen and
-//! its light, the GPS.
+//! its light, the GPS; the clock kept across resets and the bootloader's version, for the repeater.
+
+use core::mem::MaybeUninit;
 
 use embassy_nrf::gpio::{Input, Level, Output};
 use embassy_nrf::pac;
@@ -12,7 +14,7 @@ use crate::epaper::SCREEN;
 use crate::gps::GPS_ON;
 
 /// 12-bit samples of a 0..3 V range, behind a 1:2 divider (upstream `REAL_VBAT_MV_PER_LSB`).
-const BATT_MV_PER_LSB: f32 = 3000.0 / 4096.0 * 2.0;
+pub const BATT_MV_PER_LSB: f32 = 3000.0 / 4096.0 * 2.0;
 
 const PAGES: &[Page] = &[
     Page::Home,
@@ -68,9 +70,7 @@ impl Board for TEcho {
     }
 
     async fn battery_mv(&mut self) -> u16 {
-        let mut sample = [0i16; 1];
-        self.battery.sample(&mut sample).await;
-        (sample[0].max(0) as f32 * BATT_MV_PER_LSB) as u16
+        battery_mv(&mut self.battery, BATT_MV_PER_LSB).await
     }
 
     fn button_down(&mut self) -> bool {
@@ -101,6 +101,13 @@ impl Board for TEcho {
     fn set_gps(&mut self, on: bool) {
         GPS_ON.signal(on);
     }
+}
+
+/// The battery: one sample, `mv_per_lsb` millivolts each (`set adc.multiplier` on the repeater).
+pub async fn battery_mv(adc: &mut Saadc<'static, 1>, mv_per_lsb: f32) -> u16 {
+    let mut sample = [0i16; 1];
+    adc.sample(&mut sample).await;
+    (sample[0].max(0) as f32 * mv_per_lsb) as u16
 }
 
 /// Lights the screen while the touch pad above it is touched (it reads low then), as upstream.
@@ -140,4 +147,37 @@ pub fn system_off() -> ! {
     loop {
         cortex_m::asm::wfe();
     }
+}
+
+const CLOCK_MAGIC: u32 = 0x434C_4B21; // "CLK!"
+
+/// The wall clock in RAM a reset does not clear (the nRF52840 keeps its RAM through a soft reset
+/// or the watchdog), so a reboot does not send the repeater's clock back to the last time saved
+/// to flash.
+#[unsafe(link_section = ".uninit.clock")]
+static mut CLOCK: MaybeUninit<[u32; 2]> = MaybeUninit::uninit();
+
+pub fn clock_load() -> Option<u32> {
+    // SAFETY: main task only; any bit pattern is a valid pair of words
+    let [check, epoch] = unsafe { (&raw const CLOCK).cast::<[u32; 2]>().read_volatile() };
+    (check == CLOCK_MAGIC ^ epoch).then_some(epoch)
+}
+
+pub fn clock_store(epoch: u32) {
+    // SAFETY: main task only
+    unsafe { (&raw mut CLOCK).cast::<[u32; 2]>().write_volatile([CLOCK_MAGIC ^ epoch, epoch]) };
+}
+
+/// The UF2 bootloader's version, as upstream's `NRF52Board::getBootloaderVersion` finds it: the
+/// word after "UF2 Bootloader " in its info text (0xFB000..0xFE000); empty if there is none.
+pub fn bootloader_version() -> alloc::string::String {
+    const MARKER: &[u8] = b"UF2 Bootloader ";
+    // SAFETY: the bootloader's flash, memory-mapped and readable
+    let flash = unsafe { core::slice::from_raw_parts(0xFB000 as *const u8, 0x3000) };
+    let Some(at) = flash.windows(MARKER.len()).position(|w| w == MARKER) else {
+        return alloc::string::String::new();
+    };
+    let ver = &flash[at + MARKER.len()..];
+    let len = ver.iter().take(31).position(|&c| matches!(c, 0 | b' ' | b'\n' | b'\r')).unwrap_or(ver.len().min(31));
+    alloc::string::String::from_utf8_lossy(&ver[..len]).into_owned()
 }
