@@ -185,6 +185,11 @@ fn plan_of(old: &[u8], new: &[u8], shift: u32) -> Vec<u8> {
 /// The flash as the firmware leaves it to the installer: the old image with its first page
 /// saved and pointing at the installer, the request.
 fn handed_over(old: &[u8], plan_len: u32, seed: u64) -> Sim {
+    handed_over_at(old, 0, plan_len, seed)
+}
+
+/// [`handed_over`] with the plan at `at` in the staging area.
+fn handed_over_at(old: &[u8], at: u32, plan_len: u32, seed: u64) -> Sim {
     let mut f = Sim::new(seed);
     f.put(APP, old);
     f.put(SAVED_FIRST, &old[..PAGE as usize]);
@@ -194,7 +199,7 @@ fn handed_over(old: &[u8], plan_len: u32, seed: u64) -> Sim {
     let erased: Vec<u8> = vec![0xFF; PAGE as usize];
     f.put(APP, &erased);
     f.put(APP, &first);
-    for (i, w) in request_words(plan_len, old.len() as u32).into_iter().enumerate() {
+    for (i, w) in request_words(at, plan_len, old.len() as u32).into_iter().enumerate() {
         *f.at(REQUEST + 4 * i as u32) = w;
     }
     f
@@ -306,4 +311,74 @@ fn no_request_puts_the_first_page_back() {
     }
     assert_eq!(install(&mut f, &LAYOUT, &[]), Outcome::Kept);
     assert_eq!(f.bytes(APP, old.len() as u32), old);
+}
+
+/// The plan back from the image `plan` makes to `old`.
+fn reverse_of(plan: &[u8], old: &[u8]) -> Vec<u8> {
+    let mut records = Vec::new();
+    let first = reverse(plan, old, [9; 32], &mut |r: &[u8]| {
+        records.extend_from_slice(r);
+        true
+    })
+    .expect("a plan back");
+    [first, records].concat()
+}
+
+#[test]
+fn a_plan_back_makes_the_old_image_from_the_new_one() {
+    for seed in 1..5 {
+        let old = image(150_000 + 3000 * seed as usize, seed + 20);
+        let new = next_release(&old, seed + 40, 25_000);
+        let plan = plan_of(&old, &new, 32 * 1024);
+        let back = reverse_of(&plan, &old);
+        let h = Header::parse(&back[..PAGE as usize]).unwrap();
+        assert_eq!((h.old_len, h.new_len), (new.len() as u32, old.len() as u32));
+        // the new image as the plan makes it, read from wherever the plan back needs it
+        let mut rebuilt = Rebuilt::new(&plan, |at: u32, out: &mut [u8]| {
+            out.copy_from_slice(&old[at as usize..at as usize + out.len()]);
+            true
+        })
+        .unwrap();
+        let mut made = vec![0u8; old.len()];
+        for p in 0..h.pages {
+            let (from, to) = h.record(&back, p).unwrap();
+            let len = h.page_len(p) as usize;
+            let mut new_at = |at: u32, out: &mut [u8]| rebuilt.read(at, out);
+            let page = &mut made[(p * PAGE) as usize..(p * PAGE) as usize + len];
+            make_page(&h, p, &back[from as usize..to as usize], &mut new_at, page).unwrap();
+        }
+        assert!(made == old, "seed {seed}");
+        assert!(back.len() < old.len() / 2, "plan back {} for an image of {}", back.len(), old.len());
+    }
+}
+
+#[test]
+fn goes_forward_and_back_with_the_power_going() {
+    quiet_power_cuts();
+    let old = image(100_000, 31);
+    let new = next_release(&old, 32, 20_000);
+    let plan = plan_of(&old, &new, 32 * 1024);
+    let back = reverse_of(&plan, &old);
+    // both plans in the staging area, the plan back from the page after the plan
+    let at = (plan.len() as u32).next_multiple_of(PAGE);
+    let mut staging = plan.clone();
+    staging.resize(at as usize, 0xFF);
+    staging.extend_from_slice(&back);
+    for cut in [None, Some(500), Some(3001)] {
+        let mut f = handed_over_at(&old, 0, plan.len() as u32, 7);
+        f.cut = cut;
+        if catch_unwind(AssertUnwindSafe(|| install(&mut f, &LAYOUT, &staging))).is_err() {
+            f.cut = None;
+            assert_eq!(install(&mut f, &LAYOUT, &staging), Outcome::Installed);
+        }
+        assert!(f.bytes(APP, new.len() as u32) == new, "forward, cut {cut:?}");
+        // the firmware hands over again, with the plan back
+        let mut g = handed_over_at(&new, at, back.len() as u32, 8);
+        g.cut = cut.map(|c| c + 777);
+        if catch_unwind(AssertUnwindSafe(|| install(&mut g, &LAYOUT, &staging))).is_err() {
+            g.cut = None;
+            assert_eq!(install(&mut g, &LAYOUT, &staging), Outcome::Installed);
+        }
+        assert!(g.bytes(APP, old.len() as u32) == old, "back, cut {cut:?}");
+    }
 }

@@ -3,7 +3,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::{COPY, Header, LITERAL, MAX_PAGES, PAGE};
+use crate::{COPY, Header, LITERAL, MAX_PAGES, Op, PAGE, next_op};
 
 /// Builds a plan from a delta's operations, in the order of the new image: bytes made by adding
 /// a difference to old ones ([`Planner::mix`]) and literal bytes ([`Planner::literal`]). Each
@@ -148,4 +148,66 @@ fn put_varint(out: &mut Vec<u8>, mut v: u32) {
         v >>= 7;
     }
     out.push(v as u8);
+}
+
+/// The plan back: from the image `forward` makes to `old`, the one it is made from, for a
+/// rollback. Every new byte `forward` takes from an old one (plus a difference) gives that old
+/// byte back (minus the difference); old bytes the new image has nothing of go in as themselves.
+/// `old_sha256`: the old image's hash, for the record. Its records go to `out` as a [`Planner`]'s
+/// do; its first page comes back.
+pub fn reverse(forward: &[u8], old: &[u8], old_sha256: [u8; 32], out: &mut impl FnMut(&[u8]) -> bool) -> Option<Vec<u8>> {
+    let h = Header::parse(forward.get(..PAGE as usize)?)?;
+    if old.len() != h.old_len as usize {
+        return None;
+    }
+    // the runs of old bytes the new image took: (old offset, new offset, length, the difference's
+    // code in `forward`)
+    let mut runs: Vec<(u32, u32, u16, usize, usize)> = Vec::new();
+    for p in 0..h.pages {
+        let (from, to) = h.record(forward, p)?;
+        let record = &forward[from as usize..to as usize];
+        let (mut at, mut pos) = (0usize, p * PAGE);
+        while at < record.len() {
+            let (op, next) = next_op(record, at)?;
+            match op {
+                Op::Copy { from: o, len, diff } => {
+                    let start = diff.as_ptr() as usize - forward.as_ptr() as usize;
+                    runs.push((o, pos, len as u16, start, start + diff.len()));
+                    pos += len as u32;
+                }
+                Op::Literal(bytes) => pos += bytes.len() as u32,
+            }
+            at = next;
+        }
+    }
+    runs.sort_unstable_by_key(|r| r.0);
+    let mut back = Planner::new(h.new_len, h.old_len, h.shift)?;
+    let mut diff = vec![0u8; PAGE as usize];
+    let (mut u, mut i) = (0u32, 0usize);
+    while u < h.old_len {
+        while runs.get(i).is_some_and(|r| r.0 + r.2 as u32 <= u) {
+            i += 1;
+        }
+        match runs.get(i) {
+            Some(&(o, x, n, start, end)) if o <= u => {
+                let (k, n) = ((u - o) as usize, n as usize);
+                crate::decode_diff(&forward[start..end], &mut diff[..n])?;
+                for d in &mut diff[k..n] {
+                    *d = d.wrapping_neg();
+                }
+                if !back.mix(x + k as u32, &diff[k..n], &old[u as usize..u as usize + n - k], out) {
+                    return None;
+                }
+                u += (n - k) as u32;
+            }
+            next => {
+                let end = next.map_or(h.old_len, |r| r.0);
+                if !back.literal(&old[u as usize..end as usize], out) {
+                    return None;
+                }
+                u = end;
+            }
+        }
+    }
+    back.finish(old_sha256)
 }

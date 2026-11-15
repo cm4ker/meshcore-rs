@@ -2,7 +2,8 @@
 //! area of the internal flash, where the firmware has checked it; to install it, the firmware
 //! saves the first page of the app flash, points that page at this program and resets. This
 //! moves the old firmware up and writes the new one over it page by page, the first page last
-//! (`meshcore_inplace::install`), and resets into it. There is no firmware to go back to.
+//! (`meshcore_inplace::install`), and resets into it. Going back is the same with the plan back
+//! the firmware made, which the request then names.
 //!
 //! A power loss along the way leaves the first page pointing here, so the work goes on at the
 //! next boot. With nothing valid to install, the firmware that ran gets its first page back and
@@ -22,8 +23,8 @@ const DFU_MAGIC_UF2_RESET: u8 = 0x57;
 const LED_PIN: usize = 3;
 
 // shared with the firmware (../src/ota.rs)
-const LAYOUT: Layout = Layout { app: 0x26000, app_end: 0x99000, plan: 0x99000, saved_first: 0xD8000, request: 0xD9000 };
-/// The staging area's end: the plan is in it.
+const LAYOUT: Layout = Layout { app: 0x26000, app_end: 0x8F000, plan: 0x8F000, saved_first: 0xD8000, request: 0xD9000 };
+/// The staging area's end: the plan (and the plan back) are in it.
 const PLAN_END: u32 = 0xD6000;
 
 #[entry]
@@ -31,8 +32,8 @@ fn main() -> ! {
     pac::P1.outclr().write(|w| w.set_pin(LED_PIN, true));
     pac::P1.pin_cnf(LED_PIN).write(|w| w.set_dir(pac::gpio::vals::Dir::Output));
     // SAFETY: the staging area, in the internal flash, which is memory-mapped
-    let plan = unsafe { core::slice::from_raw_parts(LAYOUT.plan as *const u8, (PLAN_END - LAYOUT.plan) as usize) };
-    let outcome = meshcore_inplace::install(&mut Nvmc, &LAYOUT, plan);
+    let staging = unsafe { core::slice::from_raw_parts(LAYOUT.plan as *const u8, (PLAN_END - LAYOUT.plan) as usize) };
+    let outcome = meshcore_inplace::install(&mut Nvmc, &LAYOUT, staging);
     pac::P1.outset().write(|w| w.set_pin(LED_PIN, true));
     reset(if outcome == Outcome::Broken { DFU_MAGIC_UF2_RESET } else { 0 })
 }
