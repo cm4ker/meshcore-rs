@@ -28,7 +28,7 @@ use meshcore_ble::{Config, Event, Failure, Host, bonds_from_bytes, bonds_to_byte
 
 use crate::frames::{FRAMES_IN, Link};
 pub use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
-use meshcore_fw_core::links::{pairing_abandoned, pairing_begins, pairing_succeeded};
+use meshcore_fw_core::links::{pairing_abandoned, pairing_begins, pairing_succeeded, trace};
 
 /// The BLE task runs (and holds the controller).
 pub static BLE_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -141,6 +141,7 @@ async fn serve(bt: BT<'static>, params: Params) {
         host.set_passkey((pin != NO_PIN).then_some(pin));
         host.tick(Instant::now().as_secs() as u32);
         while let Some(out) = host.transmit() {
+            trace(">", &out);
             write(&mut controller, &out).await;
         }
         if let Some(event) = host.event() {
@@ -220,7 +221,10 @@ async fn serve(bt: BT<'static>, params: Params) {
             BLE_OUT.receive().await
         };
         match select3(read(&mut controller, &mut packet), frame, Timer::after_secs(1)).await {
-            Either3::First(len) => host.receive(&packet[..len]),
+            Either3::First(len) => {
+                trace("<", &packet[..len]);
+                host.receive(&packet[..len]);
+            }
             // not authenticated yet: upstream drops pushes then too
             Either3::Second(frame) => {
                 if BLE_CONNECTED.load(Ordering::Relaxed) && host.notify(&frame) {

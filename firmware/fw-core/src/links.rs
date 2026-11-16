@@ -66,3 +66,26 @@ pub fn pairing_succeeded() {
     PAIRING_FAILURES.store(0, Ordering::Relaxed);
     PAIRING_BLOCKED_UNTIL.store(0, Ordering::Relaxed);
 }
+
+/// In a diagnostic build (MCFW_USB_LOG set when it is built), the log's line for a packet to (`>`)
+/// or from (`<`) the controller: commands and events whole, of data the Security Manager's and
+/// the attribute protocol's first bytes. Not what comes all the time: the counts of packets sent,
+/// the app's frames (writes, their answers, notifications).
+pub fn trace(way: &str, packet: &[u8]) {
+    if option_env!("MCFW_USB_LOG").is_none() {
+        return;
+    }
+    match packet {
+        [4, 0x13, ..] | [2, _, _, _, _, _, _, 4, 0, 0x13, ..] => {}
+        // a frame of the app's (written to RX) or for it (notified on TX): its code and length
+        [2, _, _, _, _, len, _, 4, 0, 0x12 | 0x52, 9, 0, code, ..] | [2, _, _, _, _, len, _, 4, 0, 0x1B, 11, 0, code, ..] => {
+            log::info!("BLE {way} frame {code:#04x}, {} bytes", len.saturating_sub(3))
+        }
+        [1 | 4, rest @ ..] => log::info!("BLE {way} hci {:02x?}", &rest[..rest.len().min(24)]),
+        // the start of an L2CAP PDU: `[2][handle 2][length 2][PDU length 2][channel 2][PDU]`
+        [2, _, flags, _, _, _, _, channel @ (4 | 6), 0, pdu @ ..] if flags >> 4 & 3 != 1 => {
+            log::info!("BLE {way} {} {:02x?}", if *channel == 6 { "smp" } else { "att" }, &pdu[..pdu.len().min(8)])
+        }
+        _ => {}
+    }
+}
