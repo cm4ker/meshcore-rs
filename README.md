@@ -15,7 +15,7 @@
 | Heltec WiFi LoRa 32 V3 | `firmware/models/heltec/v3` | ESP32-S3, SX1262 без FEM, flash 8 МБ | OLED 128×64 | да, как V4 | собирается, на плате не проверен | как V4 | как V4, слоты по 3,4 МБ |
 | Heltec Wireless Paper (V1.1.1, SSD1682) | `firmware/models/heltec/paper` | ESP32-S3, SX1262 без FEM, flash 8 МБ | e-paper 250×122 | да, как V3, без GPS | да | компаньон: BLE и Wi-Fi, USB (CP2102) | как V3; компаньон через подключение приложения проверен на плате |
 | Seeed XIAO ESP32-C6 + Waveshare Core2021-HF | `firmware/models/xiao-c6` | ESP32-C6, Semtech LR2021, flash 4 МБ | нет | да: room server, Wi-Fi и MQTT; батарею не меряет | да | BLE или Wi-Fi (не вместе; TCP пока ненадёжен), USB | через подключение приложения; два слота по 1,75 МБ, целый образ без сжатия |
-| LilyGo LoRa32 T3-S3 | `firmware/models/t3s3` | ESP32-S3 (S3FH4R2), SX1262 без FEM, flash 4 МБ, PSRAM 2 МБ | нет | да: room server; батарею меряет, GPS нет | репитер проверен на ноде; компаньон только собирается | репитер: USB (консоль); компаньон: BLE и USB | как у XIAO: два слота по 1,75 МБ |
+| LilyGo LoRa32 T3-S3 | `firmware/models/t3s3` | ESP32-S3 (S3FH4R2), SX1262 без FEM, flash 4 МБ, PSRAM 2 МБ | OLED 128×64 (SSD1306 на I2C 18/17; нет — работает без экрана) | да: room server, энергосбережение (лёгкий сон между пакетами), батарея; GPS нет | репитер проверен на ноде; компаньон только собирается | репитер: USB (консоль); компаньон: BLE и USB | как у XIAO: два слота по 1,75 МБ; образы в выпусках `t3s3-repeater`, `t3s3-companion` |
 | LilyGO T-Echo | `firmware/models/t-echo` | nRF52840, SX1262, QSPI-флешка | e-paper 200×200 | да: room server, GPS L76K, датчики на I2C; без Wi-Fi; BLE только для обновлений (`fw ble`); на плате не проверен | да, с GPS L76K | репитер: USB (консоль); компаньон: BLE и USB | репитер: LoRa (дельта) или BLE; компаньон: через подключение приложения; прежняя прошивка остаётся на QSPI, откат на неё; первая прошивка — UF2 |
 | nRF52840 Pro Micro («Faketec», upstream `promicro`) | `firmware/models/promicro` | nRF52840, SX1262 (HT-RA62, E22), только внутренняя flash | нет | да: room server, датчики на I2C в телеметрии; без Wi-Fi; BLE только для обновлений (`fw ble`) | да, до 350 контактов, датчики в телеметрии | репитер: USB (консоль); компаньон: BLE и USB | дельтой на месте с откатом (полный образ — UF2): репитер — по LoRa (подписанный релиз) или BLE; компаньон — от репитера по LoRa или через подключение приложения; первая прошивка — UF2 |
 | Heltec Mesh Node T114 | `firmware/models/t114` | nRF52840, SX1262, внутренняя flash | TFT 240×135 | да, как Pro Micro, с экраном и GPS | да, как Pro Micro, с экраном и GPS | как Pro Micro | дельтой на месте с откатом (полный образ — UF2); первая прошивка — UF2 (диск `HT-n5262`) |
@@ -153,8 +153,8 @@ firmware/models/        платы, у каждой свой крейт: про�
   xiao-c6/              XIAO ESP32-C6 + LR2021 (Waveshare Core2021-HF): компаньон и репитер
                         (`repeater`, на общем `repeater_app`; в выпуски пока не входит)
   t3s3/                 LilyGo LoRa32 T3-S3 (ESP32-S3, SX1262 без FEM, flash 4 МБ): компаньон и
-                        репитер; консоль на USB чипа, батарея на GPIO1, разметка как у XIAO
-                        (`repeater`; в выпуски пока не входит)
+                        репитер; консоль на USB чипа, OLED 128×64 по I2C, батарея на GPIO1,
+                        разметка как у XIAO — образы t3s3-repeater, t3s3-companion
   t-echo/               LilyGO T-Echo (nRF52840, embassy-nrf): компаньон и репитер; BLE на Nordic SDC
                         (meshcore-ble), хранилище на QSPI-флешке, экран e-paper;
     installer/          установщик обновления (меняет местами образ на QSPI и прошивку во внутренней flash)
@@ -238,9 +238,17 @@ espflash flash --partition-table partitions.csv target\xtensa-esp32s3-none-elf\r
 Оба образа — `repeater` и `companion`. Разметка на 4 МБ повторяет XIAO (два слота по 1,75 МБ,
 `partitions.csv` в крейте). Пины по upstream `variants/lilygo_t3s3`: SX1262 на SPI2 — SCK 5, MOSI 6,
 MISO 3, NSS 7, RESET 8, BUSY 34, DIO1 33 (DIO2 — RF-переключатель, DIO3 — TCXO 1,8 В); TX LED 37
-(горит по высокому), кнопка 0, батарея — делитель 100k/100k на GPIO1 (×2, как у upstream). Экрана,
-GPS и бриджа ESP-NOW у платы в этой сборке нет: OLED на T3-S3 не распаян (upstream рисует на него,
-если он впаян).
+(горит по высокому), кнопка 0, батарея — делитель 100k/100k на GPIO1 (×2, как у upstream). Экран —
+OLED 128×64 на SSD1306 (I2C: SDA 18, SCL 17, RST 21): прошивка сама находит его на шине и без него
+работает без экрана; страницы, как у Heltec. GPS и бриджа ESP-NOW нет.
+
+Энергосбережение — как у Heltec V4: `powersaving on` (по умолчанию выключено), между пакетами чип
+уходит в лёгкий сон, будят его IRQ радио и кнопка; пока висит USB-хост, сон не включается — консоль
+должна отвечать. `powersaving stats` показывает, сколько нода проспала.
+
+Образы этой платы собираются в выпусках (job `t3s3`), так что нода обновляется по воздуху как
+остальные: `fw install` из выпуска, дельтой от соседа или через приложение. Локальная сборка
+корневого ключа не знает — перед первым обновлением `set fw.root <отпечаток из описания выпуска>`.
 
 Проверено на живой ноде 2026-11-17: `ver` отвечает `v1.18.0-rs`, `get radio` — `868.731,62.5,7,7`
 после `set radio`, `advert` уходит (SX1262 правда передаёт на этих пинах).

@@ -28,6 +28,10 @@ embassy-time = { version = "0.5.0", features = ["log"] }
 critical-section = "1.2.0"
 meshcore = { path = "../../../crates/meshcore" }
 meshcore-fw = { version = "0.1.0", path = "../../common", features = ["esp32s3"] }
+meshcore-ui = { version = "0.1.0", path = "../../ui" }
+ssd1306 = "0.10"
+embedded-graphics = "0.8"
+embedded-hal = "1.0"
 
 [profile.dev]
 # The default debug profile is too slow and too big for resource-constrained devices.

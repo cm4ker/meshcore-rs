@@ -57,3 +57,4 @@ fn emit_build_time() {
     let (hh, mm) = ((secs % 86400) / 3600, (secs % 3600) / 60);
     println!("cargo:rustc-env=BUILD_DATE={d} {} {y} {hh:02}:{mm:02}", MONTHS[(m - 1) as usize]);
 }
+

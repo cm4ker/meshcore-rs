@@ -201,6 +201,78 @@ jobs:
             *.bin
             *.content
 
+  t3s3:
+    name: LilyGo T3-S3 (ESP32-S3), ${{ matrix.build }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        # the images, and the build with no release number that says whether their code changed
+        build: [images, content]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: echo "MCFW_ROOT=$MCFW_RELEASE_ROOT" >> "$GITHUB_ENV"
+      - id: toolchain
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup/toolchains/esp
+            ~/.espup
+            ~/exports
+          key: xtensa-rust-${{ env.XTENSA_RUST }}-esp32s3
+      - if: steps.toolchain.outputs.cache-hit != 'true'
+        uses: esp-rs/xtensa-toolchain@67649b28a0139171102259d9982f93106aa2b54a # v1.6.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          default: true
+          buildtargets: esp32s3
+          version: ${{ env.XTENSA_RUST }}
+          ldproxy: false
+      - if: steps.toolchain.outputs.cache-hit == 'true'
+        run: |
+          source "$HOME/exports"
+          echo "$PATH" >> "$GITHUB_PATH"
+          echo "LIBCLANG_PATH=${LIBCLANG_PATH:-}" >> "$GITHUB_ENV"
+          rustup default esp
+      - if: github.event_name != 'workflow_dispatch'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            firmware/models/t3s3/target
+          key: t3s3-${{ env.XTENSA_RUST }}-${{ hashFiles('firmware/models/t3s3/Cargo.lock', 'firmware/models/t3s3/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
+      - name: espflash
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/espflash.zip" "$ESPFLASH_ZIP"
+          echo "$ESPFLASH_SHA256  $RUNNER_TEMP/espflash.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/espflash.zip" espflash -d "$HOME/.cargo/bin"
+          espflash --version
+      - name: LilyGo T3-S3
+        working-directory: firmware/models/t3s3
+        run: |
+          out=../../..
+          if [ "${{ matrix.build }}" = content ]; then
+            export MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0
+            out=../../../content
+            mkdir -p $out
+          fi
+          cargo build --locked --release
+          # the board's 4 MB layout, the same one the USB instructions flash
+          for role in repeater companion; do
+            espflash save-image --chip esp32s3 --flash-size 4mb --partition-table partitions.csv target/xtensa-esp32s3-none-elf/release/$role $out/t3s3-$role.bin
+          done
+      - name: Content hashes
+        if: matrix.build == 'content'
+        run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.build }}-esp32s3-t3s3
+          path: |
+            *.bin
+            *.content
+
   nrf52840:
     name: LilyGO T-Echo, Pro Micro and Heltec T114 (nRF52840), ${{ matrix.build }}
     runs-on: ubuntu-24.04
@@ -348,7 +420,7 @@ jobs:
   deltas:
     name: Deltas from the last release
     if: github.event_name != 'workflow_dispatch'
-    needs: [esp32s3, esp32c6, nrf52840]
+    needs: [esp32s3, esp32c6, t3s3, nrf52840]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -364,7 +436,7 @@ jobs:
   release:
     name: Sign and publish
     if: github.event_name == 'workflow_dispatch'
-    needs: [test, esp32s3, esp32c6, nrf52840, ota-app]
+    needs: [test, esp32s3, esp32c6, t3s3, nrf52840, ota-app]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

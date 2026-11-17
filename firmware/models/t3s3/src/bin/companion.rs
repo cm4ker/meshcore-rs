@@ -25,6 +25,7 @@ use esp_backtrace as _;
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
+use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::peripherals::ADC1;
 use esp_hal::rng::{Trng, TrngSource};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
@@ -32,13 +33,17 @@ use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
 use esp_storage::FlashStorage;
+use log::warn;
 
 use meshcore::radio::RadioParams;
 use meshcore_fw::companion_app::{self, Board, Config, Hardware, Serial};
 use meshcore_fw::radio::EspIrq;
 use meshcore_fw::sx1262::Sx1262;
 use meshcore_fw::{reset, storage};
+use meshcore_ui::refresh::oled::Oled as Policy;
+use meshcore_ui::{Page, View};
 use t3s3::battery::Battery;
+use t3s3::display::Oled;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -48,11 +53,18 @@ const BUILD_DATE: &str = env!("BUILD_DATE");
 const WATCHDOG_SECS: u64 = 30;
 /// The SX1262's own output; there is no front end after it.
 const TX_DBM: i8 = 22;
+/// The on-device interface: the board has no GPS, and the ESP BLE task cannot be switched off yet,
+/// so there is no Bluetooth page either. A long press on the home page turns the board off.
+const PAGES: &[Page] = &[Page::Home, Page::Messages, Page::Nearby, Page::Radio, Page::Pull, Page::Advert];
 
 struct T3S3<'d> {
     led: Output<'d>,
     battery: Battery<'d>,
     button: Input<'d>,
+    oled: Option<Oled<'d>>,
+    oled_failures: u8,
+    next_oled_try: u64,
+    screen: Policy,
 }
 
 impl Board for T3S3<'_> {
@@ -86,6 +98,48 @@ impl Board for T3S3<'_> {
 
     fn power_off(&mut self) {
         self.led.set_low();
+        if let Some(o) = self.oled.as_mut() {
+            o.set_on(false);
+        }
+    }
+
+    fn has_screen(&self) -> bool {
+        self.oled.is_some()
+    }
+
+    fn ui_pages(&self) -> &'static [Page] {
+        if self.oled.is_some() { PAGES } else { &[] }
+    }
+
+    fn show_view(&mut self, v: &View) {
+        let now = embassy_time::Instant::now().as_millis();
+        if now < self.next_oled_try || !self.screen.due(v, now) {
+            return;
+        }
+        let Some(o) = self.oled.as_mut() else {
+            return;
+        };
+        o.set_on(true);
+        if o.show(v) {
+            self.oled_failures = 0;
+            self.screen.drawn(v.clone(), now);
+        } else {
+            // the next frame resets the controller first; back off if that keeps failing
+            self.oled_failures += 1;
+            self.next_oled_try = now + 1000 * self.oled_failures as u64;
+            self.screen.forget();
+            if self.oled_failures >= 10 {
+                warn!("OLED: disabled after repeated bus errors");
+                self.oled = None;
+            }
+        }
+    }
+
+    fn screen_off(&mut self) {
+        if let Some(o) = self.oled.as_mut() {
+            o.set_on(false);
+        }
+        self.screen.forget();
     }
 }
 
@@ -132,10 +186,28 @@ async fn main(spawner: Spawner) -> ! {
     let mut adc_cfg = AdcConfig::new();
     let bat_pin = adc_cfg.enable_pin_with_cal::<_, AdcCalCurve<ADC1<'_>>>(p.GPIO1, Attenuation::_11dB);
 
+    // ---- OLED status screen (optional on the board: `None` when nothing answers on the bus)
+    let oled_rst = Output::new(p.GPIO21, Level::High, OutputConfig::default());
+    let i2c_config = I2cConfig::default()
+        .with_frequency(Rate::from_khz(400))
+        .with_timeout(esp_hal::i2c::master::BusTimeout::Maximum)
+        .with_software_timeout(esp_hal::i2c::master::SoftwareTimeout::Transaction(esp_hal::time::Duration::from_millis(5)));
+    let oled = I2c::new(p.I2C0, i2c_config)
+        .ok()
+        .map(|i2c| i2c.with_sda(p.GPIO18).with_scl(p.GPIO17))
+        .and_then(|i2c| Oled::new(i2c, oled_rst));
+    if oled.is_none() {
+        println!("no OLED on the I2C bus: running headless");
+    }
+
     let board = T3S3 {
         led: Output::new(p.GPIO37, Level::Low, OutputConfig::default()),
         battery: Battery::new(Adc::new(p.ADC1, adc_cfg), bat_pin),
         button: Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::Up)),
+        oled,
+        oled_failures: 0,
+        next_oled_try: 0,
+        screen: Policy::default(),
     };
 
     let serial = Serial::Usb(meshcore_fw::usb::start(p.USB_DEVICE));
