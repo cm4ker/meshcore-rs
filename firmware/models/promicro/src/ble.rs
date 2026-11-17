@@ -100,6 +100,7 @@ const BLE_GAP_EVT_DISCONNECTED: u16 = 0x11;
 const BLE_GAP_EVT_CONN_PARAM_UPDATE: u16 = 0x12;
 const BLE_GAP_EVT_SEC_PARAMS_REQUEST: u16 = 0x13;
 const BLE_GAP_EVT_SEC_INFO_REQUEST: u16 = 0x14;
+const BLE_GAP_EVT_PASSKEY_DISPLAY: u16 = 0x15;
 const BLE_GAP_EVT_LESC_DHKEY_REQUEST: u16 = 0x18;
 const BLE_GAP_EVT_AUTH_STATUS: u16 = 0x19;
 const BLE_GAP_EVT_CONN_SEC_UPDATE: u16 = 0x1A;
@@ -408,8 +409,6 @@ struct Window {
     secret: Option<NonZeroScalar>,
     /// The companion's app link (`Role::Companion`).
     companion: bool,
-    /// A new PIN for each pairing ([`Params::pin`] 0).
-    random_pin: bool,
 }
 
 #[embassy_executor::task]
@@ -435,7 +434,6 @@ pub async fn task() -> ! {
             authenticated: false,
             secret: None,
             companion,
-            random_pin: params.pin == 0,
         };
         if open(&params, &mut w).is_ok() {
             info!("BLE: advertising as '{}'", params.name);
@@ -623,8 +621,9 @@ async fn serve(w: &mut Window, bonds: &mut Vec<Bond>) {
                 return;
             }
             Either4::Third(params) => {
-                w.random_pin = params.pin == 0;
-                if !w.random_pin {
+                // a fixed PIN, or none: the SoftDevice's own, shown as it asks (PASSKEY_DISPLAY)
+                BLE_PASSKEY.store(0, Ordering::Relaxed);
+                if params.pin != 0 {
                     set_passkey(params.pin);
                 }
             }
@@ -691,13 +690,10 @@ async fn handle(w: &mut Window, bonds: &mut Vec<Bond>, id: u16) {
                 let _ = sd_call!(SD_BLE_GAP_DISCONNECT, conn, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
                 return;
             }
-            if w.random_pin {
-                let mut r = [0u8; 4];
-                let _ = sd::random(&mut r);
-                let pin = 100_000 + u32::from_le_bytes(r) % 900_000;
-                set_passkey(pin);
-                BLE_PASSKEY.store(pin, Ordering::Relaxed);
-            }
+            // the passkey is the one set at the start ([`set_passkey`]); with none (a board
+            // with a screen) the SoftDevice picks one itself and asks for it to be shown
+            // (PASSKEY_DISPLAY) — a number of our own here would be too late and not the one
+            // the peer's entry is checked against
             // bond, MITM, LE Secure Connections, display only; our LTK (legacy pairing) and the
             // peer's identity are exchanged
             let params: [u8; 5] = [0b0000_0111, 7, 16, 0b01, 0b10];
@@ -714,6 +710,15 @@ async fn handle(w: &mut Window, bonds: &mut Vec<Bond>, id: u16) {
             };
             // the key set has to stay put while pairing: the pointers in it do, it is copied
             let _ = check("pairing", sd_call!(SD_BLE_GAP_SEC_PARAMS_REPLY, conn, 0, params.as_ptr(), &raw const keys));
+        }
+        // the passkey the SoftDevice chose itself (no fixed one): the one the peer's entry is
+        // checked against, so the screen shows this and not a number of our own
+        BLE_GAP_EVT_PASSKEY_DISPLAY => {
+            let mut pin: u32 = 0;
+            for &d in &ev[8..14] {
+                pin = pin * 10 + u32::from(d.saturating_sub(b'0'));
+            }
+            BLE_PASSKEY.store(pin, Ordering::Relaxed);
         }
         BLE_GAP_EVT_SEC_INFO_REQUEST => {
             let (addr, ediv, rand) = (&ev[8..15], u16_at(16), &ev[18..26]);
