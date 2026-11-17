@@ -1,0 +1,14 @@
+# Keep compilation settings in this file and user/runtime settings in `esp-config.toml`.
+include = ["esp-config.toml"]
+
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor --chip esp32s3"
+rustflags = ["-C", "link-arg=-nostartfiles"]
+
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[unstable]
+build-std = ["alloc", "core"]
+# optimize_for_size: build core/alloc with the size-tuned impls (fmt, sort, …)
+build-std-features = ["optimize_for_size"]

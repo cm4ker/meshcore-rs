@@ -49,6 +49,8 @@ pub mod board {
     pub const HELTEC_PAPER: u8 = 6;
     /// Heltec Mesh Node T114: nRF52840 and SX1262, built with the Pro Micro's code.
     pub const HELTEC_T114: u8 = 7;
+    /// LilyGo LoRa32 T3-S3: ESP32-S3FH4R2 and SX1262, upstream `variants/lilygo_t3s3`.
+    pub const T3S3: u8 = 8;
 }
 
 /// What the image runs as.
@@ -163,12 +165,13 @@ pub fn board_name(board: u8) -> &'static str {
         board::PROMICRO => "promicro",
         board::HELTEC_PAPER => "heltec-paper",
         board::HELTEC_T114 => "heltec-t114",
+        board::T3S3 => "t3s3",
         _ => "?",
     }
 }
 
 pub fn board_by_name(name: &str) -> Option<u8> {
-    [board::HELTEC_V4, board::HELTEC_V3, board::XIAO_C6, board::T_ECHO, board::PROMICRO, board::HELTEC_PAPER, board::HELTEC_T114]
+    [board::HELTEC_V4, board::HELTEC_V3, board::XIAO_C6, board::T_ECHO, board::PROMICRO, board::HELTEC_PAPER, board::HELTEC_T114, board::T3S3]
         .into_iter()
         .find(|&b| board_name(b) == name)
 }

@@ -1,0 +1,4 @@
+# The ESP32-S3 needs the Espressif fork (`espup install --targets esp32s3`), not a release of
+# Rust: the Xtensa backend is not in upstream rustc.
+[toolchain]
+channel = "esp"

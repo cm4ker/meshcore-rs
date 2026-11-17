@@ -1,0 +1,47 @@
+[package]
+edition      = "2024"
+name         = "t3s3"
+rust-version = "1.88"
+version      = "0.1.0"
+
+[[bin]]
+name = "companion"
+path = "./src/bin/companion.rs"
+
+[[bin]]
+name = "repeater"
+path = "./src/bin/repeater.rs"
+
+[dependencies]
+esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32s3", "log-04"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3", "log-04"] }
+esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
+esp-backtrace = { version = "0.20.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-println = { version = "0.18.0", features = ["esp32s3", "log-04"] }
+esp-storage = { version = "0.10.0", features = ["esp32s3"] }
+# release_max_level_off: compile out every log call site (and its format strings) in release;
+# the interactive serial CLI (direct console writes) survives, only async logs go quiet.
+log = { version = "0.4.27", features = ["release_max_level_off"] }
+embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-time = { version = "0.5.0", features = ["log"] }
+critical-section = "1.2.0"
+meshcore = { path = "../../../crates/meshcore" }
+meshcore-fw = { version = "0.1.0", path = "../../common", features = ["esp32s3"] }
+
+[profile.dev]
+# The default debug profile is too slow and too big for resource-constrained devices.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1 # LLVM can perform better optimizations using a single thread
+debug         = 2
+lto           = 'fat'
+# for size before speed, as on the other boards: 34 KB less than "s"
+opt-level     = 'z'
+
+[patch.crates-io]
+# fixed BLE passkey support, see ../../vendor/README.md
+trouble-host = { path = "../../vendor/trouble-host" }
+# the scalar arithmetic once in the image
+curve25519-dalek = { path = "../../vendor/curve25519-dalek" }
