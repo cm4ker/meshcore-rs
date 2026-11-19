@@ -18,6 +18,8 @@ pub mod companion_app;
 pub mod console;
 pub mod flash;
 pub mod ota;
+#[path = "../ota_layout.rs"]
+mod ota_layout;
 pub mod repeater_app;
 pub mod sd;
 pub mod usb_frames;
@@ -40,7 +42,11 @@ pub struct Spec {
     /// System OFF, which only the button ends; the radio is asleep, the SoftDevice off.
     pub system_off: fn() -> !,
     /// How updates come in and go on ([`ota::IN_PLACE_AFTER_SWAP`] on the Pro Micro).
-    pub updates: &'static dyn ota::Updates,
+    pub updates: Option<&'static dyn ota::Updates>,
+    /// The common data and companion flash regions, as (address, size).
+    pub companion_regions: [(u32, u32); 2],
+    /// The SX1262 TX power on a fresh Companion install, before any external PA.
+    pub companion_tx_dbm: i8,
     /// Where the companion's data was laid out before ([`COMPANION_BEFORE`] on the Pro Micro),
     /// moved from at the first start.
     pub companion_before: Option<Before>,
@@ -66,6 +72,8 @@ pub const DATA_OVERFLOW: (u32, u32) = (0xD6000, 0x2000);
 /// waits in [`COMPANION_ASIDE`] meanwhile. Going back to the repeater keeps its own data
 /// ([`DATA_REGION`], [`DATA_OVERFLOW`]); its next update takes the area over.
 pub const COMPANION_REGION: (u32, u32) = (0x8F000, 0xD1000 - 0x8F000);
+
+pub const COMPANION_REGIONS: [(u32, u32); 2] = [DATA_REGION, COMPANION_REGION];
 
 /// Where the companion's data waits while an update is in [`COMPANION_REGION`]: the rest of the
 /// staging area below the sensors' blob, and upstream's file system (which goes then: upstream's

@@ -24,10 +24,11 @@
 //! written by `tools/uf2/elf2uf2.py`), which is flashed with the app: the running firmware finds
 //! its own image by it, the base of delta updates.
 //!
-//! Layout (memory.x): the app 0x26000..0x8F000; the staging area 0x8F000..0xD6000, the plan from
+//! Pro Micro and T114 layout (memory.x): the app 0x26000..0x8F000; the staging area 0x8F000..0xD6000, the plan from
 //! its start, the plan back from the page after it; the companion keeps its data there and lends
 //! it to its updates (to 0xD1000, `crate::COMPANION_REGION`); then the sensors' blob, the app's
 //! first page while the installer works, the install request, the node's data, the installer.
+//! The T096 keeps the same companion partition as its USB-only build; see ota_layout.rs.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -43,18 +44,14 @@ use sha2::{Digest, Sha256};
 
 use crate::flash::Flash;
 
-// shared with the installer (installer/src/main.rs)
-pub const APP_START: u32 = 0x26000;
-pub const APP_END: u32 = 0x8F000;
-const STAGING: u32 = 0x8F000;
-/// Up to the sensors' blob.
-const STAGING_END: u32 = crate::DATA_OVERFLOW.0;
-pub const SAVED_FIRST: u32 = 0xD8000;
-pub const RECORD: u32 = 0xD9000;
-pub const INSTALLER: u32 = 0xEA000;
-/// How far the old firmware moves up first: what code moves by between releases, with room to
-/// spare (a page of the new image refers only to old data at least this far above it, less a page).
-pub const SHIFT: u32 = 32 * 1024;
+// These addresses are also compiled into the installer.
+pub use crate::ota_layout::{APP_END, APP_START, INSTALLER, RECORD, SAVED_FIRST, SHIFT};
+use crate::ota_layout::{INSTALLER_END, STAGING, STAGING_END};
+
+#[cfg(not(feature = "t096"))]
+pub use crate::{COMPANION_ASIDE, COMPANION_REGION};
+#[cfg(feature = "t096")]
+pub use crate::ota_layout::{COMPANION_ASIDE, COMPANION_REGION, TRIAL_REGION};
 
 // the Pro Micro's layout before updates in place (installer/src/lib.rs)
 const SWAP_APP_END: u32 = 0x7B000;
@@ -67,6 +64,7 @@ const BOOTLOADER_SETTINGS: u32 = 0xFF000;
 pub const MAX_TRIAL_BOOTS: u8 = 3;
 
 static INSTALLER_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/installer.bin"));
+const _: () = assert!(INSTALLER_BIN.len().next_multiple_of(4) <= (INSTALLER_END - INSTALLER) as usize);
 
 type NrfStore = Store<Flash>;
 
@@ -290,7 +288,11 @@ impl<const LENDS: bool> InPlaceTarget<LENDS> {
     fn check_plan(&self, size: u32) -> Option<(Header, [u8; 8])> {
         let (h, plan) = plan_at(0)?;
         let (old_len, _) = own()?;
-        if h.new_len != size || h.old_len != old_len || h.len > self.capacity() || h.shift != SHIFT {
+        // Both images need room to move up: one on install, the other on rollback.
+        let max_image = self.running_capacity() - SHIFT;
+        if h.new_len != size || h.old_len != old_len || h.len > self.capacity() || h.shift != SHIFT
+            || size > max_image || old_len > max_image
+        {
             return None;
         }
         let mut hash = Sha256::new();
@@ -372,7 +374,7 @@ impl<const LENDS: bool> InPlaceTarget<LENDS> {
 
 impl<const LENDS: bool> FirmwareTarget for InPlaceTarget<LENDS> {
     fn capacity(&self) -> u32 {
-        if LENDS { crate::COMPANION_REGION.1 } else { STAGING_END - STAGING }
+        if LENDS { COMPANION_REGION.1 } else { STAGING_END - STAGING }
     }
 
     // a staged plan waits for the restart as checked: nothing may write over it
@@ -650,5 +652,5 @@ impl Updates for InPlace {
     }
 }
 
-const _: () = assert!(crate::COMPANION_REGION.0 == STAGING && crate::COMPANION_REGION.1 >= meshcore_fw_core::storage::MIN_COMPANION_SIZE);
+const _: () = assert!(COMPANION_REGION.0 == STAGING && COMPANION_REGION.1 >= meshcore_fw_core::storage::MIN_COMPANION_SIZE);
 const _: () = assert!(APP_END - APP_START >= SHIFT + PAGE);

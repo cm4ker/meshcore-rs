@@ -29,6 +29,8 @@ lora_max=163840
 lora_room() {
   case "$1" in
     promicro-*) if [ "${2##*-r}" -le 62 ]; then local img; img=$(stat -c %s "images/$1.bin"); echo $(( 385024 - (img + 4095) / 4096 * 4096 )); else echo "$lora_max"; fi ;;
+    # OtaEndpoint::delta_room reserves a third of the T096's 224 KiB staging area.
+    heltec-t096-*) echo $(( 229376 / 3 * 2 )) ;;
     *) echo "$lora_max" ;;
   esac
 }

@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[allow(dead_code)]
+mod ota_layout;
+
 fn main() {
     emit_build_time();
     // memory.x next to the crate root, for cortex-m-rt's link.x
@@ -19,10 +22,10 @@ fn main() {
 /// (src/ota.rs puts it in place before an update): the Pro Micro's with the swap it took its
 /// updates by before, the T114's (feature `t114`) with its LED.
 fn build_installer(out: &Path) {
-    for f in ["installer/src", "installer/Cargo.toml", "installer/memory.x", "installer/build.rs", "installer/.cargo/config.toml", "../../../crates/inplace/src"] {
+    for f in ["installer/src", "installer/Cargo.toml", "installer/memory.x.in", "ota_layout.rs", "installer/build.rs", "installer/.cargo/config.toml", "../../../crates/inplace/src"] {
         println!("cargo:rerun-if-changed={f}");
     }
-    let features = if std::env::var_os("CARGO_FEATURE_T114").is_some() { "t114" } else { "swap" };
+    let features = if cfg!(feature = "t096") { "t096" } else if cfg!(feature = "t114") { "t114" } else { "swap" };
     let target_dir = out.join("installer-target");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
@@ -39,8 +42,8 @@ fn build_installer(out: &Path) {
     assert!(status.success(), "building the installer failed");
     let elf = std::fs::read(target_dir.join("thumbv7em-none-eabihf/release/installer")).unwrap();
     let (start, image) = flat_image(&elf);
-    assert_eq!(start, 0xEA000, "the installer must start at 0xEA000 (src/ota.rs)");
-    assert!(image.len() <= 0xED000 - 0xEA000, "the installer does not fit below upstream's file system");
+    assert_eq!(start, ota_layout::INSTALLER, "wrong installer address");
+    assert!(image.len() <= (ota_layout::INSTALLER_END - ota_layout::INSTALLER) as usize, "the installer does not fit");
     std::fs::write(out.join("installer.bin"), image).unwrap();
 }
 

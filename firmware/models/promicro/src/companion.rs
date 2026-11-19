@@ -36,7 +36,7 @@ pub struct Nrf {
     pub in_trial: bool,
     /// The data could not be put back in the region: it stays aside until the next start.
     pub stays_aside: bool,
-    pub updates: &'static dyn ota::Updates,
+    pub updates: Option<&'static dyn ota::Updates>,
 }
 
 impl Platform for Nrf {
@@ -49,14 +49,14 @@ impl Platform for Nrf {
     }
 
     fn reboot(&mut self) -> ! {
-        if self.updates.install_pending() {
-            self.updates.hand_over();
+        if let Some(updates) = self.updates.filter(|u| u.install_pending()) {
+            updates.hand_over();
         }
         cortex_m::peripheral::SCB::sys_reset()
     }
 
     fn ota_target(&mut self) -> Option<Box<dyn FirmwareTarget>> {
-        self.updates.target(self.store.clone(), true)
+        self.updates?.target(self.store.clone(), true)
     }
 
     fn in_trial(&self) -> bool {
@@ -64,23 +64,25 @@ impl Platform for Nrf {
     }
 
     fn confirm_trial(&mut self) {
-        self.updates.confirm(&self.store);
-        self.in_trial = false;
-        log::info!("OTA: new firmware confirmed");
+        if let Some(updates) = self.updates {
+            updates.confirm(&self.store);
+            self.in_trial = false;
+            log::info!("OTA: new firmware confirmed");
+        }
     }
 
     fn other_slot(&mut self) -> (bool, String, u32) {
-        let (kept, prev, skip, _) = self.updates.previous(&self.store);
+        let (kept, prev, skip, _) = self.updates.map(|u| u.previous(&self.store)).unwrap_or_default();
         (kept, prev, skip)
     }
 
     fn rollback(&mut self) -> bool {
-        self.updates.rollback(&self.store)
+        self.updates.is_some_and(|u| u.rollback(&self.store))
     }
 
     fn poll_slot(&mut self, update: bool) -> bool {
         let mut store = self.store.borrow_mut();
-        if !store.lent() || update || self.in_trial || self.stays_aside || self.updates.install_pending() {
+        if !store.lent() || update || self.in_trial || self.stays_aside || self.updates.is_some_and(|u| u.install_pending()) {
             return false;
         }
         self.stays_aside = !store.take_back();

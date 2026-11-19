@@ -12,6 +12,8 @@ version      = "0.1.0"
 extra-sensors = ["meshcore-fw-core/extra-sensors"]
 # the T114's installer (its LED; no swap: it never took updates that way)
 t114 = []
+# the T096 flash layout and installer using its TX LED
+t096 = []
 
 [lib]
 test = false
