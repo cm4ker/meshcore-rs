@@ -1,5 +1,5 @@
 //! The update installer of the nRF52840 boards with their internal flash only (the Pro Micro, the
-//! T114). An update arrives as a plan (`meshcore_inplace`) in the staging area of the internal
+//! T114, T096). An update arrives as a plan (`meshcore_inplace`) in the staging area of the internal
 //! flash, where the firmware has checked it; to install it, the firmware saves the first page of
 //! the app flash, points that page at this program and resets. This moves the old firmware up and
 //! writes the new one over it page by page, the first page last (`meshcore_inplace::install`), and
@@ -23,15 +23,19 @@ use cortex_m_rt::{ExceptionFrame, entry, exception};
 use meshcore_inplace::{Flash, Layout, Outcome};
 use nrf_pac as pac;
 
+#[allow(dead_code)]
+#[path = "../../ota_layout.rs"]
+mod ota_layout;
+
 /// `GPREGRET` value that keeps the Adafruit bootloader in its USB drive mode.
 const DFU_MAGIC_UF2_RESET: u8 = 0x57;
 
 /// The LED, lit while installing: the Pro Micro's P0.15 (active high), the T114's P1.03 (active
-/// low).
+/// low), or the T096's P0.28 (active high).
 #[cfg(not(feature = "t114"))]
 mod led {
     use super::pac;
-    const PIN: usize = 15;
+    const PIN: usize = if cfg!(feature = "t096") { 28 } else { 15 };
     pub fn on() {
         pac::P0.outset().write(|w| w.set_pin(PIN, true));
         pac::P0.pin_cnf(PIN).write(|w| w.set_dir(pac::gpio::vals::Dir::Output));
@@ -54,10 +58,14 @@ mod led {
     }
 }
 
-// shared with the firmware (../src/ota.rs)
-const LAYOUT: Layout = Layout { app: 0x26000, app_end: 0x8F000, plan: 0x8F000, saved_first: 0xD8000, request: 0xD9000 };
-/// The staging area's end: the plan (and the plan back) are in it.
-const PLAN_END: u32 = 0xD6000;
+const LAYOUT: Layout = Layout {
+    app: ota_layout::APP_START,
+    app_end: ota_layout::APP_END,
+    plan: ota_layout::STAGING,
+    saved_first: ota_layout::SAVED_FIRST,
+    request: ota_layout::RECORD,
+};
+const PLAN_END: u32 = ota_layout::STAGING_END;
 
 #[entry]
 fn main() -> ! {

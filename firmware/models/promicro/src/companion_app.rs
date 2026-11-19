@@ -32,7 +32,7 @@ use static_cell::StaticCell;
 use crate::board::{self, Battery, Led, Parts};
 use crate::companion::Nrf;
 use crate::flash::Flash;
-use crate::{COMPANION_ASIDE, COMPANION_REGION, DATA_REGION, Spec, console, sd, usb_frames};
+use crate::{Spec, console, sd, usb_frames};
 
 /// Without a pass of the main loop for this long, the watchdog restarts the board. Long, as the
 /// watchdog keeps running into the UF2 bootloader (the 1200 baud touch is a soft reset), which
@@ -131,7 +131,15 @@ where
 
     // ---- persistent state
     let flash = Flash::new(Nvmc::new(chip.nvmc));
-    let mut store = Store::with_regions(flash, DATA_REGION, Some(COMPANION_REGION)).with_lending(COMPANION_ASIDE, spec.companion_before);
+    let [data, companion] = spec.companion_regions;
+    let store = Store::with_regions(flash, data, Some(companion));
+    #[cfg(feature = "t096")]
+    let store = store.with_data_from(meshcore_fw_core::storage::Blob::OtaTrial);
+    let mut store = if spec.updates.is_some() {
+        store.with_lending(crate::ota::COMPANION_ASIDE, spec.companion_before)
+    } else {
+        store.with_companion_ring()
+    };
     // a page takes ~85 ms to erase: the region (~7 s) fits in the watchdog's time
     match store.mount() {
         Mount::Ready | Mount::Fresh => {}
@@ -140,10 +148,10 @@ where
         Mount::Failed => warn!("companion data: the flash failed to take it"),
     }
     let store = Rc::new(RefCell::new(store));
-    // an install request left behind (the installer only runs when the app hands over)
-    spec.updates.clear_request(&store);
-    // count trial boots of a fresh update before anything can hang
-    let in_trial = spec.updates.check_trial(&store);
+    let in_trial = spec.updates.is_some_and(|updates| {
+        updates.clear_request(&store);
+        updates.check_trial(&store)
+    });
     // an update given up, or gone back from: the data goes back in place
     let lent = store.borrow().lent();
     if lent && !in_trial && !store.borrow_mut().take_back() {
@@ -170,7 +178,7 @@ where
     let cfg = Config {
         // the Omsk mesh, as on the T-Echo (the repeater firmware's settings win, if it ran here)
         radio: RadioParams { freq_mhz: 868.731, bw_khz: 62.5, sf: 7, cr: 7 },
-        tx_power_dbm: 22,
+        tx_power_dbm: spec.companion_tx_dbm,
         build_epoch: spec.build_epoch.parse().unwrap_or(0),
         build_date: spec.build_date,
     };

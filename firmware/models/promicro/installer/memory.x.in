@@ -1,0 +1,9 @@
+/* The installer is linked to its board's reserved flash area (../ota_layout.rs).
+   The firmware puts it there itself. It runs instead of the application (the
+   application's first page then points here), so the RAM is all its own apart from the MBR's
+   first 8 bytes. */
+MEMORY
+{
+  FLASH : ORIGIN = @FLASH_ORIGIN@, LENGTH = @FLASH_LENGTH@
+  RAM   : ORIGIN = 0x20000008, LENGTH = 256K - 8
+}

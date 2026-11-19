@@ -10,6 +10,8 @@ description  = "Applies a staged plan over the app flash in place (meshcore-inpl
 swap = []
 # the T114's LED
 t114 = []
+# the T096 flash layout and TX LED
+t096 = []
 
 # the swap itself, tested on the host: cargo test --lib --target <host triple> (the plans with the
 # protocol core's: cargo test -p meshcore-inplace)

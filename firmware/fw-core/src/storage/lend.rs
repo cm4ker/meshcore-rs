@@ -14,6 +14,7 @@
 //! advert table, or where the partition began elsewhere) moves to it by way of the area at the
 //! first start ([`Store::mount`]).
 
+use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
 
 use embedded_storage::nor_flash::NorFlash;
@@ -106,19 +107,30 @@ fn rec_size(len: u32) -> u32 {
 
 /// Runs of zero bytes as `[0, run]`: names and paths in contact records are mostly zeros.
 pub(super) fn pack(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() / 2);
-    let mut i = 0;
-    while i < data.len() {
-        if data[i] == 0 {
-            let run = data[i..].iter().take(255).take_while(|&&b| b == 0).count();
-            out.extend_from_slice(&[0, run as u8]);
-            i += run;
-        } else {
-            out.push(data[i]);
-            i += 1;
+    try_pack(data).expect("packed contact snapshot allocation")
+}
+
+fn try_pack(data: &[u8]) -> Result<Vec<u8>, TryReserveError> {
+    fn emit(data: &[u8], mut write: impl FnMut(&[u8])) {
+        let mut i = 0;
+        while i < data.len() {
+            if data[i] == 0 {
+                let run = data[i..].iter().take(255).take_while(|&&b| b == 0).count();
+                write(&[0, run as u8]);
+                i += run;
+            } else {
+                write(&data[i..i + 1]);
+                i += 1;
+            }
         }
     }
-    out
+
+    let mut len = 0;
+    emit(data, |part| len += part.len());
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)?;
+    emit(data, |part| out.extend_from_slice(part));
+    Ok(out)
 }
 
 pub(super) fn unpack(data: &[u8]) -> Vec<u8> {
@@ -134,6 +146,12 @@ pub(super) fn unpack(data: &[u8]) -> Vec<u8> {
 }
 
 impl<F: NorFlash> Store<F> {
+    /// Use the companion's ring layout without lending its partition to updates.
+    pub fn with_companion_ring(mut self) -> Self {
+        self.ring = true;
+        self
+    }
+
     /// The companion partition is lent to firmware updates: its data moves to `area` (two
     /// pieces, `(address, length)`) meanwhile. `before`: where the data was laid out before,
     /// moved from at the first start. [`Self::mount`] comes next.
@@ -143,10 +161,10 @@ impl<F: NorFlash> Store<F> {
         self
     }
 
-    /// At start, with lending: find where the data is, move it to this layout if it was laid out
+    /// At start, with the ring layout: find where the data is, move it to this layout if it was laid out
     /// before, clear the partition if it holds nothing of the companion's.
     pub fn mount(&mut self) -> Mount {
-        let Some((base, size)) = self.comp.filter(|_| self.lending.is_some()) else {
+        let Some((base, size)) = self.comp.filter(|_| self.ring) else {
             return Mount::Ready;
         };
         if let Some((_, head)) = self.rescue_records() {
@@ -196,8 +214,13 @@ impl<F: NorFlash> Store<F> {
         for (key, data) in self.ring_newest(ADVERTS_MOVED).into_iter().rev() {
             recs.push((TAG_ADVERT, 0, [&key[..], &data].concat()));
         }
-        if let Some(contacts) = self.comp_log_latest() {
-            recs.push((TAG_CONTACTS, 0, pack(&contacts)));
+        match self.try_unlent_log_latest().and_then(|data| data.map(|contacts| try_pack(&contacts)).transpose()) {
+            Ok(Some(packed)) => recs.push((TAG_CONTACTS, 0, packed)),
+            Ok(None) => {}
+            Err(_) => {
+                warn!("companion data: not enough RAM to save contacts for OTA");
+                return false;
+            }
         }
         self.write_rescue(&recs)
     }
@@ -300,7 +323,7 @@ impl<F: NorFlash> Store<F> {
         // the header goes first: until the new one, the data is wherever it was
         l.head = None;
         let area = l.area;
-        if !area.iter().all(|&(a, n)| self.flash.erase(a, a + n).is_ok()) {
+        if !area.iter().all(|&(a, n)| n == 0 || self.flash.erase(a, a + n).is_ok()) {
             return false;
         }
         let mut at = HEADER_LEN;

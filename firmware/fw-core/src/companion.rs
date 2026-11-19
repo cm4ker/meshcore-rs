@@ -845,6 +845,8 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             }
         }
         if fx.power_off {
+            // Let the GNSS task stop its UART DMA while the power-off page is showing.
+            board.set_gps(false);
             let _ = radio.sleep();
             comp_save(&store, CompBlob::Clock, &mesh.ctx.current_time().to_le_bytes());
             if ui.enabled() {

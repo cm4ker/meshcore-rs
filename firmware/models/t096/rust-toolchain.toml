@@ -1,0 +1,4 @@
+# Use the same pinned compiler as the other nRF52840 models.
+[toolchain]
+channel = "1.99.1"
+targets = ["thumbv7em-none-eabihf"]

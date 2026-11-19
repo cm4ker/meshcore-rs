@@ -253,7 +253,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
     let flash = Flash::new(Nvmc::new(chip.nvmc));
     let store = Store::with_regions(flash, DATA_REGION, None).with_overflow(DATA_OVERFLOW);
     let store: NrfStore = Some(Rc::new(RefCell::new(store)));
-    let updates = spec.updates;
+    let updates = spec.updates.expect("repeater requires an update layout");
     if let Some(s) = &store {
         updates.clear_request(s);
     }

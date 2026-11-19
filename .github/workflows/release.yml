@@ -71,7 +71,7 @@ jobs:
       - run: cargo test --locked -p meshcore
         env:
           RUSTFLAGS: --cfg curve25519_dalek_bits="32"
-      # deltas taken as plans to apply in place (the Pro Micro's and the T114's firmware)
+      # deltas taken as plans to apply in place (Pro Micro, T114 and T096)
       - run: cargo test --locked -p meshcore --features inplace --lib ota
       # the Pro Micro's update installer: the swap it took updates by before (the way back to
       # them), with the power going at any step
@@ -274,7 +274,7 @@ jobs:
             *.content
 
   nrf52840:
-    name: LilyGO T-Echo, Pro Micro and Heltec T114 (nRF52840), ${{ matrix.build }}
+    name: LilyGO T-Echo, Pro Micro, Heltec T114 and T096 (nRF52840), ${{ matrix.build }}
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -310,7 +310,8 @@ jobs:
             firmware/models/t-echo/target
             firmware/models/promicro/target
             firmware/models/t114/target
-          key: nrf52840-rust${{ steps.rust.outputs.version }}-${{ hashFiles('firmware/models/t-echo/Cargo.lock', 'firmware/models/promicro/Cargo.lock', 'firmware/models/t114/Cargo.lock', 'firmware/.cargo/config.toml', 'firmware/models/t-echo/.cargo/config.toml', 'firmware/models/promicro/.cargo/config.toml', 'firmware/models/t114/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
+            firmware/models/t096/target
+          key: nrf52840-rust${{ steps.rust.outputs.version }}-${{ hashFiles('firmware/models/t-echo/Cargo.lock', 'firmware/models/promicro/Cargo.lock', 'firmware/models/t114/Cargo.lock', 'firmware/models/t096/Cargo.lock', 'firmware/.cargo/config.toml', 'firmware/models/t-echo/.cargo/config.toml', 'firmware/models/promicro/.cargo/config.toml', 'firmware/models/t114/.cargo/config.toml', 'firmware/models/t096/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
       - name: T-Echo
         working-directory: firmware/models/t-echo
         run: |
@@ -363,6 +364,22 @@ jobs:
           for role in repeater companion; do
             python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role $out/heltec-t114-$role.uf2 --bin $out/heltec-t114-$role.bin
           done
+      - name: Heltec T096 Companion
+        working-directory: firmware/models/t096
+        run: |
+          out=../../..
+          if [ "${{ matrix.build }}" = content ]; then
+            export MCFW_COUNTER=0 MCFW_VERSION= SOURCE_DATE_EPOCH=0
+            out=../../../content
+          fi
+          cargo build --locked --release --bin companion
+          python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/companion "$out/heltec-t096-companion.uf2" --bin "$out/heltec-t096-companion.bin"
+          # The app, including the NRF trailer, must leave room for the in-place installer's 32 KiB shift.
+          size=$(stat -c %s "$out/heltec-t096-companion.bin")
+          if [ "$size" -gt 385024 ]; then
+            echo "::error::heltec-t096-companion is $size bytes: its OTA layout allows 385024 at most"
+            exit 1
+          fi
       - name: Content hashes
         if: matrix.build == 'content'
         run: for f in content/*.bin; do sha256sum "$f" | cut -c1-64 > "$(basename "$f" .bin).content"; done
@@ -521,7 +538,7 @@ jobs:
             echo
             echo "---"
             echo
-            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo, Pro Micro or Heltec T114 image for the USB bootloader's drive; a .zip, the Pro Micro companion's for its serial DFU (web flashers' custom firmware). The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them. ota-app-* is the program that puts a .mcfw on a device over USB or BLE, for Windows, macOS and Linux (README, «ota-app»)."
+            echo "Signed by the root key with fingerprint \`$root\`. Pin it on a device with \`set fw.root $root\` (repeater) or the \`fw_root\` custom variable (companion), then update with the board's .mcfw file. A .uf2 is the T-Echo, Pro Micro, Heltec T114 or Heltec T096 image for the USB bootloader's drive; a .zip, the Pro Micro companion's for its serial DFU (web flashers' custom firmware). The .mcfd files are deltas from earlier releases, which repeaters with \`fw.serve on\` hand on to the companions next to them. ota-app-* is the program that puts a .mcfw on a device over USB or BLE, for Windows, macOS and Linux (README, «ota-app»)."
             if [ -s unchanged.txt ]; then
               echo
               echo "The same code as in $(cat prev-tag.txt): $(paste -sd, unchanged.txt | sed 's/,/, /g'). They come out all the same, so every device runs the same release; their delta is about a kilobyte. content.txt lists the code of every board and role."

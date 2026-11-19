@@ -19,6 +19,7 @@ mod lend;
 
 pub use lend::{Before, Mount};
 
+use alloc::collections::TryReserveError;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -92,6 +93,7 @@ pub struct Store<F> {
     flash: F,
     base: u32,
     size: u32,
+    data_first: u32,
     /// The companion region (offset, size), if the platform has one.
     comp: Option<(u32, u32)>,
     /// Where the blobs past the end of the data region go (offset, size), if the platform has
@@ -132,7 +134,12 @@ impl<F: NorFlash> Store<F> {
     /// the platform has one (ignored if smaller than [`MIN_COMPANION_SIZE`]).
     pub fn with_regions(flash: F, data: (u32, u32), companion: Option<(u32, u32)>) -> Self {
         let comp = companion.filter(|&(_, len)| len >= MIN_COMPANION_SIZE);
-        Self { flash, base: data.0, size: data.1, comp, overflow: None, log_head: None, ring: false, ring_head: None, lending: None }
+        Self { flash, base: data.0, size: data.1, data_first: 0, comp, overflow: None, log_head: None, ring: false, ring_head: None, lending: None }
+    }
+
+    /// Start the data region at this blob, leaving earlier blobs unmapped.
+    pub fn with_data_from(self, first: Blob) -> Self {
+        Self { data_first: first as u32, ..self }
     }
 
     /// The blobs the data region has no room for go to `region` (offset, size), in order: for a
@@ -164,17 +171,24 @@ impl<F: NorFlash> Store<F> {
 
     /// Read `len` bytes at `addr` (word aligned).
     fn read_chunked(&mut self, addr: u32, len: usize) -> Option<Vec<u8>> {
-        let mut out = Vec::with_capacity(len);
+        self.try_read_chunked(addr, len).expect("flash read allocation")
+    }
+
+    fn try_read_chunked(&mut self, addr: u32, len: usize) -> Result<Option<Vec<u8>>, TryReserveError> {
+        let mut out = Vec::new();
+        out.try_reserve_exact(len)?;
         let mut buf = [0u32; 64];
         let mut off = 0;
         while off < len {
             let bytes: &mut [u8; 256] = bytemuck_bytes(&mut buf);
             let n = (len - off).min(256);
-            ReadNorFlash::read(&mut self.flash, addr + off as u32, &mut bytes[..n.next_multiple_of(4)]).ok()?;
+            if ReadNorFlash::read(&mut self.flash, addr + off as u32, &mut bytes[..n.next_multiple_of(4)]).is_err() {
+                return Ok(None);
+            }
             out.extend_from_slice(&bytes[..n]);
             off += n;
         }
-        Some(out)
+        Ok(Some(out))
     }
 
     /// A short read (`N` <= 256, a multiple of 4).
@@ -237,10 +251,11 @@ impl<F: NorFlash> Store<F> {
     }
 
     fn blob_addr(&self, blob: Blob) -> Option<[u32; 2]> {
+        let i = (blob as u32).checked_sub(self.data_first)?;
         let in_data = self.size / (2 * SECTOR);
         let (base, size, i) = match self.overflow {
-            Some((base, size)) if blob as u32 >= in_data => (base, size, blob as u32 - in_data),
-            _ => (self.base, self.size, blob as u32),
+            Some((base, size)) if i >= in_data => (base, size, i - in_data),
+            _ => (self.base, self.size, i),
         };
         let off = i * 2 * SECTOR;
         (off + 2 * SECTOR <= size).then_some([base + off, base + off + SECTOR])
@@ -265,10 +280,11 @@ impl<F: NorFlash> Store<F> {
     }
 
     pub fn erase_all(&mut self) -> bool {
-        let end = self.base + (BLOBS * 2 * SECTOR).min(self.size);
+        let blobs = BLOBS - self.data_first;
+        let end = self.base + (blobs * 2 * SECTOR).min(self.size);
         let overflow = match self.overflow {
             Some((base, size)) => {
-                let blobs = BLOBS.saturating_sub(self.size / (2 * SECTOR));
+                let blobs = blobs.saturating_sub(self.size / (2 * SECTOR));
                 blobs == 0 || self.flash.erase(base, base + (blobs * 2 * SECTOR).min(size)).is_ok()
             }
             None => true,
@@ -354,6 +370,10 @@ impl<F: NorFlash> Store<F> {
         if self.lent() {
             return self.lent_load(lend::TAG_CONTACTS, 0).map(|d| lend::unpack(&d));
         }
+        self.try_unlent_log_latest().expect("contact snapshot allocation")
+    }
+
+    fn try_unlent_log_latest(&mut self) -> Result<Option<Vec<u8>>, TryReserveError> {
         let mut found = self.log_scan();
         // the newest first, those of one number as found; by insertion, for the few records there
         // are: core's sort is 3 KB of code on a board whose core is not built for size
@@ -368,10 +388,14 @@ impl<F: NorFlash> Store<F> {
             // appends continue after the newest record, even an interrupted one
             self.log_head = Some((addr + (HEADER as u32 + len).next_multiple_of(4), seq.wrapping_add(1)));
         }
-        found.into_iter().find_map(|(_, addr, len, crc)| {
-            let data = self.read_chunked(addr + HEADER as u32, len as usize)?;
-            (crc32(&data) == crc).then_some(data)
-        })
+        for (_, addr, len, crc) in found {
+            if let Some(data) = self.try_read_chunked(addr + HEADER as u32, len as usize)?
+                && crc32(&data) == crc
+            {
+                return Ok(Some(data));
+            }
+        }
+        Ok(None)
     }
 
     /// Append a snapshot to the ring log, wrapping around (and erasing ahead) as needed.
@@ -783,6 +807,63 @@ mod tests {
     /// An update fills the partition.
     fn update_over(store: &mut Store<RamFlash>) {
         store.flash().0[COMP.0 as usize..(COMP.0 + COMP.1) as usize].fill(0x3C);
+    }
+
+    #[test]
+    fn standalone_companion_ring_clears_old_app_data_and_survives_restart() {
+        let region = (COMP_AT, MIN_COMPANION_SIZE);
+        let mut flash = lending_flash();
+        flash.0[region.0 as usize..(region.0 + region.1) as usize].fill(0x3C);
+        let mut store = Store::with_regions(flash, (0, COMP_AT), Some(region)).with_companion_ring();
+
+        assert_eq!(store.mount(), Mount::Fresh);
+        assert!(store.comp_save(CompBlob::Identity, b"identity"));
+        assert!(store.advert_put(&key(1), b"advert"));
+        assert!(!store.lend());
+
+        let flash = core::mem::replace(store.flash(), RamFlash(Vec::new()));
+        let mut store = Store::with_regions(flash, (0, COMP_AT), Some(region)).with_companion_ring();
+        assert_eq!(store.mount(), Mount::Ready);
+        assert_eq!(store.comp_load(CompBlob::Identity).as_deref(), Some(&b"identity"[..]));
+        assert_eq!(store.advert_get(&key(1)).as_deref(), Some(&b"advert"[..]));
+    }
+
+    #[test]
+    fn t096_ota_lends_existing_data_and_keeps_its_trial_record_separate() {
+        let data = (0x90000, 0x2000);
+        let comp = (0x9C000, MIN_COMPANION_SIZE);
+        let aside = [(0x92000, 0xA000), (0x9C000, 0)];
+        let flash = RamFlash(vec![0xFF; 0xD5000]);
+        let mut old = Store::with_regions(flash, (0x8C000, 0x10000), Some(comp)).with_companion_ring();
+        assert_eq!(old.mount(), Mount::Fresh);
+        assert!(old.comp_save(CompBlob::Identity, b"identity"));
+        assert!(old.comp_save(CompBlob::Prefs, b"name=T096"));
+        assert!(old.comp_save(CompBlob::Channels, b"channels"));
+        assert!(old.comp_save(CompBlob::Bonds, b"phone"));
+        assert!(old.comp_log_append(&contacts(350)));
+        assert!(old.advert_put(&key(1), b"advert"));
+
+        let mount = |flash| Store::with_regions(flash, data, Some(comp))
+            .with_data_from(Blob::OtaTrial)
+            .with_lending(aside, None);
+        let mut updated = mount(core::mem::replace(old.flash(), RamFlash(Vec::new())));
+        assert_eq!(updated.mount(), Mount::Ready);
+        assert!(!updated.save(Blob::Prefs, b"unmapped"));
+        assert!(!updated.save(Blob::Regions, b"unmapped"));
+        assert!(updated.lend());
+        assert!(updated.save(Blob::OtaTrial, b"trial"));
+        updated.flash().0[comp.0 as usize..(comp.0 + comp.1) as usize].fill(0x3C);
+
+        let mut updated = mount(core::mem::replace(updated.flash(), RamFlash(Vec::new())));
+        assert_eq!(updated.mount(), Mount::Lent);
+        assert!(updated.take_back());
+        assert_eq!(updated.comp_load(CompBlob::Identity).as_deref(), Some(&b"identity"[..]));
+        assert_eq!(updated.comp_load(CompBlob::Prefs).as_deref(), Some(&b"name=T096"[..]));
+        assert_eq!(updated.comp_load(CompBlob::Channels).as_deref(), Some(&b"channels"[..]));
+        assert_eq!(updated.comp_load(CompBlob::Bonds).as_deref(), Some(&b"phone"[..]));
+        assert_eq!(updated.comp_log_latest(), Some(contacts(350)));
+        assert_eq!(updated.advert_get(&key(1)).as_deref(), Some(&b"advert"[..]));
+        assert_eq!(updated.load(Blob::OtaTrial).as_deref(), Some(&b"trial"[..]));
     }
 
     #[test]
