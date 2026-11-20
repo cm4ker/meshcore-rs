@@ -10,18 +10,19 @@ use core::sync::atomic::Ordering;
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Output};
 use embassy_nrf::temp::Temp;
-use embassy_nrf::twim::Twim;
 use embassy_nrf::wdt::WatchdogHandle;
 use meshcore::companion::CompanionPrefs;
 use meshcore::ota::FirmwareTarget;
 use meshcore_fw_core::companion::{BleSetup, Board, Links, Platform};
 use meshcore_fw_core::sensors::Sensors;
 use meshcore_fw_core::storage::SharedStore;
+use meshcore_ui::{Page, View};
 
 use crate::board::{self, Battery, Led};
 use crate::flash::Flash;
+use crate::i2c::Bus;
 use crate::usb_frames::{USB_HOST, USB_OUT};
-use crate::{ble, ota, sd};
+use crate::{ble, buzzer, ota, sd};
 
 /// The chip: the SoftDevice runs from the start (BLE), the USB port carries the boot log, then
 /// the app's frames.
@@ -136,10 +137,28 @@ pub struct ProMicro {
     pub battery: Battery,
     /// Read while the SoftDevice is off; it has the TEMP peripheral while it runs.
     pub temp: Temp<'static>,
-    pub sensors: Sensors<Twim<'static>>,
+    pub sensors: Sensors<Bus>,
+    /// An OLED answered on the I2C at boot: the interface's pages (`crate::oled`) are turned with
+    /// the button, and the pairing PIN is shown on them.
+    pub screen: bool,
+    /// A speaker is wired on the tone pin (`crate::buzzer`): a new message and a boot sound.
+    pub buzzer: bool,
     /// The outputs that stay as they are (`board::Parts::hold`).
     pub _hold: heapless::Vec<Output<'static>, 4>,
 }
+
+/// The companion's pages, the home page first. Without a screen none are shown and the button only
+/// sends an advert (the firmware's long-stand behaviour).
+const PAGES: &[Page] = &[
+    Page::Home,
+    Page::Messages,
+    Page::Nearby,
+    Page::Radio,
+    Page::Bluetooth,
+    Page::Pull,
+    Page::Advert,
+    Page::PowerOff,
+];
 
 impl Board for ProMicro {
     fn manufacturer(&self) -> &str {
@@ -199,5 +218,33 @@ impl Board for ProMicro {
 
     fn button_down(&mut self) -> bool {
         self.button.is_low()
+    }
+
+    fn has_screen(&self) -> bool {
+        self.screen
+    }
+
+    fn ui_pages(&self) -> &'static [Page] {
+        if self.screen { PAGES } else { &[] }
+    }
+
+    fn show_view(&mut self, view: &View) {
+        crate::oled::SCREEN.signal(Some(view.clone()));
+    }
+
+    fn screen_off(&mut self) {
+        crate::oled::SCREEN.signal(None);
+    }
+
+    fn has_buzzer(&self) -> bool {
+        self.buzzer
+    }
+
+    fn notify(&mut self, kind: meshcore_fw_core::companion::Notify) {
+        let sound = match kind {
+            meshcore_fw_core::companion::Notify::Message => buzzer::Sound::Message,
+            meshcore_fw_core::companion::Notify::Done => buzzer::Sound::Ack,
+        };
+        buzzer::SOUND.signal(sound);
     }
 }

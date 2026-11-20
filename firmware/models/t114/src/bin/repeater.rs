@@ -93,6 +93,6 @@ async fn main(spawner: Spawner) {
         rng: p.RNG,
         temp: Temp::new(p.TEMP, Irqs),
     };
-    let ui = RepeaterUi::new(parts.button.is_low(), Instant::now().as_millis());
+    let ui = RepeaterUi::new(parts.button.is_low(), Instant::now().as_millis(), &tft::SCREEN);
     repeater_app::run(spawner, chip, parts, &SPEC, Extras { ui, build_date: BUILD_DATE }).await
 }

@@ -298,6 +298,8 @@ pub struct BoardInfo {
     pub fw_prev_failed: bool,
     /// A GPS receiver is wired to the board (`gps` CLI); false = this board has none.
     pub has_gps: bool,
+    /// A speaker is wired to the board (`set buzzer`); false = this board has none.
+    pub has_buzzer: bool,
     /// The receiver's latest reading, kept by the firmware for the `gps` CLI; none while the
     /// receiver is off or silent.
     pub gps: Option<GpsReading>,
@@ -2272,6 +2274,11 @@ impl Repeater {
                 Some(m) => format!("> {}", Fixed(m as f64, 3)),
                 None => "Error: unsupported".into(),
             }
+        } else if cfg.starts_with("buzzer") {
+            match self.board.has_buzzer {
+                true => format!("> {}", onoff(!p.buzzer_quiet)),
+                false => "Error: unsupported".into(),
+            }
         } else if cfg.starts_with("pwrmgt.support") {
             "> unsupported".into()
         } else if cfg.starts_with("pwrmgt.source") || cfg.starts_with("pwrmgt.bootmv") {
@@ -2555,6 +2562,23 @@ impl Repeater {
                 } else {
                     format!("OK - multiplier set to {}", Fixed(self.prefs.adc_multiplier as f64, 3))
                 }
+            }
+        } else if let Some(v) = cfg.strip_prefix("buzzer ") {
+            if !self.board.has_buzzer {
+                return "Error: this board has no speaker".into();
+            }
+            match v.trim() {
+                "on" => {
+                    self.prefs.buzzer_quiet = false;
+                    self.save_prefs();
+                    "OK - speaker on".into()
+                }
+                "off" => {
+                    self.prefs.buzzer_quiet = true;
+                    self.save_prefs();
+                    "OK - speaker off".into()
+                }
+                _ => "Error: on or off".into(),
             }
         } else {
             format!("unknown config: {cfg}")

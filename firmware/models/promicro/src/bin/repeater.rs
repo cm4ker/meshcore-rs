@@ -15,9 +15,11 @@ use embassy_nrf::temp::{self, Temp};
 use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::{bind_interrupts, config, peripherals, saadc, spim, twim, usb};
+use embassy_time::Instant;
 use embedded_alloc::LlffHeap as Heap;
-use promicro::repeater_app::{self, Chip, NoExtras};
-use promicro::{Spec, board, console, sd};
+use promicro::repeater_app::{self, Chip};
+use promicro::screen::{Extras, RepeaterUi};
+use promicro::{Spec, board, buzzer, console, oled, sd};
 
 const HEAP_SIZE: usize = 144 * 1024;
 
@@ -85,6 +87,12 @@ async fn main(spawner: Spawner) {
         irq.set_priority(Priority::P3);
     }
     let parts = promicro::board_parts!(p, Irqs);
+    // the panel answers on the shared I2C (or not: the board then runs headless), and the speaker
+    // is on the board's tone pin
+    let screen = oled::Oled::probe(parts.i2c).await;
+    spawner.spawn(oled::task(screen).unwrap());
+    spawner.spawn(buzzer::task(buzzer::new(p.PWM0, p.P1_06)).unwrap());
+    buzzer::SOUND.signal(buzzer::Sound::Startup);
     let chip = Chip {
         usb: Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs)),
         wdt: p.WDT,
@@ -92,5 +100,6 @@ async fn main(spawner: Spawner) {
         rng: p.RNG,
         temp: Temp::new(p.TEMP, Irqs),
     };
-    repeater_app::run(spawner, chip, parts, &SPEC, NoExtras).await
+    let ui = RepeaterUi::new(parts.button.is_low(), Instant::now().as_millis(), &oled::SCREEN);
+    repeater_app::run(spawner, chip, parts, &SPEC, Extras { ui, build_date: env!("BUILD_DATE"), buzzer: true }).await
 }

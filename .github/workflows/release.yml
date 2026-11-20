@@ -342,11 +342,14 @@ jobs:
           cargo build --locked --release
           for role in repeater companion; do
             python3 ../../../tools/uf2/elf2uf2.py target/thumbv7em-none-eabihf/release/$role $out/promicro-$role.uf2 --bin $out/promicro-$role.bin
-            # a node that still swaps its updates in (before 0.9.0-dev.4) takes an image of its app
-            # slot at most: 340 KiB (src/ota.rs)
+            # the image must leave the installer its shift: it moves the running firmware 32 KiB up
+            # the 420 KiB app slot, so an image takes 0x8F000 - 0x26000 - 32 KiB at most (388 KiB).
+            # Longer images would install once and then fail every delta: `base_len + shift` over
+            # the slot is TooLarge (meshcore::ota). Nodes that still swap their updates in (before
+            # 0.9.0-dev.4) take 340 KiB at most: they need USB for these images.
             size=$(stat -c %s $out/promicro-$role.bin)
-            if [ "$size" -gt 348160 ]; then
-              echo "::error::promicro-$role is $size bytes: Pro Micros that swap their updates in take 348160 at most"
+            if [ "$size" -gt 397312 ]; then
+              echo "::error::promicro-$role is $size bytes: its in-place updates take 397312 at most"
               exit 1
             fi
           done

@@ -134,6 +134,9 @@ pub struct NodePrefs {
     /// The gateway that last answered, asked first after a boot
     /// (`crate::timesync::TimeSync::take_remembered`).
     pub time_gateway: String,
+    /// The speaker is silent (`set buzzer off`): the board still has it, and marks nothing with
+    /// it. Off by default, so a board with a speaker sounds.
+    pub buzzer_quiet: bool,
 }
 
 impl Default for NodePrefs {
@@ -204,6 +207,7 @@ impl Default for NodePrefs {
             time_beacons: 4,
             time_keys: Vec::new(),
             time_gateway: String::new(),
+            buzzer_quiet: false,
         }
     }
 }
@@ -358,6 +362,7 @@ impl NodePrefs {
         let _ = writeln!(s, "time_beacons={}", self.time_beacons);
         let _ = writeln!(s, "time_keys={}", join_keys(&self.time_keys));
         let _ = writeln!(s, "time_gateway={}", self.time_gateway);
+        let _ = writeln!(s, "buzzer_quiet={}", b(self.buzzer_quiet));
         s
     }
 
@@ -444,6 +449,7 @@ impl NodePrefs {
                 "time_beacons" => p.time_beacons = u8v().min(24),
                 "time_keys" => p.time_keys = parse_keys(v).unwrap_or_default(),
                 "time_gateway" => p.time_gateway = v.into(),
+                "buzzer_quiet" => p.buzzer_quiet = flag(),
                 _ => {}
             }
         }

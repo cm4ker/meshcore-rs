@@ -109,6 +109,9 @@ pub struct CompanionPrefs {
     pub time_keys: Vec<[u8; 32]>,
     /// The gateway that last answered, asked first after a boot.
     pub time_gateway: String,
+    /// The speaker is silent (`set buzzer off`, the `buzzer` custom variable): the board still has
+    /// it, and marks nothing with it. Off by default, so a board with a speaker sounds.
+    pub buzzer_quiet: bool,
 }
 
 impl Default for CompanionPrefs {
@@ -162,6 +165,7 @@ impl Default for CompanionPrefs {
             time_sync: crate::timesync::Mode::Listen.code(),
             time_keys: Vec::new(),
             time_gateway: String::new(),
+            buzzer_quiet: false,
         }
     }
 }

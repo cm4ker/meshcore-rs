@@ -14,7 +14,6 @@ use embassy_nrf::interrupt::typelevel::{self, Binding};
 use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::rng::Rng;
 use embassy_nrf::temp::Temp;
-use embassy_nrf::twim::Twim;
 use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::wdt::{self, Watchdog};
@@ -32,6 +31,7 @@ use static_cell::StaticCell;
 use crate::board::{self, Battery, Led, Parts};
 use crate::companion::Nrf;
 use crate::flash::Flash;
+use crate::i2c::Bus;
 use crate::{Spec, console, sd, usb_frames};
 
 /// Without a pass of the main loop for this long, the watchdog restarts the board. Long, as the
@@ -56,7 +56,7 @@ pub struct BoardParts {
     pub button: Input<'static>,
     pub battery: Battery,
     pub temp: Temp<'static>,
-    pub sensors: Sensors<Twim<'static>>,
+    pub sensors: Sensors<Bus>,
     /// The outputs that stay as they are (`Parts::hold`).
     pub hold: heapless::Vec<Output<'static>, 4>,
 }

@@ -680,6 +680,11 @@ impl Companion {
                         self.set_fem_rxgain(value.first() == Some(&b'1'));
                         self.write_ok();
                     }
+                    b"buzzer" if self.board.has_buzzer => {
+                        self.prefs.buzzer_quiet = value.first() != Some(&b'1');
+                        self.effects.save_prefs = true;
+                        self.write_ok();
+                    }
                     b"time_sync" => {
                         let value = core::str::from_utf8(value).unwrap_or("").trim();
                         match self.time_command(ctx, value) {
@@ -1014,6 +1019,9 @@ impl Companion {
         }
         if self.board.fem_lna_controllable {
             vars.push(alloc::format!("fem_rxgain:{}", self.prefs.radio_fem_rxgain as u8));
+        }
+        if self.board.has_buzzer {
+            vars.push(alloc::format!("buzzer:{}", !self.prefs.buzzer_quiet as u8));
         }
         vars.push(fps("fw_root", &self.prefs.ota_roots));
         vars.push(fps("fw_owner", &self.prefs.ota_owners));

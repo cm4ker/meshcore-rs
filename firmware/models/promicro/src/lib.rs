@@ -13,14 +13,18 @@ extern crate alloc;
 
 pub mod ble;
 pub mod board;
+pub mod buzzer;
 pub mod companion;
 pub mod companion_app;
 pub mod console;
 pub mod flash;
+pub mod i2c;
+pub mod oled;
 pub mod ota;
 #[path = "../ota_layout.rs"]
 mod ota_layout;
 pub mod repeater_app;
+pub mod screen;
 pub mod sd;
 pub mod usb_frames;
 

@@ -93,7 +93,7 @@ macro_rules! board_parts {
                 enable: Some(Output::new($p.P1_15, Level::Low, OutputDrive::Standard)),
             },
             // The connector's I²C bus; the internal bus on P0.07/P0.08 is separate.
-            i2c: twim::Twim::new($p.TWISPI0, $irqs, $p.P0_04, $p.P0_27, icfg, TWIM_BUF.init([0; 8])),
+            i2c: promicro::i2c::Bus::new(twim::Twim::new($p.TWISPI0, $irqs, $p.P0_04, $p.P0_27, icfg, TWIM_BUF.init([0; 8]))),
             hold,
         };
         (parts, screen, gps, fem_ctx)

@@ -85,6 +85,11 @@ pub trait Extras {
     /// The GPS on or off (`gps on|off`, and at boot).
     fn set_gps(&mut self, _on: bool) {}
 
+    /// A speaker is wired (`set buzzer` is offered).
+    fn has_buzzer(&self) -> bool {
+        false
+    }
+
     /// The receiver's latest reading.
     fn gps(&self) -> Option<GpsReading> {
         None
@@ -344,6 +349,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
         ble_ota_name: sd::present().then(|| ota_name(&prefs.node_name)),
         sensor_scan: sensors.scan.clone(),
         has_gps: extras.has_gps(),
+        has_buzzer: extras.has_buzzer(),
         ..Default::default()
     };
     if sd::present() {

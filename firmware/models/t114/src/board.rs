@@ -92,7 +92,7 @@ macro_rules! board_parts {
                 adc: saadc::Saadc::new($p.SAADC, $irqs, saadc::Config::default(), [saadc::ChannelConfig::single_ended($p.P0_04)]),
                 enable: Some(Output::new($p.P0_06, Level::Low, OutputDrive::Standard)),
             },
-            i2c: twim::Twim::new($p.TWISPI0, $irqs, $p.P0_26, $p.P0_27, icfg, TWIM_BUF.init([0; 8])),
+            i2c: promicro::i2c::Bus::new(twim::Twim::new($p.TWISPI0, $irqs, $p.P0_26, $p.P0_27, icfg, TWIM_BUF.init([0; 8]))),
             hold: heapless::Vec::new(),
         };
         (parts, screen, gps)

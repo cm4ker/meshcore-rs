@@ -143,6 +143,21 @@ pub trait Board {
     }
     /// The GPS on or off: the board powers it, sets it up and reads it.
     fn set_gps(&mut self, _on: bool) {}
+    /// A speaker the firmware marks events with (`set buzzer`): a new message, a finished action.
+    fn has_buzzer(&self) -> bool {
+        false
+    }
+    /// One of those events, when the node is not muted (`prefs.buzzer_quiet`).
+    fn notify(&mut self, _kind: Notify) {}
+}
+
+/// What a board's speaker marks, if it has one ([`Board::has_buzzer`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Notify {
+    /// A new message came in.
+    Message,
+    /// Something the user asked for was done (an advert sent, the update window opened).
+    Done,
 }
 
 /// What a platform needs to bring BLE up.
@@ -474,6 +489,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         mcu_temp_c: board.mcu_temp_c().await,
         max_tx_power_dbm: max_tx,
         has_gps: board.has_gps(),
+        has_buzzer: board.has_buzzer(),
         adc_multiplier: board.adc_multiplier(),
         fem_lna_controllable: board.lna_controllable(),
         sensor_scan: board.sensor_scan(),
@@ -709,6 +725,9 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             // a new message lights a dark screen
             if mesh.app.messages_received != messages_lit {
                 messages_lit = mesh.app.messages_received;
+                if !mesh.app.prefs.buzzer_quiet {
+                    board.notify(Notify::Message);
+                }
                 ui.wake(now);
                 next_screen = 0;
             }

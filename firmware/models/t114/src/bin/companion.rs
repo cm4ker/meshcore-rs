@@ -94,6 +94,8 @@ async fn main(spawner: Spawner) {
             battery: b.battery,
             temp: b.temp,
             sensors: b.sensors,
+            screen: false,
+            buzzer: false,
             _hold: b.hold,
         },
     })

@@ -16,6 +16,7 @@ pub mod bme280;
 pub mod bmp280;
 pub mod descriptor;
 pub mod ina219;
+pub mod ina226;
 pub mod sht3x;
 pub mod sht4x;
 pub mod shtc3;
@@ -33,6 +34,7 @@ use self::bme280::Bme280;
 use self::bmp280::Bmp280;
 pub use self::descriptor::read_descriptor;
 use self::ina219::Ina219;
+use self::ina226::Ina226;
 use self::sht3x::Sht3x;
 #[cfg(feature = "extra-sensors")]
 use self::sht4x::Sht4x;
@@ -50,6 +52,7 @@ pub struct Sensors<I> {
     #[cfg(feature = "extra-sensors")]
     sht4x: Option<Sht4x>,
     ina: Option<Ina219>,
+    ina226: Option<Ina226>,
     sht3x: Option<Sht3x>,
     /// What the boot scan found, for `sensor scan`.
     pub scan: String,
@@ -68,6 +71,7 @@ impl<I: I2c> Sensors<I> {
         #[cfg(feature = "extra-sensors")]
         let sht4x = Sht4x::probe(&mut i2c).await;
         let ina = Ina219::probe(&mut i2c).await;
+        let ina226 = Ina226::probe(&mut i2c).await;
         let sht3x = Sht3x::probe(&mut i2c).await;
 
         let mut s = Self {
@@ -80,6 +84,7 @@ impl<I: I2c> Sensors<I> {
             #[cfg(feature = "extra-sensors")]
             sht4x,
             ina,
+            ina226,
             sht3x,
             scan: String::new(),
         };
@@ -110,6 +115,9 @@ impl<I: I2c> Sensors<I> {
         }
         if self.ina.is_some() {
             t.push(("INA219", ina219::ADDRESS));
+        }
+        if self.ina226.is_some() {
+            t.push(("INA226", ina226::ADDRESS));
         }
         if let Some(s) = &self.sht3x {
             t.push(("SHT3X", s.addr()));
@@ -193,6 +201,12 @@ impl<I: I2c> Sensors<I> {
             channel += 1;
         }
         if let Some(s) = self.ina.as_ref() {
+            if let Some(r) = s.read(i2c).await {
+                r.lpp(channel, lpp);
+            }
+            channel += 1;
+        }
+        if let Some(s) = self.ina226.as_ref() {
             if let Some(r) = s.read(i2c).await {
                 r.lpp(channel, lpp);
             }

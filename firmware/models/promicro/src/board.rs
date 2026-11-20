@@ -14,10 +14,11 @@ use embassy_nrf::gpio::{Input, Output};
 use embassy_nrf::pac;
 use embassy_nrf::saadc::Saadc;
 use embassy_nrf::spim::Spim;
-use embassy_nrf::twim::Twim;
 use embassy_time::{Duration, Instant, Timer};
 use meshcore_fw_core::radio::WaitIrq;
 use meshcore_fw_core::sx1262::Sx1262;
+
+use crate::i2c::Bus;
 
 /// Upstream `ADC_MULTIPLIER`: millivolts per LSB of a 12-bit sample over 0..3.6 V (internal
 /// 0.6 V reference, gain 1/6), divider included; `set adc.multiplier` calibrates it per board.
@@ -46,7 +47,8 @@ pub struct Parts {
     pub rxen: Option<Output<'static>>,
     pub button: Input<'static>,
     pub battery: Battery,
-    pub i2c: Twim<'static>,
+    /// The board's I2C, shared by the sensors and the screen (`crate::i2c`).
+    pub i2c: Bus,
     /// Outputs that only have to stay as they are: the radio's supply.
     pub hold: heapless::Vec<Output<'static>, 4>,
 }
@@ -136,7 +138,7 @@ macro_rules! board_parts {
                 adc: saadc::Saadc::new($p.SAADC, $irqs, saadc::Config::default(), [saadc::ChannelConfig::single_ended($p.P0_31)]),
                 enable: None,
             },
-            i2c: twim::Twim::new($p.TWISPI0, $irqs, $p.P1_04, $p.P0_11, icfg, TWIM_BUF.init([0; 8])),
+            i2c: $crate::i2c::Bus::new(twim::Twim::new($p.TWISPI0, $irqs, $p.P1_04, $p.P0_11, icfg, TWIM_BUF.init([0; 8]))),
             hold,
         }
     }};
@@ -192,7 +194,9 @@ pub fn system_off() -> ! {
             w.set_pin(15, true); // LED
             w.set_pin(13, true); // radio supply
             w.set_pin(17, true); // RXEN
-        })
+        });
+        // the speaker's line, should the PWM have left it high
+        pac::P1.outclr().write(|w| w.set_pin(6, true));
     })
 }
 

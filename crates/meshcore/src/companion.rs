@@ -439,6 +439,8 @@ pub struct Board {
     pub wifi_ip: Option<String>,
     /// A GPS receiver: its `gps` setting is offered to the app.
     pub has_gps: bool,
+    /// A speaker: its `buzzer` setting is offered to the app.
+    pub has_buzzer: bool,
     /// The receiver's latest reading (`gps::publish` on the firmware), for the `gps` CLI; none
     /// while it is off or silent.
     pub gps: Option<GpsReading>,
@@ -481,6 +483,7 @@ impl Default for Board {
             wifi_status: String::new(),
             wifi_ip: None,
             has_gps: false,
+            has_buzzer: false,
             gps: None,
             adc_multiplier: None,
             fem_lna_controllable: false,
