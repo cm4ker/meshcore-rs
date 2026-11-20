@@ -90,6 +90,7 @@ async fn main(spawner: Spawner) {
     // the panel answers on the shared I2C (or not: the board then runs headless), and the speaker
     // is on the board's tone pin
     let screen = oled::Oled::probe(parts.i2c).await;
+    let has_screen = screen.is_some();
     spawner.spawn(oled::task(screen).unwrap());
     spawner.spawn(buzzer::task(buzzer::new(p.PWM0, p.P1_06)).unwrap());
     let chip = Chip {
@@ -99,6 +100,8 @@ async fn main(spawner: Spawner) {
         rng: p.RNG,
         temp: Temp::new(p.TEMP, Irqs),
     };
-    let ui = RepeaterUi::new(parts.button.is_low(), Instant::now().as_millis(), &oled::SCREEN);
+    // without a panel the button keeps its old job (nothing): an unseen page turn would send an
+    // advert, and the home page's long press would power the node off
+    let ui = has_screen.then(|| RepeaterUi::new(parts.button.is_low(), Instant::now().as_millis(), &oled::SCREEN));
     repeater_app::run(spawner, chip, parts, &SPEC, Extras { ui, build_date: env!("BUILD_DATE"), buzzer: true }).await
 }

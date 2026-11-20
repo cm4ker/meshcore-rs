@@ -173,9 +173,11 @@ pub fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, ble_window: Option<(u32
     View { page: ui.page(), page_idx, pages, bar: Bar { ble, batt_mv: (batt_mv > 0).then_some(batt_mv) }, body, alert, pin: None }
 }
 
-/// The Pro Micro around the repeater: the screen, turned with the button, and no GPS.
+/// The Pro Micro around the repeater: the screen, turned with the button, and no GPS. Without a
+/// panel the interface is not run at all: an unseen page turn would still send adverts and, on the
+/// home page, power the node off.
 pub struct Extras {
-    pub ui: RepeaterUi,
+    pub ui: Option<RepeaterUi>,
     /// The binary's `BUILD_DATE`, for the version on the pages.
     pub build_date: &'static str,
     /// A speaker is wired on the tone pin: `set buzzer` is offered.
@@ -194,10 +196,15 @@ impl crate::repeater_app::Extras for Extras {
     }
 
     fn poll(&mut self, mesh: &mut Mesh<Repeater>, down: bool, window: Option<(u32, String, u64)>, now: u64) -> bool {
-        matches!(self.ui.poll(mesh, down, window, now, self.build_date), Some(Action::ToggleUpdate))
+        let Some(ui) = self.ui.as_mut() else {
+            return false;
+        };
+        matches!(ui.poll(mesh, down, window, now, self.build_date), Some(Action::ToggleUpdate))
     }
 
     fn wake(&mut self, now: u64) {
-        self.ui.wake(now);
+        if let Some(ui) = self.ui.as_mut() {
+            ui.wake(now);
+        }
     }
 }
