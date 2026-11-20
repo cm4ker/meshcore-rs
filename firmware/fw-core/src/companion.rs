@@ -248,6 +248,12 @@ pub trait Platform {
     fn fw_status(&mut self) -> Option<String> {
         None
     }
+    /// Silence text log lines on USB once companion frames take the port over. Platforms with an
+    /// in-RAM log ring (`Board::boot_log`) override this to keep recording into the ring while
+    /// stopping USB text output.
+    fn quiet_usb_log(&mut self) {
+        log::set_max_level(log::LevelFilter::Off);
+    }
 }
 
 /// Defaults of this board build and the build stamp.
@@ -552,7 +558,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     // from here on the USB port carries companion frames only; a diagnostic build (MCFW_USB_LOG
     // set when it is built) goes on logging among them
     if option_env!("MCFW_USB_LOG").is_none() {
-        log::set_max_level(log::LevelFilter::Off);
+        platform.quiet_usb_log();
     }
 
     let mut noise = NoiseFloor::new();
@@ -623,24 +629,18 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             Either3::Second((link, frame)) => {
                 reply_to = link;
                 mesh.ctx.now = now_ms();
-                // what this boot has logged so far, for the `log` command that may be asking
-                mesh.app.board.boot_log = board.boot_log();
-                // the commit rebuilds the whole image and its way back in RAM, the largest
-                // allocation the firmware makes: the contacts make room for it and come back if
-                // the update does not go on (a T096 with 100 KB of them ran out of memory here)
-                let commit = frame.first() == Some(&meshcore::ota::REQ_TYPE_OTA_COMMIT);
-                if commit {
-                    mesh.app.contacts_forget();
+                // fetch the in-RAM boot/runtime log only when a CLI command may be asking for `log`
+                let cli = frame.first() == Some(&meshcore::companion::CMD_RUN_CLI_COMMAND);
+                if cli {
+                    mesh.app.board.boot_log = board.boot_log();
                 }
                 // USB is at hand and BLE paired with a passkey; anyone on the LAN reaches TCP
                 match link {
                     Link::Tcp => mesh.app.handle_open_frame(&mut mesh.ctx, &frame),
                     _ => mesh.app.handle_frame(&mut mesh.ctx, &frame),
                 }
-                if commit && !mesh.app.effects.reboot {
-                    if let Some(contacts) = store.as_ref().and_then(|s| s.borrow_mut().comp_log_latest()) {
-                        mesh.app.contacts_load(&contacts);
-                    }
+                if cli {
+                    mesh.app.board.boot_log = String::new();
                 }
             }
             Either3::Third(()) => {}

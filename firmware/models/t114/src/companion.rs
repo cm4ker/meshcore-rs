@@ -74,6 +74,10 @@ impl Board for T114 {
         self.base.sensor_scan()
     }
 
+    fn boot_log(&self) -> String {
+        self.base.boot_log()
+    }
+
     fn button_down(&mut self) -> bool {
         self.base.button_down()
     }

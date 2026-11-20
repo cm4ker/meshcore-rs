@@ -17,6 +17,9 @@ pub struct Planner {
     record: Vec<u8>,
     /// Literal bytes on their way into the record as one operation.
     literal: Vec<u8>,
+    /// Adjacent `mix` calls on contiguous old bytes merged into one COPY operation.
+    copy_from: u32,
+    copy_diff: Vec<u8>,
     starts: Vec<u32>,
 }
 
@@ -29,7 +32,16 @@ impl Planner {
             return None;
         }
         let h = Header { old_len, new_len, shift, pages, len: PAGE, new_sha256: [0; 32] };
-        Some(Self { h, page: 0, filled: 0, record: Vec::new(), literal: Vec::new(), starts: Vec::new() })
+        Some(Self {
+            h,
+            page: 0,
+            filled: 0,
+            record: Vec::new(),
+            literal: Vec::new(),
+            copy_from: 0,
+            copy_diff: Vec::new(),
+            starts: Vec::new(),
+        })
     }
 
     /// The plan's length so far, its first page included.
@@ -49,12 +61,18 @@ impl Planner {
             // before what the page may refer to, and past the old image: the bytes themselves
             let a = (self.h.lowest(self.page).saturating_sub(from) as usize).min(n);
             let b = (self.h.old_len.saturating_sub(from) as usize).clamp(a, n);
-            self.literal.extend_from_slice(&new[done..done + a]);
+            if a > 0 {
+                self.flush_copy();
+                self.literal.extend_from_slice(&new[done..done + a]);
+            }
             if b > a {
                 self.flush_literal();
-                self.copy(from + a as u32, &diff[done + a..done + b]);
+                self.push_copy(from + a as u32, &diff[done + a..done + b]);
             }
-            self.literal.extend_from_slice(&new[done + b..done + n]);
+            if b < n {
+                self.flush_copy();
+                self.literal.extend_from_slice(&new[done + b..done + n]);
+            }
             if !self.advance(n as u32, out) {
                 return false;
             }
@@ -70,6 +88,7 @@ impl Planner {
             let Some(n) = self.room(new.len() - done) else {
                 return false;
             };
+            self.flush_copy();
             self.literal.extend_from_slice(&new[done..done + n]);
             if !self.advance(n as u32, out) {
                 return false;
@@ -103,6 +122,7 @@ impl Planner {
             return true;
         }
         self.flush_literal();
+        self.flush_copy();
         self.starts.push(self.h.len);
         let ok = out(&self.record);
         self.h.len += self.record.len() as u32;
@@ -120,9 +140,30 @@ impl Planner {
         }
     }
 
-    /// Old bytes from `from`, plus `diff`: runs of zeros, and runs of the rest (a lone zero stays
-    /// in the run it is in: a new run would cost more).
-    fn copy(&mut self, from: u32, diff: &[u8]) {
+    /// Buffer a copy operation so adjacent `mix` chunks (e.g. a 256-byte patcher buffer across a
+    /// long bsdiff mix) coalesce into one COPY per page instead of 16.
+    fn push_copy(&mut self, from: u32, diff: &[u8]) {
+        if !self.copy_diff.is_empty() && self.copy_from.checked_add(self.copy_diff.len() as u32) == Some(from) {
+            self.copy_diff.extend_from_slice(diff);
+            return;
+        }
+        self.flush_copy();
+        self.copy_from = from;
+        self.copy_diff.extend_from_slice(diff);
+    }
+
+    fn flush_copy(&mut self) {
+        if self.copy_diff.is_empty() {
+            return;
+        }
+        self.emit_copy(self.copy_from);
+        self.copy_diff.clear();
+    }
+
+    /// Old bytes from `from`, plus `self.copy_diff`: runs of zeros, and runs of the rest (a lone
+    /// zero stays in the run it is in: a new run would cost more).
+    fn emit_copy(&mut self, from: u32) {
+        let diff = &self.copy_diff;
         self.record.push(COPY);
         self.record.extend_from_slice(&from.to_le_bytes());
         self.record.extend_from_slice(&(diff.len() as u16).to_le_bytes());
@@ -150,6 +191,16 @@ fn put_varint(out: &mut Vec<u8>, mut v: u32) {
     out.push(v as u8);
 }
 
+/// One run of old bytes the new image took, compactly (16 bytes) for `reverse`.
+#[derive(Clone, Copy)]
+struct Run {
+    old: u32,
+    new: u32,
+    diff_start: u32,
+    len: u16,
+    diff_len: u16,
+}
+
 /// The plan back: from the image `forward` makes to `old`, the one it is made from, for a
 /// rollback. Every new byte `forward` takes from an old one (plus a difference) gives that old
 /// byte back (minus the difference); old bytes the new image has nothing of go in as themselves.
@@ -160,10 +211,22 @@ pub fn reverse(forward: &[u8], old: &[u8], old_sha256: [u8; 32], out: &mut impl 
     if old.len() != h.old_len as usize {
         return None;
     }
-    // the runs of old bytes the new image took: (old offset, new offset, length, the difference's
-    // code in `forward`)
-    const RUNS_CHUNK: usize = 64;
-    let mut runs: Vec<(u32, u32, u16, usize, usize)> = Vec::with_capacity(RUNS_CHUNK);
+    // count runs first so one exact reservation holds them all: no doubling or peak copy on the heap
+    let mut count = 0usize;
+    for p in 0..h.pages {
+        let (from, to) = h.record(forward, p)?;
+        let record = &forward[from as usize..to as usize];
+        let mut at = 0usize;
+        while at < record.len() {
+            let (op, next) = next_op(record, at)?;
+            if matches!(op, Op::Copy { .. }) {
+                count += 1;
+            }
+            at = next;
+        }
+    }
+    let mut runs: Vec<Run> = Vec::new();
+    runs.try_reserve_exact(count).ok()?;
     for p in 0..h.pages {
         let (from, to) = h.record(forward, p)?;
         let record = &forward[from as usize..to as usize];
@@ -173,12 +236,13 @@ pub fn reverse(forward: &[u8], old: &[u8], old_sha256: [u8; 32], out: &mut impl 
             match op {
                 Op::Copy { from: o, len, diff } => {
                     let start = diff.as_ptr() as usize - forward.as_ptr() as usize;
-                    // a long plan's runs are the commit's largest allocation: refuse the way back
-                    // (and so the update) rather than abort on a full heap
-                    if runs.len() == runs.capacity() && runs.try_reserve(RUNS_CHUNK).is_err() {
-                        return None;
-                    }
-                    runs.push((o, pos, len as u16, start, start + diff.len()));
+                    runs.push(Run {
+                        old: o,
+                        new: pos,
+                        diff_start: u32::try_from(start).ok()?,
+                        len: u16::try_from(len).ok()?,
+                        diff_len: u16::try_from(diff.len()).ok()?,
+                    });
                     pos += len as u32;
                 }
                 Op::Literal(bytes) => pos += bytes.len() as u32,
@@ -186,28 +250,32 @@ pub fn reverse(forward: &[u8], old: &[u8], old_sha256: [u8; 32], out: &mut impl 
             at = next;
         }
     }
-    runs.sort_unstable_by_key(|r| r.0);
+    runs.sort_unstable_by_key(|r| r.old);
     let mut back = Planner::new(h.new_len, h.old_len, h.shift)?;
-    let mut diff = vec![0u8; PAGE as usize];
+    let mut diff = Vec::new();
+    diff.try_reserve_exact(PAGE as usize).ok()?;
+    diff.resize(PAGE as usize, 0);
     let (mut u, mut i) = (0u32, 0usize);
     while u < h.old_len {
-        while runs.get(i).is_some_and(|r| r.0 + r.2 as u32 <= u) {
+        while runs.get(i).is_some_and(|r| r.old + r.len as u32 <= u) {
             i += 1;
         }
         match runs.get(i) {
-            Some(&(o, x, n, start, end)) if o <= u => {
-                let (k, n) = ((u - o) as usize, n as usize);
+            Some(&r) if r.old <= u => {
+                let (k, n) = ((u - r.old) as usize, r.len as usize);
+                let start = r.diff_start as usize;
+                let end = start + r.diff_len as usize;
                 crate::decode_diff(&forward[start..end], &mut diff[..n])?;
                 for d in &mut diff[k..n] {
                     *d = d.wrapping_neg();
                 }
-                if !back.mix(x + k as u32, &diff[k..n], &old[u as usize..u as usize + n - k], out) {
+                if !back.mix(r.new + k as u32, &diff[k..n], &old[u as usize..u as usize + n - k], out) {
                     return None;
                 }
                 u += (n - k) as u32;
             }
             next => {
-                let end = next.map_or(h.old_len, |r| r.0);
+                let end = next.map_or(h.old_len, |r| r.old);
                 if !back.literal(&old[u as usize..end as usize], out) {
                     return None;
                 }
@@ -215,5 +283,7 @@ pub fn reverse(forward: &[u8], old: &[u8], old_sha256: [u8; 32], out: &mut impl 
             }
         }
     }
+    drop(runs);
+    drop(diff);
     back.finish(old_sha256)
 }

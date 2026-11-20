@@ -81,6 +81,7 @@ impl Header {
         };
         let ok = h.shift.is_multiple_of(PAGE)
             && h.shift >= PAGE
+            && h.len >= PAGE
             && h.pages == h.new_len.div_ceil(PAGE)
             && (1..=MAX_PAGES).contains(&h.pages)
             && page.len() >= FIXED + 4 * h.pages as usize;

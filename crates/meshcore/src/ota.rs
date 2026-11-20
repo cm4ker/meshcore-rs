@@ -269,12 +269,13 @@ impl OtaSession {
         if let Some(shift) = target.in_place_shift() {
             let room = target.running_capacity();
             let planner = meshcore_inplace::Planner::new(base_len, raw_size, shift).ok_or(OtaError::TooLarge)?;
-            if raw_size > room || base_len + shift > room {
+            // both images must fit with room to shift up: `base_len` on install, `raw_size` on rollback
+            if raw_size.saturating_add(shift) > room || base_len.saturating_add(shift) > room {
                 return Err(OtaError::TooLarge);
             }
             let mut s = Self::new(size, Some(sha256), chunk_size, 0, Some(raw_size))?;
             let patcher = Patcher::planning(raw_size, base_len, planner);
-            s.stream = Some(Box::new(Stream { inflater: Inflater::new(), patcher, next: 0 }));
+            s.stream = Some(Box::new(Stream { inflater: Some(Inflater::new()), patcher, next: 0 }));
             s.base_len = Some(base_len);
             return Ok(s);
         }
@@ -284,7 +285,7 @@ impl OtaSession {
             Err(OtaError::TooLarge) if raw_size <= target.capacity() => {
                 let mut s = Self::new(size, Some(sha256), chunk_size, 0, Some(raw_size))?;
                 let patcher = Patcher::new(raw_size, base_len);
-                s.stream = Some(Box::new(Stream { inflater: Inflater::new(), patcher, next: 0 }));
+                s.stream = Some(Box::new(Stream { inflater: Some(Inflater::new()), patcher, next: 0 }));
                 s
             }
             r => r?,
@@ -358,14 +359,27 @@ impl OtaSession {
             if index != s.next {
                 return Ok(());
             }
-            let mut fed = s.inflater.feed(target, data, !last, &mut s.patcher);
+            let Some(inflater) = s.inflater.as_mut() else {
+                return Err(OtaError::BadImage);
+            };
+            let mut fed = inflater.feed(target, data, !last, &mut s.patcher);
             if fed.is_ok() && last {
-                fed = if s.inflater.done { s.patcher.finish(target) } else { Err(OtaError::BadImage) };
+                fed = if inflater.done { s.patcher.finish(target) } else { Err(OtaError::BadImage) };
             }
             if let Err(e) = fed {
                 // the stream is lost: take nothing more, so the session never completes
                 s.next = u32::MAX;
+                s.inflater = None;
                 return Err(e);
+            }
+            if last {
+                // free the ~43 KiB inflater and scratch buffers now, before `commit` builds the rollback plan
+                s.inflater = None;
+                s.patcher.old = Vec::new();
+                #[cfg(feature = "inplace")]
+                if let Out::Plan(p) = &mut s.patcher.out {
+                    p.sector = Vec::new();
+                }
             }
             s.next += 1;
             set_bit(&mut self.received, index as usize);
@@ -401,6 +415,9 @@ impl OtaSession {
 
     /// SHA-256 of the transferred bytes as stored in the slot (diagnostics).
     pub fn staged_sha256(&self, target: &mut dyn FirmwareTarget) -> Option<[u8; 32]> {
+        if self.stream.is_some() {
+            return None; // streamed directly into the image or plan: raw bytes are not staged
+        }
         let mut h = Sha256::new();
         let mut buf = [0u8; 1024];
         let mut offset = 0;
@@ -1243,7 +1260,8 @@ impl Inflater {
 /// A delta applied as its chunks come, in order: for a slot without the room to keep the patch
 /// beside the image it makes.
 struct Stream {
-    inflater: Inflater,
+    /// Freed once the zlib stream ends, so its ~43 KiB state does not sit on the heap during commit.
+    inflater: Option<Inflater>,
     patcher: Patcher,
     /// The chunk to take next.
     next: u32,

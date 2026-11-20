@@ -260,21 +260,43 @@ fn flash_done() -> bool {
     false
 }
 
-/// The SoftDevice fits flash work between its radio events, and may find no room: tries again.
-const FLASH_TRIES: usize = 4;
+/// The SoftDevice fits flash work between its radio events, and may find no room (or return
+/// `NRF_ERROR_BUSY` while a BLE event runs): wait briefly and try again.
+const FLASH_TRIES: usize = 8;
+
+fn flash_retry_wait() {
+    let since = Instant::now();
+    while since.elapsed() < Duration::from_millis(20) {
+        poll_soc_events();
+    }
+}
 
 /// Erase the page at `addr` while the SoftDevice runs.
 pub fn flash_erase(addr: u32) -> bool {
-    // SAFETY: a page number in the app's flash
-    (0..FLASH_TRIES).any(|_| unsafe { svc::<SD_FLASH_PAGE_ERASE>(addr / 4096, 0, 0, 0) } == NRF_SUCCESS && flash_done())
+    for attempt in 0..FLASH_TRIES {
+        if attempt > 0 {
+            flash_retry_wait();
+        }
+        // SAFETY: a page number in the app's flash
+        if unsafe { svc::<SD_FLASH_PAGE_ERASE>(addr / 4096, 0, 0, 0) } == NRF_SUCCESS && flash_done() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Write `words` at `addr` (word aligned, at most a page) while the SoftDevice runs.
 pub fn flash_write(addr: u32, words: &[u32]) -> bool {
-    // SAFETY: `words` stays in place until the operation's event has come
-    (0..FLASH_TRIES).any(|_| {
-        (unsafe { svc::<SD_FLASH_WRITE>(addr, words.as_ptr() as u32, words.len() as u32, 0) }) == NRF_SUCCESS && flash_done()
-    })
+    for attempt in 0..FLASH_TRIES {
+        if attempt > 0 {
+            flash_retry_wait();
+        }
+        // SAFETY: `words` stays in place until the operation's event has come
+        if (unsafe { svc::<SD_FLASH_WRITE>(addr, words.as_ptr() as u32, words.len() as u32, 0) }) == NRF_SUCCESS && flash_done() {
+            return true;
+        }
+    }
+    false
 }
 
 /// The chip's temperature, while the SoftDevice runs (it has the TEMP peripheral).

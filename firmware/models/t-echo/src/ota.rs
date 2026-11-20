@@ -132,7 +132,8 @@ fn trailer_hash(t: &[u8], app_len: u32) -> Option<[u8; 32]> {
 /// one naming its own offset as the app's length, as `meshcore::ota` finds it.
 fn running_image() -> Option<(u32, [u8; 32])> {
     let flash = app_bytes(APP_START, INSTALLER - APP_START);
-    (0..flash.len() - NRF_TRAILER_LEN as usize)
+    let last = flash.len().checked_sub(NRF_TRAILER_LEN as usize)?;
+    (0..=last)
         .step_by(4)
         .find_map(|at| Some((at as u32 + NRF_TRAILER_LEN, trailer_hash(&flash[at..at + NRF_TRAILER_LEN as usize], at as u32)?)))
 }
@@ -400,12 +401,45 @@ pub fn hand_over() -> ! {
             cortex_m::peripheral::SCB::sys_reset();
         }
     }
-    // the installer's stack pointer and reset vector; the stack pointer last, as it marks an app
-    nvmc_erase(APP_START);
-    nvmc_write(APP_START + 4, word(1));
-    nvmc_write(APP_START, word(0));
-    pac::POWER.gpregret().write(|w| w.set_gpregret(0));
-    cortex_m::peripheral::SCB::sys_reset()
+    // the installer's stack pointer and reset vector; the stack pointer last, as it marks an app.
+    // Runs from RAM because APP_START holds `.text` right after the vector table.
+    // SAFETY: interrupts are off and `APP_START` is page-aligned.
+    unsafe { switch_to_installer(APP_START, word(0), word(1)) }
+}
+
+/// Erase `app_start`, write the installer's reset vector and stack pointer (stack pointer last, as
+/// it marks a valid app), clear `GPREGRET` and trigger a system reset. Placed in `.data` (RAM) so
+/// erasing the app's first page can never erase the instructions currently executing.
+#[unsafe(link_section = ".data.switch_to_installer")]
+#[inline(never)]
+unsafe fn switch_to_installer(app_start: u32, sp: u32, reset: u32) -> ! {
+    const NVMC_READY: *const u32 = 0x4001_E400 as *const u32;
+    const NVMC_CONFIG: *mut u32 = 0x4001_E504 as *mut u32;
+    const NVMC_ERASEPAGE: *mut u32 = 0x4001_E508 as *mut u32;
+    const WDT_RR0: *mut u32 = 0x4001_0600 as *mut u32;
+    const WDT_RELOAD: u32 = 0x6E52_4635;
+    const POWER_GPREGRET: *mut u32 = 0x4000_051C as *mut u32;
+    const SCB_AIRCR: *mut u32 = 0xE000_ED0C as *mut u32;
+    const AIRCR_RESET: u32 = 0x05FA_0004;
+
+    unsafe {
+        core::ptr::write_volatile(WDT_RR0, WDT_RELOAD);
+        core::ptr::write_volatile(NVMC_CONFIG, 2); // EEN
+        core::ptr::write_volatile(NVMC_ERASEPAGE, app_start);
+        while core::ptr::read_volatile(NVMC_READY) & 1 == 0 {}
+        core::ptr::write_volatile(NVMC_CONFIG, 1); // WEN
+        core::ptr::write_volatile((app_start + 4) as *mut u32, reset);
+        while core::ptr::read_volatile(NVMC_READY) & 1 == 0 {}
+        core::ptr::write_volatile(app_start as *mut u32, sp);
+        while core::ptr::read_volatile(NVMC_READY) & 1 == 0 {}
+        core::ptr::write_volatile(NVMC_CONFIG, 0); // REN
+        core::ptr::write_volatile(POWER_GPREGRET, 0);
+        cortex_m::asm::dsb();
+        core::ptr::write_volatile(SCB_AIRCR, AIRCR_RESET);
+        loop {
+            cortex_m::asm::nop();
+        }
+    }
 }
 
 fn nvmc_erase(addr: u32) {

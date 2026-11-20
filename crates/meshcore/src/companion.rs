@@ -801,17 +801,6 @@ impl Companion {
         self.contacts.resize(MAX_ANON_CONTACTS, ContactInfo::new(Identity::new([0; PUB_KEY_SIZE])));
     }
 
-    /// Let the contacts and the advert paths go, to make room for the largest allocation the
-    /// firmware makes: the commit of an update, which rebuilds the whole image and its way back.
-    /// The store keeps them (lent out with the companion region, [`Store::comp_log_latest`] finds
-    /// them there too), so [`Self::contacts_load`] brings them back if the update does not go on.
-    pub fn contacts_forget(&mut self) {
-        self.reset_contacts();
-        self.contacts.shrink_to_fit();
-        self.advert_paths.clear();
-        self.advert_paths.shrink_to_fit();
-    }
-
     /// Real contacts (the transient slots excluded).
     pub fn contacts(&self) -> &[ContactInfo] {
         &self.contacts[MAX_ANON_CONTACTS..]

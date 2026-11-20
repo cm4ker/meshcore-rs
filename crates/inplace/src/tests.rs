@@ -382,3 +382,44 @@ fn goes_forward_and_back_with_the_power_going() {
         assert!(g.bytes(APP, old.len() as u32) == old, "back, cut {cut:?}");
     }
 }
+
+#[test]
+fn adjacent_mix_chunks_coalesce_into_one_copy_per_page() {
+    let old = image(24 * 1024, 41);
+    let mut new = old.clone();
+    // flip a few bytes on page 2 so the diff is non-trivial
+    for i in [0, 300, 1024, 3900] {
+        new[2 * PAGE as usize + i] ^= 0x3C;
+    }
+    let mut planner = Planner::new(old.len() as u32, new.len() as u32, 8 * 1024).unwrap();
+    let mut records = Vec::new();
+    let mut out = |r: &[u8]| {
+        records.extend_from_slice(r);
+        true
+    };
+    // feed the whole image in 256-byte chunks, as `meshcore::ota::Patcher` does
+    for off in (0..new.len()).step_by(256) {
+        let end = (off + 256).min(new.len());
+        let diff: Vec<u8> = (off..end).map(|i| new[i].wrapping_sub(old[i])).collect();
+        assert!(planner.mix(off as u32, &diff, &new[off..end], &mut out));
+    }
+    let first = planner.finish([5; 32]).unwrap();
+    let plan = [first, records].concat();
+    let h = Header::parse(&plan[..PAGE as usize]).unwrap();
+    // every page past page 0 (which is literal) must collapse to a single COPY operation
+    for p in 1..h.pages {
+        let (from, to) = h.record(&plan, p).unwrap();
+        let rec = &plan[from as usize..to as usize];
+        let (op, next) = next_op(rec, 0).unwrap();
+        assert!(matches!(op, Op::Copy { len, .. } if len == PAGE as usize), "page {p} was not coalesced");
+        assert_eq!(next, rec.len(), "page {p} had extra operations");
+    }
+    // forward and reverse must still reproduce both images byte-for-byte
+    let back = reverse_of(&plan, &old);
+    let mut f = handed_over(&old, plan.len() as u32, 9);
+    assert_eq!(install(&mut f, &LAYOUT, &plan), Outcome::Installed);
+    assert_eq!(f.bytes(APP, new.len() as u32), new);
+    let mut g = handed_over(&new, back.len() as u32, 10);
+    assert_eq!(install(&mut g, &LAYOUT, &back), Outcome::Installed);
+    assert_eq!(g.bytes(APP, old.len() as u32), old);
+}

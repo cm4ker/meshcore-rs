@@ -107,8 +107,9 @@ fn sha256_at(addr: u32, len: u32) -> [u8; 32] {
 /// the running image's.
 fn image_in(base: u32, len: u32) -> Option<(u32, [u8; 32])> {
     let flash = flash_bytes(base, len);
+    let last = flash.len().checked_sub(NRF_TRAILER_LEN as usize)?;
     let u32_at = |t: &[u8], i: usize| u32::from_le_bytes(t[i..i + 4].try_into().unwrap());
-    (0..flash.len() - NRF_TRAILER_LEN as usize).step_by(4).find_map(|at| {
+    (0..=last).step_by(4).find_map(|at| {
         let t = &flash[at..at + NRF_TRAILER_LEN as usize];
         (&t[..8] == NRF_TRAILER_MAGIC
             && u32_at(t, 8) == at as u32
@@ -184,7 +185,9 @@ fn own_label() -> String {
 /// The plan at `at` in the staging area.
 fn plan_at(at: u32) -> Option<(Header, &'static [u8])> {
     let h = Header::parse(flash_bytes(STAGING + at, PAGE))?;
-    (at + h.len <= STAGING_END - STAGING).then(|| (h, flash_bytes(STAGING + at, h.len)))
+    at.checked_add(h.len)
+        .is_some_and(|end| end <= STAGING_END - STAGING)
+        .then(|| (h, flash_bytes(STAGING + at, h.len)))
 }
 
 /// Where the plan back starts: the page after the plan.
@@ -332,10 +335,16 @@ impl<const LENDS: bool> InPlaceTarget<LENDS> {
                     let to = STAGING + at + PAGE + *written;
                     sector.resize(sector.len().next_multiple_of(4), 0xFF);
                     feed_watchdog();
-                    if to + PAGE > STAGING + room
-                        || NorFlash::erase(store.flash(), to, to + PAGE).is_err()
-                        || NorFlash::write(store.flash(), to, sector).is_err()
-                    {
+                    if to + PAGE > STAGING + room {
+                        log::warn!("OTA: back plan overflow (at={at}, written={}, room={room})", *written);
+                        return false;
+                    }
+                    if NorFlash::erase(store.flash(), to, to + PAGE).is_err() {
+                        log::warn!("OTA: back plan erase failed at {to:#x}");
+                        return false;
+                    }
+                    if NorFlash::write(store.flash(), to, sector).is_err() {
+                        log::warn!("OTA: back plan write failed at {to:#x}");
                         return false;
                     }
                     *written += PAGE;
@@ -348,27 +357,45 @@ impl<const LENDS: bool> InPlaceTarget<LENDS> {
             ok = ok && put(r, &mut sector, &mut written, false);
             ok
         });
-        let Some(first) = first.filter(|_| ok && put(&[], &mut sector, &mut written, true)) else {
+        let Some(first) = first else {
+            if ok {
+                log::warn!("OTA: reverse plan failed (out of heap?)");
+            }
             return false;
         };
+        if !ok || !put(&[], &mut sector, &mut written, true) {
+            return false;
+        }
         let start = STAGING + at;
-        if start + PAGE > STAGING + room
-            || NorFlash::erase(store.flash(), start, start + PAGE).is_err()
-            || NorFlash::write(store.flash(), start, &first).is_err()
-        {
+        if start + PAGE > STAGING + room {
+            log::warn!("OTA: back plan header overflow (at={at}, room={room})");
+            return false;
+        }
+        if NorFlash::erase(store.flash(), start, start + PAGE).is_err() {
+            log::warn!("OTA: back plan header erase failed at {start:#x}");
+            return false;
+        }
+        if NorFlash::write(store.flash(), start, &first).is_err() {
+            log::warn!("OTA: back plan header write failed at {start:#x}");
             return false;
         }
         drop(store);
         // made from the new image as the plan makes it, the plan back must give this firmware
         let Some((back, back_plan)) = plan_at(at) else {
+            log::warn!("OTA: back plan header unreadable at {start:#x}");
             return false;
         };
         let Some(mut new_image) = Rebuilt::new(forward, running) else {
+            log::warn!("OTA: forward plan unreadable during back check");
             return false;
         };
         let mut hash = Sha256::new();
         let made = make_all(&back, back_plan, &mut |at, out| new_image.read(at, out), |_, page| hash.update(page));
-        made.is_some() && hash.finalize()[..] == old_sha
+        let verified = made.is_some() && hash.finalize()[..] == old_sha;
+        if !verified {
+            log::warn!("OTA: back plan verification failed");
+        }
+        verified
     }
 }
 
@@ -500,12 +527,45 @@ fn hand_over() -> ! {
             cortex_m::peripheral::SCB::sys_reset();
         }
     }
-    // the installer's stack pointer and reset vector; the stack pointer last, as it marks an app
-    nvmc_erase(APP_START);
-    nvmc_write(APP_START + 4, word(1));
-    nvmc_write(APP_START, word(0));
-    pac::POWER.gpregret().write(|w| w.set_gpregret(0));
-    cortex_m::peripheral::SCB::sys_reset()
+    // the installer's stack pointer and reset vector; the stack pointer last, as it marks an app.
+    // Runs from RAM because APP_START holds `.text` right after the vector table.
+    // SAFETY: interrupts are off, SoftDevice is disabled, and `APP_START` is page-aligned.
+    unsafe { switch_to_installer(APP_START, word(0), word(1)) }
+}
+
+/// Erase `app_start`, write the installer's reset vector and stack pointer (stack pointer last, as
+/// it marks a valid app), clear `GPREGRET` and trigger a system reset. Placed in `.data` (RAM) so
+/// erasing the app's first page can never erase the instructions currently executing.
+#[unsafe(link_section = ".data.switch_to_installer")]
+#[inline(never)]
+unsafe fn switch_to_installer(app_start: u32, sp: u32, reset: u32) -> ! {
+    const NVMC_READY: *const u32 = 0x4001_E400 as *const u32;
+    const NVMC_CONFIG: *mut u32 = 0x4001_E504 as *mut u32;
+    const NVMC_ERASEPAGE: *mut u32 = 0x4001_E508 as *mut u32;
+    const WDT_RR0: *mut u32 = 0x4001_0600 as *mut u32;
+    const WDT_RELOAD: u32 = 0x6E52_4635;
+    const POWER_GPREGRET: *mut u32 = 0x4000_051C as *mut u32;
+    const SCB_AIRCR: *mut u32 = 0xE000_ED0C as *mut u32;
+    const AIRCR_RESET: u32 = 0x05FA_0004;
+
+    unsafe {
+        core::ptr::write_volatile(WDT_RR0, WDT_RELOAD);
+        core::ptr::write_volatile(NVMC_CONFIG, 2); // EEN
+        core::ptr::write_volatile(NVMC_ERASEPAGE, app_start);
+        while core::ptr::read_volatile(NVMC_READY) & 1 == 0 {}
+        core::ptr::write_volatile(NVMC_CONFIG, 1); // WEN
+        core::ptr::write_volatile((app_start + 4) as *mut u32, reset);
+        while core::ptr::read_volatile(NVMC_READY) & 1 == 0 {}
+        core::ptr::write_volatile(app_start as *mut u32, sp);
+        while core::ptr::read_volatile(NVMC_READY) & 1 == 0 {}
+        core::ptr::write_volatile(NVMC_CONFIG, 0); // REN
+        core::ptr::write_volatile(POWER_GPREGRET, 0);
+        cortex_m::asm::dsb();
+        core::ptr::write_volatile(SCB_AIRCR, AIRCR_RESET);
+        loop {
+            cortex_m::asm::nop();
+        }
+    }
 }
 
 fn nvmc_erase(addr: u32) {

@@ -126,6 +126,10 @@ impl Platform for Nrf {
     fn usb_has_room(&self) -> bool {
         !USB_HOST.load(Ordering::Relaxed) || USB_OUT.free_capacity() > 0
     }
+
+    fn quiet_usb_log(&mut self) {
+        crate::usb_frames::silence_usb_log();
+    }
 }
 
 /// The board around the radio (`board`): the LED lit while transmitting, the receive side of the

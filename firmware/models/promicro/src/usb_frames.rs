@@ -27,8 +27,15 @@ pub type UsbDriver = Driver<'static, &'static SoftwareVbusDetect>;
 pub static USB_OUT: Channel<CriticalSectionRawMutex, Vec<u8>, 16> = Channel::new();
 /// A host has the port open (DTR): frames for it wait for room instead of being dropped.
 pub static USB_HOST: AtomicBool = AtomicBool::new(false);
-/// Log lines for the USB host.
+/// Log lines for the USB host (only while [`USB_LOG_ON`] is true, during boot or diagnostic builds).
 static USB_TEXT: Channel<CriticalSectionRawMutex, Vec<u8>, 32> = Channel::new();
+static USB_LOG_ON: AtomicBool = AtomicBool::new(true);
+
+/// Stop forwarding log lines to the USB port (companion frames own it now), while keeping
+/// [`BOOT_LOG`] recording so `log` still sees warnings and errors from runtime (e.g. OTA commit).
+pub fn silence_usb_log() {
+    USB_LOG_ON.store(false, Ordering::Relaxed);
+}
 
 const PACKET: usize = 64;
 
@@ -121,7 +128,9 @@ impl log::Log for UsbLogger {
                 b.drain(..over);
             }
         });
-        let _ = USB_TEXT.try_send(line.into_bytes());
+        if USB_LOG_ON.load(Ordering::Relaxed) {
+            let _ = USB_TEXT.try_send(line.into_bytes());
+        }
     }
 
     fn flush(&self) {}
