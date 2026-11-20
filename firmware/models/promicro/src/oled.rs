@@ -35,6 +35,8 @@ const PAGES: usize = HEIGHT / 8;
 pub static SCREEN: Signal<CriticalSectionRawMutex, Option<View>> = Signal::new();
 
 /// A 1-bit frame: rows of 16 bytes, bit 7 leftmost, 1 = ink.
+/// A 1-bit frame in the panel's own layout: one byte per column, 8 vertical pixels, bit 0 the
+/// top one (the SSD1306's GDDRAM), so a frame goes to the panel as it is.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Frame([u8; WIDTH * PAGES]);
 
@@ -57,8 +59,9 @@ impl DrawTarget for Frame {
     fn draw_iter<I: IntoIterator<Item = Pixel<BinaryColor>>>(&mut self, pixels: I) -> Result<(), Self::Error> {
         for Pixel(p, c) in pixels {
             if (0..WIDTH as i32).contains(&p.x) && (0..HEIGHT as i32).contains(&p.y) {
-                let i = p.y as usize * WIDTH / 8 + p.x as usize / 8;
-                let bit = 0x80 >> (p.x % 8);
+                // the byte of the column `p.x` in the page of `p.y`; its bit 0 is the page's top
+                let i = (p.y as usize / 8) * WIDTH + p.x as usize;
+                let bit = 1u8 << (p.y % 8);
                 if c.is_on() {
                     self.0[i] |= bit;
                 } else {
@@ -114,6 +117,10 @@ impl Oled {
 
     /// One frame: each of the eight pages set and written. A failed transfer ends the frame (the
     /// next one sets the pages again); it is not retried, as in the C++ firmware.
+    ///
+    /// The panel is in horizontal addressing mode (`0x20 0x00`, as Adafruit's driver leaves it), so
+    /// a page is selected by its address range (`0x22`) and the columns by theirs (`0x21`): the
+    /// older `0xB0` page command belongs to page addressing mode and is ignored here.
     pub async fn show(&mut self, frame: &Frame) {
         if !self.on && !self.init().await {
             return;
@@ -121,8 +128,8 @@ impl Oled {
         let mut row = [0u8; WIDTH + 1];
         row[0] = 0x40; // data follow
         for page in 0..PAGES {
-            // page start, column 0: the low and high halves of the column address
-            if !self.bus_write(&[0x00, 0xB0 | page as u8, 0x00, 0x10]).await {
+            // page range: this page alone; column range: all 128
+            if !self.bus_write(&[0x00, 0x22, page as u8, page as u8, 0x21, 0x00, (WIDTH - 1) as u8]).await {
                 return;
             }
             row[1..].copy_from_slice(&frame.0[page * WIDTH..(page + 1) * WIDTH]);
