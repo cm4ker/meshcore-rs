@@ -241,9 +241,11 @@ impl Board for ProMicro {
     }
 
     fn notify(&mut self, kind: meshcore_fw_core::companion::Notify) {
+        use meshcore_fw_core::companion::Notify;
         let sound = match kind {
-            meshcore_fw_core::companion::Notify::Message => buzzer::Sound::Message,
-            meshcore_fw_core::companion::Notify::Done => buzzer::Sound::Ack,
+            Notify::Boot => buzzer::Sound::Startup,
+            Notify::Message => buzzer::Sound::Message,
+            Notify::Done => buzzer::Sound::Ack,
         };
         buzzer::SOUND.signal(sound);
     }

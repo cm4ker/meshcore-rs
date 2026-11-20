@@ -154,6 +154,8 @@ pub trait Board {
 /// What a board's speaker marks, if it has one ([`Board::has_buzzer`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Notify {
+    /// The firmware started (only when the node is not muted).
+    Boot,
     /// A new message came in.
     Message,
     /// Something the user asked for was done (an advert sent, the update window opened).
@@ -512,6 +514,10 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     mesh.begin(now_ms());
     mesh.app.start(&mut mesh.ctx);
     info!("{} contacts", mesh.app.num_contacts());
+    // the speaker sounds only if the node asked for it: a board may have none soldered
+    if board.has_buzzer() && !mesh.app.prefs.buzzer_quiet {
+        board.notify(Notify::Boot);
+    }
     if board.has_gps() {
         board.set_gps(mesh.app.prefs.gps_enabled);
     }

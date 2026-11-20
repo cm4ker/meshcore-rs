@@ -91,7 +91,6 @@ async fn main(spawner: Spawner) {
     let has_screen = screen.is_some();
     spawner.spawn(promicro::oled::task(screen).unwrap());
     spawner.spawn(promicro::buzzer::task(promicro::buzzer::new(p.PWM0, p.P1_06)).unwrap());
-    promicro::buzzer::SOUND.signal(promicro::buzzer::Sound::Startup);
     let chip = Chip { usbd: p.USBD, irqs: Irqs, wdt: p.WDT, nvmc: p.NVMC, rng: p.RNG, temp: Temp::new(p.TEMP, Irqs) };
     companion_app::run(spawner, chip, parts, &SPEC, |b| ProMicro {
         led: b.led,

@@ -187,6 +187,12 @@ impl crate::repeater_app::Extras for Extras {
         self.buzzer
     }
 
+    fn boot_sound(&mut self, on: bool) {
+        if on && self.buzzer {
+            crate::buzzer::SOUND.signal(crate::buzzer::Sound::Startup);
+        }
+    }
+
     fn poll(&mut self, mesh: &mut Mesh<Repeater>, down: bool, window: Option<(u32, String, u64)>, now: u64) -> bool {
         matches!(self.ui.poll(mesh, down, window, now, self.build_date), Some(Action::ToggleUpdate))
     }

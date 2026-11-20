@@ -135,7 +135,8 @@ pub struct NodePrefs {
     /// (`crate::timesync::TimeSync::take_remembered`).
     pub time_gateway: String,
     /// The speaker is silent (`set buzzer off`): the board still has it, and marks nothing with
-    /// it. Off by default, so a board with a speaker sounds.
+    /// it. On by default: a board may have no speaker soldered, and nobody is woken by a chirp
+    /// they did not ask for.
     pub buzzer_quiet: bool,
 }
 
@@ -207,7 +208,7 @@ impl Default for NodePrefs {
             time_beacons: 4,
             time_keys: Vec::new(),
             time_gateway: String::new(),
-            buzzer_quiet: false,
+            buzzer_quiet: true, // a board may have no speaker soldered: silent until asked
         }
     }
 }

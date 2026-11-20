@@ -90,6 +90,10 @@ pub trait Extras {
         false
     }
 
+    /// The firmware started: a boot chirp if the node is not muted (`on`), and a board with a
+    /// speaker sounds it.
+    fn boot_sound(&mut self, _on: bool) {}
+
     /// The receiver's latest reading.
     fn gps(&self) -> Option<GpsReading> {
         None
@@ -378,6 +382,8 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
     }
     mesh.begin(now_ms());
     mesh.app.start(&mut mesh.ctx);
+    // a boot chirp only if the node asked for sound: a board may have no speaker soldered
+    extras.boot_sound(!mesh.app.prefs.buzzer_quiet);
     let mut room = mesh.app.prefs.room.then(|| {
         let mut seed = rng_seed;
         seed[0] ^= 0x5A; // its own random stream

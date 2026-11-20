@@ -92,7 +92,6 @@ async fn main(spawner: Spawner) {
     let screen = oled::Oled::probe(parts.i2c).await;
     spawner.spawn(oled::task(screen).unwrap());
     spawner.spawn(buzzer::task(buzzer::new(p.PWM0, p.P1_06)).unwrap());
-    buzzer::SOUND.signal(buzzer::Sound::Startup);
     let chip = Chip {
         usb: Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs)),
         wdt: p.WDT,
