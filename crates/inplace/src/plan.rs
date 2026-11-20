@@ -162,7 +162,8 @@ pub fn reverse(forward: &[u8], old: &[u8], old_sha256: [u8; 32], out: &mut impl 
     }
     // the runs of old bytes the new image took: (old offset, new offset, length, the difference's
     // code in `forward`)
-    let mut runs: Vec<(u32, u32, u16, usize, usize)> = Vec::new();
+    const RUNS_CHUNK: usize = 64;
+    let mut runs: Vec<(u32, u32, u16, usize, usize)> = Vec::with_capacity(RUNS_CHUNK);
     for p in 0..h.pages {
         let (from, to) = h.record(forward, p)?;
         let record = &forward[from as usize..to as usize];
@@ -172,6 +173,11 @@ pub fn reverse(forward: &[u8], old: &[u8], old_sha256: [u8; 32], out: &mut impl 
             match op {
                 Op::Copy { from: o, len, diff } => {
                     let start = diff.as_ptr() as usize - forward.as_ptr() as usize;
+                    // a long plan's runs are the commit's largest allocation: refuse the way back
+                    // (and so the update) rather than abort on a full heap
+                    if runs.len() == runs.capacity() && runs.try_reserve(RUNS_CHUNK).is_err() {
+                        return None;
+                    }
                     runs.push((o, pos, len as u16, start, start + diff.len()));
                     pos += len as u32;
                 }

@@ -440,7 +440,15 @@ impl<const LENDS: bool> FirmwareTarget for InPlaceTarget<LENDS> {
         let mut store = self.store.borrow_mut();
         // the update runs on trial; the plan back is the way to this firmware, should it fail
         let record = FwRecord { trial: Some(0), skip: FwRecord::load(&mut store).skip, trial_hash, ..FwRecord::left(own) };
-        record.save(&mut store) && plan_request(&mut store, 0, plan.len, plan.old_len)
+        if !record.save(&mut store) {
+            log::warn!("OTA: no room to record the trial");
+            return false;
+        }
+        if !plan_request(&mut store, 0, plan.len, plan.old_len) {
+            log::warn!("OTA: the install request could not be written");
+            return false;
+        }
+        true
     }
 }
 

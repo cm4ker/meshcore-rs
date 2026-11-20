@@ -240,6 +240,10 @@ impl Board for ProMicro {
         self.buzzer
     }
 
+    fn boot_log(&self) -> String {
+        crate::usb_frames::boot_log()
+    }
+
     fn notify(&mut self, kind: meshcore_fw_core::companion::Notify) {
         use meshcore_fw_core::companion::Notify;
         let sound = match kind {

@@ -93,6 +93,18 @@ pub async fn tx_task(mut tx: Sender<'static, UsbDriver>) {
 
 struct UsbLogger;
 
+/// The tail of the log, for the console's `log`: a boot's lines outlive the boot that made them,
+/// so what the boot after a failed update said can still be read (the USB host is not there yet
+/// when the log is written).
+static BOOT_LOG: embassy_sync::blocking_mutex::CriticalSectionMutex<core::cell::RefCell<Vec<u8>>> =
+    embassy_sync::blocking_mutex::CriticalSectionMutex::new(core::cell::RefCell::new(Vec::new()));
+const BOOT_LOG_MAX: usize = 1600;
+
+/// The log so far this boot, newest last.
+pub fn boot_log() -> String {
+    BOOT_LOG.lock(|b| String::from_utf8_lossy(&b.borrow()).into_owned())
+}
+
 impl log::Log for UsbLogger {
     fn enabled(&self, _: &log::Metadata) -> bool {
         true
@@ -101,6 +113,14 @@ impl log::Log for UsbLogger {
     fn log(&self, record: &log::Record) {
         let mut line = String::new();
         let _ = write!(line, "{} - {}\r\n", record.level(), record.args());
+        BOOT_LOG.lock(|b| {
+            let mut b = b.borrow_mut();
+            b.extend_from_slice(line.as_bytes());
+            let over = b.len().saturating_sub(BOOT_LOG_MAX);
+            if over > 0 {
+                b.drain(..over);
+            }
+        });
         let _ = USB_TEXT.try_send(line.into_bytes());
     }
 

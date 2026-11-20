@@ -115,6 +115,11 @@ pub trait Board {
     fn sensor_scan(&self) -> String {
         String::new()
     }
+    /// The log this boot has written so far (`log`): a boot's own lines outlive it, which is how
+    /// the boot after a failed update says what the installer left behind.
+    fn boot_log(&self) -> String {
+        String::new()
+    }
     fn button_down(&mut self) -> bool {
         false
     }
@@ -618,10 +623,24 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             Either3::Second((link, frame)) => {
                 reply_to = link;
                 mesh.ctx.now = now_ms();
+                // what this boot has logged so far, for the `log` command that may be asking
+                mesh.app.board.boot_log = board.boot_log();
+                // the commit rebuilds the whole image and its way back in RAM, the largest
+                // allocation the firmware makes: the contacts make room for it and come back if
+                // the update does not go on (a T096 with 100 KB of them ran out of memory here)
+                let commit = frame.first() == Some(&meshcore::ota::REQ_TYPE_OTA_COMMIT);
+                if commit {
+                    mesh.app.contacts_forget();
+                }
                 // USB is at hand and BLE paired with a passkey; anyone on the LAN reaches TCP
                 match link {
                     Link::Tcp => mesh.app.handle_open_frame(&mut mesh.ctx, &frame),
                     _ => mesh.app.handle_frame(&mut mesh.ctx, &frame),
+                }
+                if commit && !mesh.app.effects.reboot {
+                    if let Some(contacts) = store.as_ref().and_then(|s| s.borrow_mut().comp_log_latest()) {
+                        mesh.app.contacts_load(&contacts);
+                    }
                 }
             }
             Either3::Third(()) => {}

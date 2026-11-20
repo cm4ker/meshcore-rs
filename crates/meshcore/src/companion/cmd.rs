@@ -1480,6 +1480,12 @@ impl Companion {
             format!("> {}", if self.board.wifi_ip.is_some() { "connected" } else { "disconnected" })
         } else if cmd == "sensor scan" {
             crate::sensor::scan_reply(&self.board.sensor_scan)
+        } else if cmd == "log" {
+            // the newest lines: the whole log does not fit a reply frame
+            let log = &self.board.boot_log;
+            let at = log.len().saturating_sub(220);
+            let at = (at..log.len()).find(|&i| log.is_char_boundary(i)).unwrap_or(log.len());
+            String::from(&log[at..])
         } else if cmd == "get wifi.ip" {
             format!("> {}", self.board.wifi_ip.as_deref().unwrap_or("(not connected)"))
         } else if cmd == "board" {

@@ -99,6 +99,10 @@ impl Board for T096 {
         self.base.sensor_scan()
     }
 
+    fn boot_log(&self) -> String {
+        meshcore_fw_core::companion::Board::boot_log(&self.base)
+    }
+
     fn button_down(&mut self) -> bool {
         self.base.button_down()
     }
