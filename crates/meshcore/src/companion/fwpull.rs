@@ -133,7 +133,7 @@ impl Companion {
 
     /// When [`Self::fw_pull_loop`] is next due.
     pub(super) fn fw_pull_timer(&self) -> Option<u64> {
-        (self.fw_blocked().is_none() && self.fwpull.step != Step::Ready).then_some(self.fwpull.at)
+        (self.fw_blocked().is_none() && self.fwpull.step != Step::Ready && self.fwpull.at < u64::MAX).then_some(self.fwpull.at)
     }
 
     pub(super) fn fw_pull_loop(&mut self, ctx: &mut MeshCtx) {
@@ -251,8 +251,7 @@ impl Companion {
             OtaOutcome::CommitFailed(line) => line,
             OtaOutcome::None => fwshare::refusal(reply.and_then(|r| r.first().copied()).unwrap_or(0)).to_string(),
         };
-        self.fw_pull_reset();
-        self.fwpull.state = FwState::Failed { why: why.clone(), retry: 0 };
+        self.fw_pull_stop(why.clone());
         Err(why)
     }
 
@@ -298,6 +297,13 @@ impl Companion {
     fn fw_pull_fail(&mut self, ctx: &MeshCtx, why: String) {
         let retry = self.fw_next_check(ctx, RETRY_LATER_MS);
         self.fw_sleep(ctx, RETRY_LATER_MS, FwState::Failed { why, retry });
+    }
+
+    /// The update itself failed: stop retrying automatically and wait for a manual `fw check`/`fw update`.
+    fn fw_pull_stop(&mut self, why: String) {
+        self.fw_pull_reset();
+        self.fwpull.state = FwState::Failed { why, retry: 0 };
+        self.fwpull.at = u64::MAX;
     }
 
     /// The update's delta is larger than this node takes over LoRa: until the next check (a later
@@ -424,7 +430,7 @@ impl Companion {
             match loader.feed(&mut self.ota, offset, &buf[..n]) {
                 Ok(Some(next)) => offset = next,
                 Ok(None) => return self.fw_loaded(),
-                Err(why) => return self.fw_pull_fail(ctx, why.into()),
+                Err(why) => return self.fw_pull_stop(why.into()),
             }
         }
         self.fwpull.step = Step::Load { id, offset };
@@ -564,7 +570,7 @@ impl Companion {
             (Step::Query, _) => self.fw_pull_fail(ctx, alloc::format!("{name} has no updates now")),
             (Step::Get { offset }, status::READY) if read_u32(body, 0) == offset && body.len() > 4 => {
                 if let Err(why) = self.fw_piece(ctx, offset, &body[4..]) {
-                    self.fw_pull_fail(ctx, why.into());
+                    self.fw_pull_stop(why.into());
                 }
             }
             (Step::Get { .. }, status::CHANGED) => {

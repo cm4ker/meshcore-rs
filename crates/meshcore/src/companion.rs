@@ -815,7 +815,8 @@ impl Companion {
     }
 
     pub fn contacts_serialize(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        let count = self.contacts().iter().filter(|c| c.adv_type != ADV_TYPE_NONE).count();
+        let mut out = Vec::with_capacity(count * ContactInfo::RECORD_LEN);
         for c in self.contacts().iter().filter(|c| c.adv_type != ADV_TYPE_NONE) {
             c.write_record(&mut out);
         }
@@ -824,6 +825,8 @@ impl Companion {
 
     pub fn contacts_load(&mut self, data: &[u8]) {
         self.reset_contacts();
+        let count = (data.len() / ContactInfo::RECORD_LEN).min(MAX_CONTACTS);
+        self.contacts.reserve_exact(count);
         for rec in data.as_chunks::<{ ContactInfo::RECORD_LEN }>().0.iter().take(MAX_CONTACTS) {
             self.contacts.push(ContactInfo::read_record(rec));
         }

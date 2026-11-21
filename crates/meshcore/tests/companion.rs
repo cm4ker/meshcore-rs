@@ -1543,8 +1543,13 @@ fn a_pulled_update_is_only_what_the_pinned_root_signed() {
     air.run(&mut [&mut r, &mut c], 20_000);
     let _ = c.app.fw_check_now(&c.ctx, false);
     air.run(&mut [&mut r, &mut c], 60_000);
-    assert!(c.app.fw_line(c.ctx.now).starts_with("failed: not signed by the pinned root key; next try "), "{}", c.app.fw_line(c.ctx.now));
+    assert_eq!(c.app.fw_line(c.ctx.now), "failed: not signed by the pinned root key");
     assert!(!slot.borrow().1);
+    // failed updates wait for a manual retry instead of looping automatically
+    let reqs_after_fail = c.app.ota.requests;
+    air.run(&mut [&mut r, &mut c], 2 * 3_600_000);
+    assert_eq!(c.app.ota.requests, reqs_after_fail);
+    assert_eq!(c.app.fw_line(c.ctx.now), "failed: not signed by the pinned root key");
 
     // with no root pinned the node asks nobody: it would install anything
     let mut r = serving_repeater(delta_release(&root, 5, &base, &image));

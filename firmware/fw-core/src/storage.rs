@@ -169,6 +169,34 @@ impl<F: NorFlash> Store<F> {
         true
     }
 
+    /// Stream `len` bytes from `addr` (word aligned) in 256-byte chunks without heap allocation.
+    pub(super) fn stream_flash(&mut self, addr: u32, len: u32, mut f: impl FnMut(&[u8]) -> bool) -> bool {
+        let mut buf = [0u32; 64];
+        let mut off = 0u32;
+        while off < len {
+            let bytes: &mut [u8; 256] = bytemuck_bytes(&mut buf);
+            let n = ((len - off) as usize).min(256);
+            if ReadNorFlash::read(&mut self.flash, addr + off, &mut bytes[..n.next_multiple_of(4)]).is_err() {
+                return false;
+            }
+            if !f(&bytes[..n]) {
+                return false;
+            }
+            off += n as u32;
+        }
+        true
+    }
+
+    /// CRC-32 of `len` bytes at `addr` (word aligned), streamed through a stack buffer.
+    pub(super) fn flash_crc32(&mut self, addr: u32, len: u32) -> Option<u32> {
+        let mut crc = 0xFFFF_FFFFu32;
+        self.stream_flash(addr, len, |chunk| {
+            crc = crc32_update(crc, chunk);
+            true
+        })
+        .then_some(!crc)
+    }
+
     /// Read `len` bytes at `addr` (word aligned).
     fn read_chunked(&mut self, addr: u32, len: usize) -> Option<Vec<u8>> {
         self.try_read_chunked(addr, len).expect("flash read allocation")
@@ -370,10 +398,13 @@ impl<F: NorFlash> Store<F> {
         if self.lent() {
             return self.lent_load(lend::TAG_CONTACTS, 0).map(|d| lend::unpack(&d));
         }
-        self.try_unlent_log_latest().expect("contact snapshot allocation")
+        let (addr, len) = self.unlent_log_latest_span()?;
+        self.read_chunked(addr, len as usize)
     }
 
-    fn try_unlent_log_latest(&mut self) -> Result<Option<Vec<u8>>, TryReserveError> {
+    /// Locate the newest intact snapshot in the unlent ring log as `(data_addr, len)` without
+    /// loading the snapshot into RAM. Also initializes `log_head` if unset.
+    pub(super) fn unlent_log_latest_span(&mut self) -> Option<(u32, u32)> {
         let mut found = self.log_scan();
         // the newest first, those of one number as found; by insertion, for the few records there
         // are: core's sort is 3 KB of code on a board whose core is not built for size
@@ -389,13 +420,11 @@ impl<F: NorFlash> Store<F> {
             self.log_head = Some((addr + (HEADER as u32 + len).next_multiple_of(4), seq.wrapping_add(1)));
         }
         for (_, addr, len, crc) in found {
-            if let Some(data) = self.try_read_chunked(addr + HEADER as u32, len as usize)?
-                && crc32(&data) == crc
-            {
-                return Ok(Some(data));
+            if self.flash_crc32(addr + HEADER as u32, len) == Some(crc) {
+                return Some((addr + HEADER as u32, len));
             }
         }
-        Ok(None)
+        None
     }
 
     /// Append a snapshot to the ring log, wrapping around (and erasing ahead) as needed.
@@ -403,14 +432,22 @@ impl<F: NorFlash> Store<F> {
         if self.lent() {
             return self.lent_append(lend::TAG_CONTACTS, 0, &[&lend::pack(data)], true);
         }
+        self.comp_log_append_stream(data.len() as u32, crc32(data), |s, at| s.write_chunked(at, data))
+    }
+
+    /// Append a `len`-byte snapshot with precomputed `crc` to the unlent ring log, letting
+    /// `write_body` stream its payload to the data address without a full RAM copy.
+    pub(super) fn comp_log_append_stream(
+        &mut self, len: u32, crc: u32, write_body: impl FnOnce(&mut Self, u32) -> bool,
+    ) -> bool {
         let Some((start, end)) = self.log_range() else {
             return false;
         };
         if self.log_head.is_none() {
-            self.comp_log_latest();
+            let _ = self.unlent_log_latest_span();
         }
         let (mut addr, seq) = self.log_head.unwrap_or((start, 1));
-        let total = (HEADER + data.len()).next_multiple_of(4) as u32;
+        let total = (HEADER as u32 + len).next_multiple_of(4);
         if total > (end - start) / 2 {
             return false; // must leave room for the previous snapshot
         }
@@ -431,10 +468,10 @@ impl<F: NorFlash> Store<F> {
         let mut hdr = [0u8; HEADER];
         hdr[..4].copy_from_slice(&LOG_MAGIC.to_le_bytes());
         hdr[4..8].copy_from_slice(&seq.to_le_bytes());
-        hdr[8..12].copy_from_slice(&(data.len() as u32).to_le_bytes());
-        hdr[12..].copy_from_slice(&crc32(data).to_le_bytes());
+        hdr[8..12].copy_from_slice(&len.to_le_bytes());
+        hdr[12..].copy_from_slice(&crc.to_le_bytes());
         self.log_head = Some((addr + total, seq.wrapping_add(1)));
-        self.write_chunked(addr, &hdr) && self.write_chunked(addr + HEADER as u32, data)
+        self.write_chunked(addr, &hdr) && write_body(self, addr + HEADER as u32)
     }
 
     // ------------------------------------------------------------ adverts
@@ -1092,5 +1129,26 @@ mod tests {
         assert_eq!(store.load(Blob::Sensors), None);
         assert!(store.erase_all());
         assert!(store.flash().0[..3 * SECTOR as usize].iter().all(|&b| b == 0x5A));
+    }
+
+    #[test]
+    fn streamed_lend_and_take_back_preserve_zero_run_boundaries() {
+        let mut store = lending(lending_flash());
+        store.mount();
+        // Mix zero runs of 254, 255, 256 and 512 bytes across 256-byte flash chunks and across the
+        // two-piece rescue area boundary.
+        let mut payload = Vec::new();
+        for run in [0usize, 1, 2, 254, 255, 256, 512, 3, 255, 17] {
+            payload.extend(core::iter::repeat_n(0u8, run));
+            payload.extend_from_slice(&[0xA5, 0x5A, (run & 0xFF) as u8, 0x7E]);
+        }
+        payload.extend_from_slice(&contacts(300));
+        payload.extend(core::iter::repeat_n(0u8, 300));
+        assert!(store.comp_log_append(&payload));
+        assert!(store.lend());
+        update_over(&mut store);
+        assert_eq!(store.comp_log_latest(), Some(payload.clone()));
+        assert!(store.take_back());
+        assert_eq!(store.comp_log_latest(), Some(payload));
     }
 }

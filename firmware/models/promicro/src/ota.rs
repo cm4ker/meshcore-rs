@@ -404,6 +404,10 @@ impl<const LENDS: bool> FirmwareTarget for InPlaceTarget<LENDS> {
         if LENDS { COMPANION_REGION.1 } else { STAGING_END - STAGING }
     }
 
+    fn prepare(&mut self) -> bool {
+        !INSTALL_PENDING.load(Ordering::Relaxed) && self.claim()
+    }
+
     // a staged plan waits for the restart as checked: nothing may write over it
     fn erase(&mut self, offset: u32, len: u32) -> bool {
         if INSTALL_PENDING.load(Ordering::Relaxed) || offset + len > self.capacity() || !self.claim() {

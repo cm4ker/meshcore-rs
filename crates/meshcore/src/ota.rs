@@ -91,6 +91,10 @@ const MAX_ENVELOPE: usize = 1024;
 /// The inactive firmware slot, provided by the platform.
 pub trait FirmwareTarget {
     fn capacity(&self) -> u32;
+    /// Claim or prepare the slot before a streamed session allocates its ~43 KiB inflater.
+    fn prepare(&mut self) -> bool {
+        true
+    }
     /// Erase `[offset, offset + len)`, sector-aligned.
     fn erase(&mut self, offset: u32, len: u32) -> bool;
     /// Write at a 4-byte aligned offset.
@@ -272,6 +276,9 @@ impl OtaSession {
             // both images must fit with room to shift up: `base_len` on install, `raw_size` on rollback
             if raw_size.saturating_add(shift) > room || base_len.saturating_add(shift) > room {
                 return Err(OtaError::TooLarge);
+            }
+            if !target.prepare() {
+                return Err(OtaError::FlashError);
             }
             let mut s = Self::new(size, Some(sha256), chunk_size, 0, Some(raw_size))?;
             let patcher = Patcher::planning(raw_size, base_len, planner);
@@ -907,6 +914,19 @@ impl OtaEndpoint {
     /// An update has begun and is neither committed nor aborted.
     pub fn busy(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// Feed one chunk directly (used by [`crate::fwshare::Loader`]), returning the real write or
+    /// stream error instead of silently dropping it as the fire-and-forget `REQ_TYPE_OTA_DATA`
+    /// wire frame does.
+    pub fn feed_chunk(&mut self, index: u16, data: &[u8]) -> Result<(), OtaError> {
+        self.requests = self.requests.wrapping_add(1);
+        if self.committed {
+            return Err(OtaError::Installed);
+        }
+        let session = self.session.as_mut().ok_or(OtaError::NoSession)?;
+        let target = self.target.as_deref_mut().ok_or(OtaError::NoTarget)?;
+        session.write_chunk(target, index as u32, data)
     }
 
     /// [`Self::handle`] for a request from afar: over LoRa, where an admin password is all it

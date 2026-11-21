@@ -14,13 +14,12 @@
 //! advert table, or where the partition began elsewhere) moves to it by way of the area at the
 //! first start ([`Store::mount`]).
 
-use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
 
-use embedded_storage::nor_flash::NorFlash;
+use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use log::{info, warn};
 
-use super::{CompBlob, SLOT_USED, Store, crc32};
+use super::{CompBlob, SLOT_USED, Store, bytemuck_bytes, crc32, crc32_update};
 
 const HEADER_MAGIC: &[u8; 8] = b"MCRS-LNT";
 const HEADER_LEN: u32 = 16;
@@ -105,43 +104,145 @@ fn rec_size(len: u32) -> u32 {
     REC_HEAD + len.next_multiple_of(4)
 }
 
-/// Runs of zero bytes as `[0, run]`: names and paths in contact records are mostly zeros.
-pub(super) fn pack(data: &[u8]) -> Vec<u8> {
-    try_pack(data).expect("packed contact snapshot allocation")
+/// Streaming zero-run packer matching [`pack`] byte-for-byte with O(1) stack state.
+struct StreamPacker {
+    zeros: u8,
 }
 
-fn try_pack(data: &[u8]) -> Result<Vec<u8>, TryReserveError> {
-    fn emit(data: &[u8], mut write: impl FnMut(&[u8])) {
-        let mut i = 0;
-        while i < data.len() {
-            if data[i] == 0 {
-                let run = data[i..].iter().take(255).take_while(|&&b| b == 0).count();
-                write(&[0, run as u8]);
-                i += run;
-            } else {
-                write(&data[i..i + 1]);
-                i += 1;
-            }
-        }
+impl StreamPacker {
+    fn new() -> Self {
+        Self { zeros: 0 }
     }
 
-    let mut len = 0;
-    emit(data, |part| len += part.len());
-    let mut out = Vec::new();
-    out.try_reserve_exact(len)?;
-    emit(data, |part| out.extend_from_slice(part));
-    Ok(out)
+    fn push(&mut self, data: &[u8], emit: &mut impl FnMut(&[u8]) -> bool) -> bool {
+        for &b in data {
+            if b == 0 {
+                self.zeros += 1;
+                if self.zeros == 255 {
+                    if !emit(&[0, 255]) {
+                        return false;
+                    }
+                    self.zeros = 0;
+                }
+            } else {
+                if self.zeros > 0 {
+                    if !emit(&[0, self.zeros]) {
+                        return false;
+                    }
+                    self.zeros = 0;
+                }
+                if !emit(&[b]) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn finish(&mut self, emit: &mut impl FnMut(&[u8]) -> bool) -> bool {
+        if self.zeros > 0 {
+            let z = self.zeros;
+            self.zeros = 0;
+            return emit(&[0, z]);
+        }
+        true
+    }
+}
+
+/// Streaming zero-run unpacker matching [`unpack`] byte-for-byte with O(1) stack state.
+struct StreamUnpacker {
+    expect_run: bool,
+}
+
+impl StreamUnpacker {
+    fn new() -> Self {
+        Self { expect_run: false }
+    }
+
+    fn push(&mut self, data: &[u8], emit: &mut impl FnMut(&[u8]) -> bool) -> bool {
+        const ZEROS: [u8; 255] = [0; 255];
+        for &b in data {
+            if self.expect_run {
+                self.expect_run = false;
+                if b > 0 && !emit(&ZEROS[..b as usize]) {
+                    return false;
+                }
+            } else if b == 0 {
+                self.expect_run = true;
+            } else if !emit(&[b]) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Accumulates streamed bytes into 256-byte word-aligned flash writes (padding only the tail).
+struct WordBuf {
+    buf: [u8; 256],
+    fill: usize,
+    at: u32,
+}
+
+impl WordBuf {
+    fn new(at: u32) -> Self {
+        Self { buf: [0; 256], fill: 0, at }
+    }
+
+    fn push(&mut self, mut data: &[u8], write: &mut impl FnMut(u32, &[u8]) -> bool) -> bool {
+        while !data.is_empty() {
+            let n = data.len().min(self.buf.len() - self.fill);
+            self.buf[self.fill..self.fill + n].copy_from_slice(&data[..n]);
+            self.fill += n;
+            data = &data[n..];
+            if self.fill == self.buf.len() {
+                if !write(self.at, &self.buf) {
+                    return false;
+                }
+                self.at += self.buf.len() as u32;
+                self.fill = 0;
+            }
+        }
+        true
+    }
+
+    fn finish(self, write: &mut impl FnMut(u32, &[u8]) -> bool) -> bool {
+        self.fill == 0 || write(self.at, &self.buf[..self.fill])
+    }
+}
+
+/// Runs of zero bytes as `[0, run]`: names and paths in contact records are mostly zeros.
+pub(super) fn pack(data: &[u8]) -> Vec<u8> {
+    let mut len = 0usize;
+    let mut p = StreamPacker::new();
+    p.push(data, &mut |part| {
+        len += part.len();
+        true
+    });
+    p.finish(&mut |part| {
+        len += part.len();
+        true
+    });
+    let mut out = Vec::with_capacity(len);
+    let mut p = StreamPacker::new();
+    p.push(data, &mut |part| {
+        out.extend_from_slice(part);
+        true
+    });
+    p.finish(&mut |part| {
+        out.extend_from_slice(part);
+        true
+    });
+    out
 }
 
 pub(super) fn unpack(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() * 2);
-    let mut it = data.iter();
-    while let Some(&b) = it.next() {
-        match b {
-            0 => out.resize(out.len() + it.next().copied().unwrap_or(0) as usize, 0),
-            b => out.push(b),
-        }
-    }
+    let mut u = StreamUnpacker::new();
+    u.push(data, &mut |part| {
+        out.extend_from_slice(part);
+        true
+    });
     out
 }
 
@@ -214,15 +315,21 @@ impl<F: NorFlash> Store<F> {
         for (key, data) in self.ring_newest(ADVERTS_MOVED).into_iter().rev() {
             recs.push((TAG_ADVERT, 0, [&key[..], &data].concat()));
         }
-        match self.try_unlent_log_latest().and_then(|data| data.map(|contacts| try_pack(&contacts)).transpose()) {
-            Ok(Some(packed)) => recs.push((TAG_CONTACTS, 0, packed)),
-            Ok(None) => {}
-            Err(_) => {
-                warn!("companion data: not enough RAM to save contacts for OTA");
-                return false;
+        let contacts = match self.unlent_log_latest_span() {
+            Some((addr, len)) => {
+                let Some((packed_len, packed_crc)) = self.measure_packed_log(addr, len) else {
+                    warn!("companion data: could not read contacts for OTA");
+                    return false;
+                };
+                if packed_len > u16::MAX as u32 {
+                    warn!("companion data: packed contacts ({} KB) exceed record limit", packed_len / 1024);
+                    return false;
+                }
+                Some((addr, len, packed_len, packed_crc))
             }
-        }
-        self.write_rescue(&recs)
+            None => None,
+        };
+        self.write_rescue_stream(&recs, contacts)
     }
 
     /// Give the partition back: write the data in it anew from the area, then let the area go.
@@ -251,14 +358,20 @@ impl<F: NorFlash> Store<F> {
             }
         }
         let skip = adverts.len().saturating_sub(ADVERTS_MOVED);
-        let contacts = recs.iter().rev().filter(|r| r.tag == TAG_CONTACTS).find_map(|r| self.rec_data(r));
+        let contacts = recs
+            .iter()
+            .rev()
+            .filter(|r| r.tag == TAG_CONTACTS)
+            .find_map(|r| self.measure_unpacked_rescue(r.at, r.len, r.crc).map(|(len, crc)| (r.at, r.len, len, crc)));
         // from here the store writes the partition
         let head = self.lending.as_mut().and_then(|l| l.head.take());
         let ok = self.comp_erase()
             && blobs.iter().all(|(b, d)| self.comp_save(*b, d))
             && self.comp_save(CompBlob::Layout, LAYOUT_RING)
             && adverts[skip..].iter().all(|a| self.ring_put(a[..32].try_into().unwrap(), &a[32..]))
-            && contacts.is_none_or(|c| self.comp_log_append(&unpack(&c)));
+            && contacts.is_none_or(|(at, rlen, ulen, ucrc)| {
+                self.comp_log_append_stream(ulen, ucrc, |s, dst| s.stream_unpack_rescue(at, rlen, dst))
+            });
         if !ok {
             warn!("companion region: could not write it back, the data stays aside");
             self.lending.as_mut().unwrap().head = head;
@@ -312,10 +425,20 @@ impl<F: NorFlash> Store<F> {
 
     /// The area's data anew: `recs` behind a fresh header, the partition lent from then on.
     pub(super) fn write_rescue(&mut self, recs: &[(u8, u8, Vec<u8>)]) -> bool {
+        self.write_rescue_stream(recs, None)
+    }
+
+    /// Like [`Self::write_rescue`], plus an optional contact snapshot `(src_addr, src_len,
+    /// packed_len, packed_crc)` streamed straight from flash through [`StreamPacker`] without
+    /// buffering the snapshot in RAM.
+    fn write_rescue_stream(
+        &mut self, recs: &[(u8, u8, Vec<u8>)], contacts: Option<(u32, u32, u32, u32)>,
+    ) -> bool {
         let Some(l) = self.lending.as_mut() else {
             return false;
         };
-        let need = HEADER_LEN + recs.iter().map(|r| rec_size(r.2.len() as u32)).sum::<u32>();
+        let contacts_need = contacts.map_or(0, |(_, _, plen, _)| rec_size(plen));
+        let need = HEADER_LEN + recs.iter().map(|r| rec_size(r.2.len() as u32)).sum::<u32>() + contacts_need;
         if need > l.capacity() {
             warn!("companion data: {} KB, more than the {} KB it has while an update comes", need / 1024, l.capacity() / 1024);
             return false;
@@ -324,23 +447,164 @@ impl<F: NorFlash> Store<F> {
         l.head = None;
         let area = l.area;
         if !area.iter().all(|&(a, n)| n == 0 || self.flash.erase(a, a + n).is_ok()) {
+            warn!("companion data: could not erase rescue area");
             return false;
         }
         let mut at = HEADER_LEN;
         for (tag, key, data) in recs {
             if !self.rescue_record(at, *tag, *key, data) {
+                warn!("companion data: could not write rescue record");
                 return false;
             }
             at += rec_size(data.len() as u32);
+        }
+        if let Some((src_addr, src_len, packed_len, packed_crc)) = contacts {
+            if !self.rescue_record_head(at, TAG_CONTACTS, 0, packed_len as u16, packed_crc)
+                || !self.stream_pack_to_rescue(src_addr, src_len, at + REC_HEAD)
+            {
+                warn!("companion data: could not write contacts to rescue area");
+                return false;
+            }
+            at += rec_size(packed_len);
         }
         let mut header = [0xFFu8; HEADER_LEN as usize];
         header[..8].copy_from_slice(HEADER_MAGIC);
         header[8..12].copy_from_slice(&1u32.to_le_bytes());
         if !self.rescue_write(0, &header) {
+            warn!("companion data: could not write rescue header");
             return false;
         }
         self.lending.as_mut().unwrap().head = Some(at);
         true
+    }
+
+    /// Pass 1 for [`Self::lend`]: compute `(packed_len, packed_crc)` of the flash log at
+    /// `src_addr..src_addr + src_len` using only stack buffers.
+    fn measure_packed_log(&mut self, src_addr: u32, src_len: u32) -> Option<(u32, u32)> {
+        let mut packer = StreamPacker::new();
+        let mut packed_len = 0u32;
+        let mut crc = 0xFFFF_FFFFu32;
+        let ok = self.stream_flash(src_addr, src_len, |chunk| {
+            packer.push(chunk, &mut |part| {
+                packed_len = packed_len.saturating_add(part.len() as u32);
+                crc = crc32_update(crc, part);
+                true
+            })
+        }) && packer.finish(&mut |part| {
+            packed_len = packed_len.saturating_add(part.len() as u32);
+            crc = crc32_update(crc, part);
+            true
+        });
+        ok.then_some((packed_len, !crc))
+    }
+
+    /// Pass 2 for [`Self::lend`]: stream-pack `src_addr..src_addr + src_len` directly into the
+    /// rescue area starting at word-aligned offset `dst_at`.
+    fn stream_pack_to_rescue(&mut self, src_addr: u32, src_len: u32, dst_at: u32) -> bool {
+        let mut packer = StreamPacker::new();
+        let mut wbuf = WordBuf::new(dst_at);
+        let mut rbuf = [0u32; 64];
+        let mut off = 0u32;
+        while off < src_len {
+            let n = ((src_len - off) as usize).min(256);
+            let bytes: &mut [u8; 256] = bytemuck_bytes(&mut rbuf);
+            if ReadNorFlash::read(&mut self.flash, src_addr + off, &mut bytes[..n.next_multiple_of(4)]).is_err() {
+                return false;
+            }
+            let chunk = &bytemuck_bytes(&mut rbuf)[..n];
+            let mut ok = true;
+            packer.push(chunk, &mut |part| {
+                ok = wbuf.push(part, &mut |at, data| self.rescue_write(at, data));
+                ok
+            });
+            if !ok {
+                return false;
+            }
+            off += n as u32;
+        }
+        let mut ok = true;
+        packer.finish(&mut |part| {
+            ok = wbuf.push(part, &mut |at, data| self.rescue_write(at, data));
+            ok
+        });
+        ok && wbuf.finish(&mut |at, data| self.rescue_write(at, data))
+    }
+
+    /// Pass 1 for [`Self::take_back`]: verify the rescue record's CRC and compute the unpacked
+    /// `(len, crc)` without allocating the snapshot on the heap.
+    fn measure_unpacked_rescue(&mut self, rec_at: u32, rec_len: u32, expected_crc: u32) -> Option<(u32, u32)> {
+        let mut unpacker = StreamUnpacker::new();
+        let mut packed_crc = 0xFFFF_FFFFu32;
+        let mut unpacked_len = 0u32;
+        let mut unpacked_crc = 0xFFFF_FFFFu32;
+        let mut rbuf = [0u8; 256];
+        let mut off = 0u32;
+        while off < rec_len {
+            let n = ((rec_len - off) as usize).min(rbuf.len());
+            if !self.rescue_read_into(rec_at + off, &mut rbuf[..n]) {
+                return None;
+            }
+            packed_crc = crc32_update(packed_crc, &rbuf[..n]);
+            unpacker.push(&rbuf[..n], &mut |part| {
+                unpacked_len = unpacked_len.saturating_add(part.len() as u32);
+                unpacked_crc = crc32_update(unpacked_crc, part);
+                true
+            });
+            off += n as u32;
+        }
+        (!packed_crc == expected_crc).then_some((unpacked_len, !unpacked_crc))
+    }
+
+    /// Pass 2 for [`Self::take_back`]: stream-unpack a rescue record straight to flash at `dst_addr`.
+    fn stream_unpack_rescue(&mut self, rec_at: u32, rec_len: u32, dst_addr: u32) -> bool {
+        let mut unpacker = StreamUnpacker::new();
+        let mut wbuf = WordBuf::new(dst_addr);
+        let mut rbuf = [0u8; 256];
+        let mut off = 0u32;
+        while off < rec_len {
+            let n = ((rec_len - off) as usize).min(rbuf.len());
+            if !self.rescue_read_into(rec_at + off, &mut rbuf[..n]) {
+                return false;
+            }
+            let mut ok = true;
+            unpacker.push(&rbuf[..n], &mut |part| {
+                ok = wbuf.push(part, &mut |at, data| self.write_chunked(at, data));
+                ok
+            });
+            if !ok {
+                return false;
+            }
+            off += n as u32;
+        }
+        wbuf.finish(&mut |at, data| self.write_chunked(at, data))
+    }
+
+    /// Read `out.len()` bytes from word-aligned `at` in the rescue area into a stack buffer.
+    fn rescue_read_into(&mut self, mut at: u32, mut out: &mut [u8]) -> bool {
+        let mut buf = [0u32; 64];
+        while !out.is_empty() {
+            let Some((addr, room)) = self.lending.as_ref().and_then(|l| l.locate(at)) else {
+                return false;
+            };
+            let n = out.len().min(room as usize).min(256);
+            let bytes: &mut [u8; 256] = bytemuck_bytes(&mut buf);
+            if ReadNorFlash::read(&mut self.flash, addr, &mut bytes[..n.next_multiple_of(4)]).is_err() {
+                return false;
+            }
+            out[..n].copy_from_slice(&bytes[..n]);
+            at += n as u32;
+            out = &mut out[n..];
+        }
+        true
+    }
+
+    fn rescue_record_head(&mut self, at: u32, tag: u8, key: u8, len: u16, crc: u32) -> bool {
+        let mut head = [0u8; REC_HEAD as usize];
+        head[..4].copy_from_slice(&REC_MAGIC.to_le_bytes());
+        head[4..6].copy_from_slice(&[tag, key]);
+        head[6..8].copy_from_slice(&len.to_le_bytes());
+        head[8..].copy_from_slice(&crc.to_le_bytes());
+        self.rescue_write(at, &head)
     }
 
     /// The small blobs, as records.

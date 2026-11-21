@@ -17,7 +17,7 @@ use alloc::string::ToString;
 use super::*;
 use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, MAX_LORA_FILE, Offer, status};
 use crate::fwstate::{self, FwState, mode};
-use crate::ota::REQ_TYPE_OTA_COMMIT;
+use crate::ota::{REQ_TYPE_OTA_ABORT, REQ_TYPE_OTA_COMMIT};
 
 /// The first check, a while after boot (the node has heard its neighbours by then), then twice a
 /// day; each node a little later than the next (by its key), so the repeaters of a mesh do not
@@ -139,7 +139,7 @@ impl Repeater {
     }
 
     pub(super) fn auto_update_timer(&self) -> Option<u64> {
-        let waiting = matches!(self.autoupdate.step, Step::Ready);
+        let waiting = matches!(self.autoupdate.step, Step::Ready) || self.autoupdate.at == u64::MAX;
         (self.auto_blocked().is_none() && !waiting).then_some(self.autoupdate.at)
     }
 
@@ -242,6 +242,9 @@ impl Repeater {
 
     /// The check is over until `ms` from now (nothing to do, or it failed), saying `state`.
     fn auto_sleep(&mut self, ctx: &MeshCtx, ms: u64, state: FwState) {
+        if self.autoupdate.loader.is_some() && self.ota.busy() {
+            self.ota.handle(&[REQ_TYPE_OTA_ABORT], FIRMWARE_VERSION);
+        }
         let a = &mut self.autoupdate;
         a.step = Step::Sleep;
         a.loader = None;
@@ -249,7 +252,7 @@ impl Repeater {
         a.peer = None;
         a.others.clear();
         a.tag = 0;
-        a.at = ctx.now + ms;
+        a.at = ctx.now.saturating_add(ms);
         a.state = state;
     }
 
@@ -257,6 +260,11 @@ impl Repeater {
     fn auto_fail(&mut self, ctx: &MeshCtx, why: String) {
         let retry = self.next_check(ctx, RETRY_LATER_MS);
         self.auto_sleep(ctx, RETRY_LATER_MS, FwState::Failed { why, retry });
+    }
+
+    /// The update itself failed: stop retrying automatically and wait for `fw check`/`fw update`.
+    fn auto_fail_manual(&mut self, ctx: &MeshCtx, why: String) {
+        self.auto_sleep(ctx, u64::MAX, FwState::Failed { why, retry: 0 });
     }
 
     /// Nothing newer: the next check in twelve hours or so.
@@ -378,7 +386,7 @@ impl Repeater {
             match loader.feed(&mut self.ota, offset, &buf[..n]) {
                 Ok(Some(next)) => offset = next,
                 Ok(None) => return self.auto_loaded(ctx),
-                Err(why) => return self.auto_fail(ctx, why.into()),
+                Err(why) => return self.auto_fail_manual(ctx, why.into()),
             }
         }
         self.autoupdate.step = Step::Load { id, offset };
@@ -628,7 +636,7 @@ impl Repeater {
                 }
             }
             Ok(None) => self.auto_loaded(ctx),
-            Err(why) => self.auto_fail(ctx, why.into()),
+            Err(why) => self.auto_fail_manual(ctx, why.into()),
         }
     }
 
@@ -666,6 +674,6 @@ impl Repeater {
             OtaOutcome::CommitFailed(line) => line,
             _ => String::from(crate::fwshare::refusal(reply.and_then(|r| r.first().copied()).unwrap_or(0))),
         };
-        self.auto_fail(ctx, why);
+        self.auto_fail_manual(ctx, why);
     }
 }

@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 
 use crate::FIRMWARE_VERSION;
 use crate::ota::{
-    OtaEndpoint, OtaError, REQ_TYPE_OTA_BEGIN, REQ_TYPE_OTA_DATA, REQ_TYPE_OTA_MANIFEST, REQ_TYPE_OTA_STATUS,
+    OtaEndpoint, OtaError, REQ_TYPE_OTA_BEGIN, REQ_TYPE_OTA_MANIFEST, REQ_TYPE_OTA_STATUS,
 };
 use crate::release::{self, Envelope, Manifest, Peek};
 
@@ -207,8 +207,10 @@ pub fn refusal(code: u8) -> &'static str {
         c if c == OtaError::Downgrade as u8 => "older than this firmware",
         c if c == OtaError::BaseMismatch as u8 => "made for another firmware than this one",
         c if c == OtaError::BadEnvelope as u8 => "unreadable",
+        c if c == OtaError::BadImage as u8 => "the update file is corrupted",
         c if c == OtaError::FlashError as u8 => "the update slot can't be written",
         c if c == OtaError::TooLarge as u8 => "larger than this device's update slot",
+        c if c == OtaError::Installed as u8 => "an update is already waiting for restart",
         _ => "refused",
     }
 }
@@ -263,10 +265,7 @@ impl Loader {
             }
             Some(h) => {
                 let index = (offset as usize).checked_sub(h.patch_offset()).ok_or("a piece out of order")? / FW_PIECE;
-                let mut req = alloc::vec![REQ_TYPE_OTA_DATA];
-                req.extend_from_slice(&(index as u16).to_le_bytes());
-                req.extend_from_slice(piece);
-                ota.handle(&req, FIRMWARE_VERSION);
+                ota.feed_chunk(index as u16, piece).map_err(|e| refusal(e as u8))?;
             }
         }
         if next < self.len {
@@ -754,5 +753,59 @@ mod tests {
         assert!(deltas.contains(&alloc::format!("lora_max={MAX_LORA_FILE}")), "deltas.sh: lora_max={MAX_LORA_FILE}");
         let report = include_str!("../../../tools/delta-report/delta_report.py");
         assert!(report.contains(&alloc::format!("LORA_MAX = {MAX_LORA_FILE}")), "delta_report.py: LORA_MAX = {MAX_LORA_FILE}");
+    }
+
+    #[test]
+    fn loader_reports_slot_write_error_instead_of_missing_pieces() {
+        struct FailingTarget {
+            running: Vec<u8>,
+            fail_write: bool,
+        }
+        impl crate::ota::FirmwareTarget for FailingTarget {
+            fn capacity(&self) -> u32 { 64 * 1024 }
+            fn erase(&mut self, _offset: u32, _len: u32) -> bool { !self.fail_write }
+            fn write(&mut self, _offset: u32, _data: &[u8]) -> bool { !self.fail_write }
+            fn read(&mut self, _offset: u32, _buf: &mut [u8]) -> bool { false }
+            fn activate(&mut self, _size: u32) -> bool { false }
+            fn running_capacity(&self) -> u32 { self.running.len() as u32 }
+            fn read_running(&mut self, offset: u32, buf: &mut [u8]) -> bool {
+                buf.copy_from_slice(&self.running[offset as usize..offset as usize + buf.len()]);
+                true
+            }
+            fn format(&self) -> crate::ota::ImageFormat {
+                crate::ota::ImageFormat::Nrf { chip: crate::ota::NRF_CHIP_NRF52840, load: 0x26000 }
+            }
+        }
+
+        // Build a minimal valid nRF running image (trailer at end) and a tiny delta file.
+        let mut old = alloc::vec![0x11u8; 4096];
+        let mut app_sha = [0u8; 32];
+        crate::crypto::sha256(&mut app_sha, &[&old]);
+        old.extend_from_slice(crate::ota::NRF_TRAILER_MAGIC);
+        old.extend_from_slice(&(4096u32).to_le_bytes());
+        old.extend_from_slice(&(0x26000u32).to_le_bytes());
+        old.extend_from_slice(&crate::ota::NRF_CHIP_NRF52840.to_le_bytes());
+        old.extend_from_slice(&[0u8; 12]);
+        old.extend_from_slice(&app_sha);
+        let mut base_sha = [0u8; 32];
+        crate::crypto::sha256(&mut base_sha, &[&old]);
+
+        let env = release_envelope(5, &old);
+        let file = delta_file(&env, old.len() as u32, &base_sha, &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let mut ota = OtaEndpoint::new(Vec::new(), Vec::new(), role::COMPANION);
+        ota.build.board = board::T_ECHO;
+        ota.target = Some(alloc::boxed::Box::new(FailingTarget { running: old, fail_write: true }));
+
+        let mut loader = Loader::new(file.len() as u32, release::channel::STABLE);
+        let mut off = 0u32;
+        let err = loop {
+            let want = loader.want(off);
+            match loader.feed(&mut ota, off, &file[off as usize..off as usize + want]) {
+                Ok(Some(next)) => off = next,
+                Ok(None) => panic!("expected write failure"),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(err, "the update slot can't be written");
     }
 }

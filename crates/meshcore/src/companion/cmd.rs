@@ -1481,9 +1481,10 @@ impl Companion {
         } else if cmd == "sensor scan" {
             crate::sensor::scan_reply(&self.board.sensor_scan)
         } else if cmd == "log" {
-            // the newest lines: the whole log does not fit a reply frame
+            // the newest lines that fit in one reply frame without truncating the tail
             let log = &self.board.boot_log;
-            let at = log.len().saturating_sub(220);
+            let max = if remote { 155 } else { MAX_FRAME_SIZE - 1 };
+            let at = log.len().saturating_sub(max);
             let at = (at..log.len()).find(|&i| log.is_char_boundary(i)).unwrap_or(log.len());
             String::from(&log[at..])
         } else if cmd == "get wifi.ip" {
