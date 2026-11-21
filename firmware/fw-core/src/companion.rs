@@ -26,7 +26,7 @@ use meshcore::crypto;
 use meshcore::identity::LocalIdentity;
 use meshcore::mesh::{Mesh, MeshCtx};
 use meshcore::ota::FirmwareTarget;
-use meshcore::prefs::NodePrefs;
+use meshcore::prefs::{NodePrefs, ScreenMode};
 use meshcore::radio::RadioParams;
 use meshcore::timesync::{Clock, Source};
 use meshcore::util::to_hex;
@@ -82,9 +82,15 @@ pub trait Board {
     /// The board a signed release must name (`meshcore::release::board`).
     fn release_board(&self) -> u8;
     fn max_tx_power_dbm(&self) -> i8;
-    /// Around each transmission: front-end module, TX LED.
+    /// Around each transmission: front-end module.
     fn on_tx_start(&mut self) {}
     fn on_tx_end(&mut self) {}
+    /// Software-controlled status/TX LED (`set led`, the `led` custom variable).
+    fn has_led(&self) -> bool {
+        true
+    }
+    /// Drive the status/TX LED when `prefs.led_enabled` is on.
+    fn tx_led(&mut self, _on: bool) {}
     /// The front end has a switchable LNA (`set radio.fem.rxgain`).
     fn lna_controllable(&self) -> bool {
         false
@@ -450,9 +456,11 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     while let Err(e) = radio.init(prefs.radio, prefs.tx_power_dbm, prefs.rx_boosted_gain).await {
         error!("radio init failed: {e:?}");
         for _ in 0..12 {
-            board.on_tx_start();
+            if prefs.led_enabled {
+                board.tx_led(true);
+            }
             Timer::after_millis(200).await;
-            board.on_tx_end();
+            board.tx_led(false);
             Timer::after_millis(200).await;
             platform.feed_watchdog();
         }
@@ -503,6 +511,8 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         max_tx_power_dbm: max_tx,
         has_gps: board.has_gps(),
         has_buzzer: board.has_buzzer(),
+        has_screen: board.has_screen(),
+        has_led: board.has_led(),
         adc_multiplier: board.adc_multiplier(),
         fem_lna_controllable: board.lna_controllable(),
         sensor_scan: board.sensor_scan(),
@@ -576,11 +586,17 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     // where replies go: the link of the latest request
     let mut reply_to = Link::Usb;
     let mut next_screen = 0u64;
+    let mut screen_mode = ScreenMode::from_code(mesh.app.prefs.screen_mode);
     // a long press on the home page turns the board off, as on the repeater
     let mut ui = Ui::new(board.ui_pages()).with_home_action(Action::PowerOff);
     if !board.always_on() {
         ui = ui.with_screen_timeout(SCREEN_ON_MS, now_ms());
+        if screen_mode != ScreenMode::Auto {
+            ui.sleep();
+        }
     }
+    let mut screen_lit = true;
+    let mut manual_until = 0u64;
     // a button down at boot is the press that turned the board on: it must not turn it off again
     let mut button = if board.button_down() { Button::held() } else { Button::default() };
     let mut next_gps = 0u64;
@@ -608,7 +624,11 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
                 && let Some(frame) = mesh.tx_take(now)
             {
                 board.on_tx_start();
+                if mesh.app.prefs.led_enabled {
+                    board.tx_led(true);
+                }
                 let res = radio.transmit(frame.bytes(), frame.timeout_ms).await;
+                board.tx_led(false);
                 board.on_tx_end();
                 let _ = radio.start_rx();
                 match res {
@@ -676,11 +696,12 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         }
         let pin = BLE_PASSKEY.load(Ordering::Relaxed);
         if pin != 0 {
-            // the phone asks for the PIN on the screen: keep it lit while pairing
-            if !ui.screen_on(now) {
+            // the phone asks for the PIN on the screen: keep it lit while pairing, even in Manual/Off
+            if !ui.screen_on(now) || !screen_lit {
                 next_screen = 0;
             }
             ui.wake(now);
+            manual_until = manual_until.max(now + SCREEN_ON_MS);
         }
 
         // a burst every 2 s; one cut short by a packet goes on in the next one
@@ -706,63 +727,110 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             (true, true) => BleState::Connected,
         };
         if ui.enabled() {
+            let new_mode = ScreenMode::from_code(mesh.app.prefs.screen_mode);
+            if new_mode != screen_mode {
+                screen_mode = new_mode;
+                match screen_mode {
+                    ScreenMode::Off => {
+                        ui.sleep();
+                        manual_until = 0;
+                    }
+                    ScreenMode::Auto => {
+                        ui.wake(now);
+                        next_screen = 0;
+                    }
+                    ScreenMode::Manual => {}
+                }
+            }
             ui.tick(now);
             let down = board.button_down();
-            if down && !button.is_down() {
-                ui.button_down(now);
-                next_screen = 0;
-            }
-            if let Some(intent) = button.poll(down, now) {
-                next_screen = 0;
-                match ui.press(intent, now) {
-                    Some(Action::Advert) => {
-                        let sent = mesh.app.advert(&mut mesh.ctx);
-                        ui.alert(if sent { Alert::AdvertSent } else { Alert::AdvertFailed }, now);
-                    }
-                    Some(Action::ToggleBle) => {
-                        let on = !BLE_ENABLED.load(Ordering::Relaxed);
-                        BLE_ENABLED.store(on, Ordering::Relaxed);
-                        ui.alert(if on { Alert::BleOn } else { Alert::BleOff }, now);
-                    }
-                    Some(Action::ToggleGps) => {
-                        let on = !mesh.app.prefs.gps_enabled;
-                        mesh.app.prefs.gps_enabled = on;
-                        (mesh.app.effects.gps, mesh.app.effects.save_prefs) = (true, true);
-                        ui.alert(if on { Alert::GpsOn } else { Alert::GpsOff }, now);
-                    }
-                    Some(Action::PowerOff) => mesh.app.effects.power_off = true,
-                    Some(Action::Pull) => {
-                        let done = if matches!(mesh.app.fw_state(), FwState::Ready { .. }) {
-                            mesh.app.fw_install()
-                        } else {
-                            mesh.app.fw_check_now(&mesh.ctx, false)
-                        };
-                        if let Err(e) = done {
-                            warn!("update: {e}");
-                        }
-                    }
-                    Some(Action::ToggleUpdate) | None => {}
+            if screen_mode != ScreenMode::Off {
+                if down && !button.is_down() {
+                    ui.button_down(now);
+                    manual_until = now + SCREEN_ON_MS;
+                    next_screen = 0;
                 }
+                if let Some(intent) = button.poll(down, now) {
+                    manual_until = now + SCREEN_ON_MS;
+                    next_screen = 0;
+                    match ui.press(intent, now) {
+                        Some(Action::Advert) => {
+                            let sent = mesh.app.advert(&mut mesh.ctx);
+                            ui.alert(if sent { Alert::AdvertSent } else { Alert::AdvertFailed }, now);
+                        }
+                        Some(Action::ToggleBle) => {
+                            let on = !BLE_ENABLED.load(Ordering::Relaxed);
+                            BLE_ENABLED.store(on, Ordering::Relaxed);
+                            ui.alert(if on { Alert::BleOn } else { Alert::BleOff }, now);
+                        }
+                        Some(Action::ToggleGps) => {
+                            let on = !mesh.app.prefs.gps_enabled;
+                            mesh.app.prefs.gps_enabled = on;
+                            (mesh.app.effects.gps, mesh.app.effects.save_prefs) = (true, true);
+                            ui.alert(if on { Alert::GpsOn } else { Alert::GpsOff }, now);
+                        }
+                        Some(Action::PowerOff) => mesh.app.effects.power_off = true,
+                        Some(Action::Pull) => {
+                            let done = if matches!(mesh.app.fw_state(), FwState::Ready { .. }) {
+                                mesh.app.fw_install()
+                            } else {
+                                mesh.app.fw_check_now(&mesh.ctx, false)
+                            };
+                            if let Err(e) = done {
+                                warn!("update: {e}");
+                            }
+                        }
+                        Some(Action::ToggleUpdate) | None => {}
+                    }
+                }
+            } else if matches!(button.poll(down, now), Some(ui::Intent::Act)) {
+                // screen is off: do not turn unseen pages; a long press sends a zero-hop advert
+                let _ = mesh.app.advert(&mut mesh.ctx);
             }
             if ui.page() == Page::Messages {
                 messages_seen = mesh.app.messages_received;
             }
-            // a new message lights a dark screen
+            // a new message lights a dark screen only in Auto mode
             if mesh.app.messages_received != messages_lit {
                 messages_lit = mesh.app.messages_received;
                 if !mesh.app.prefs.buzzer_quiet {
                     board.notify(Notify::Message);
                 }
-                ui.wake(now);
-                next_screen = 0;
+                match screen_mode {
+                    ScreenMode::Auto => {
+                        ui.wake(now);
+                        next_screen = 0;
+                    }
+                    ScreenMode::Manual => {
+                        if (!board.always_on() && ui.screen_on(now)) || (board.always_on() && now < manual_until) {
+                            next_screen = 0;
+                        }
+                    }
+                    ScreenMode::Off => {}
+                }
             }
-            if !ui.screen_on(now) {
-                board.screen_off();
+            let show = match screen_mode {
+                ScreenMode::Auto => ui.screen_on(now),
+                ScreenMode::Manual => {
+                    if board.always_on() {
+                        now < manual_until || pin != 0
+                    } else {
+                        ui.screen_on(now)
+                    }
+                }
+                ScreenMode::Off => pin != 0,
+            };
+            if !show {
+                if screen_lit && (!board.always_on() || screen_mode == ScreenMode::Off) {
+                    board.screen_off();
+                    screen_lit = false;
+                }
             } else if now >= next_screen {
                 next_screen = now + 1000;
                 let unread = mesh.app.messages_received.wrapping_sub(messages_seen);
                 let view = build_view(&mut ui, &mesh, ble_state, fixed_pin, pin, unread, now);
                 board.show_view(&view);
+                screen_lit = true;
             }
         } else {
             // no interface: a long press of the button sends a zero-hop advert
@@ -893,7 +961,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             board.set_gps(false);
             let _ = radio.sleep();
             comp_save(&store, CompBlob::Clock, &mesh.ctx.current_time().to_le_bytes());
-            if ui.enabled() {
+            if ui.enabled() && (board.always_on() || screen_mode != ScreenMode::Off) {
                 let mut view = build_view(&mut ui, &mesh, BleState::Off, None, 0, 0, now);
                 view.body = Body::Off { name: mesh.app.prefs.node_name.clone() };
                 (view.alert, view.pin) = (None, None);

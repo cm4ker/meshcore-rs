@@ -28,7 +28,7 @@ use meshcore::crypto;
 use meshcore::gps::GpsReading;
 use meshcore::identity::LocalIdentity;
 use meshcore::mesh::{Mesh, MeshCtx};
-use meshcore::prefs::{NAME_MAX, NodePrefs};
+use meshcore::prefs::{NAME_MAX, NodePrefs, ScreenMode};
 use meshcore::repeater::{BLE_OTA_WINDOW_MINS, BoardInfo, Repeater};
 use meshcore::timesync::{Clock, Source};
 use meshcore::util::{Shortest, to_hex};
@@ -539,7 +539,9 @@ where
     if let Err(e) = radio.init(prefs.radio, prefs.tx_power_dbm, prefs.rx_boosted_gain).await {
         println!("ERROR: radio init failed: {e:?}");
         loop {
-            board.led_toggle();
+            if prefs.led_enabled {
+                board.led_toggle();
+            }
             Timer::after_millis(200).await;
         }
     }
@@ -606,6 +608,8 @@ where
         ble_ota_name: slots.map(|_| ota_ssid(&prefs.node_name)),
         adc_multiplier: board.adc_multiplier(),
         has_gps: board.has_gps(),
+        has_screen: board.has_screen(),
+        has_led: true,
         ..Default::default()
     };
     let mut mesh = Mesh::new(ctx, Repeater::new(prefs, board_info));
@@ -766,11 +770,16 @@ where
         (true, Some(_)) => PAGES,
         (true, None) => PAGES_SINGLE_SLOT,
     };
+    let mut screen_mode = ScreenMode::from_code(mesh.app.prefs.screen_mode);
     let mut ui = Ui::new(pages).with_home_action(Action::PowerOff);
     let always_on = board.always_on();
     if !always_on {
         ui = ui.with_screen_timeout(SCREEN_ON_MS, now_ms());
+        if screen_mode != ScreenMode::Auto {
+            ui.sleep();
+        }
     }
+    let mut manual_until = 0u64;
     let mut ui_button = if board.button_down() { Button::held() } else { Button::default() };
     let mut screen = ScreenPolicy::default();
     let (mut next_view, mut next_oled_try, mut oled_failures) = (0u64, 0u64, 0u8);
@@ -800,6 +809,7 @@ where
         // hosted room server (the radio settings are the repeater's)
         let thr = mesh.app.prefs.interference_threshold as i16;
         let cad = mesh.app.prefs.cad_enabled;
+        let led = mesh.app.prefs.led_enabled;
         let mut transmitted = false;
         for m in core::iter::once(&mut mesh).chain(room.as_mut()) {
             if !m.tx_pending(now) {
@@ -819,7 +829,9 @@ where
                     let _ = radio.set_frame_cr(frame.cr);
                 }
                 board.fem_tx_mode();
-                board.tx_led(true);
+                if led {
+                    board.tx_led(true);
+                }
                 let res = radio.transmit(frame.bytes(), frame.timeout_ms).await;
                 board.tx_led(false);
                 board.fem_rx_mode();
@@ -869,9 +881,10 @@ where
             let span = next.saturating_sub(now).min(MAX_SLEEP_MS);
             if span >= 100 && radio.arm_wake() {
                 if let Some(woke) = board.light_sleep(span) {
-                    if woke.button {
+                    if woke.button && screen_mode != ScreenMode::Off {
                         let t = now_ms();
                         ui.button_down(t);
+                        manual_until = t + SCREEN_ON_MS;
                         let _ = ui_button.poll(true, t);
                         awake_until = t + AWAKE_AFTER_ACTIVITY_MS;
                         next_view = 0;
@@ -1002,34 +1015,56 @@ where
             next_agc_reset = now + agc_secs * 1000;
         }
 
+        let new_mode = ScreenMode::from_code(mesh.app.prefs.screen_mode);
+        if new_mode != screen_mode {
+            screen_mode = new_mode;
+            match screen_mode {
+                ScreenMode::Off => {
+                    ui.sleep();
+                    manual_until = 0;
+                }
+                ScreenMode::Auto => {
+                    ui.wake(now);
+                    next_view = 0;
+                }
+                ScreenMode::Manual => {}
+            }
+        }
         // the interface: the button lights the screen and turns the pages
         let down = board.button_down();
-        if down && !ui_button.is_down() {
-            ui.button_down(now);
-            awake_until = now + AWAKE_AFTER_ACTIVITY_MS;
-            next_view = 0;
-        }
-        ui.tick(now);
-        if let Some(intent) = ui_button.poll(down, now)
-            && power_off_at.is_none()
-        {
-            next_view = 0;
-            match ui.press(intent, now) {
-                Some(Action::PowerOff) => mesh.app.effects.power_off = true,
-                Some(Action::Advert) => {
-                    let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "advert");
-                    ui.alert(Alert::AdvertSent, now);
-                }
-                Some(Action::ToggleUpdate) if ble_until.is_none() => {
-                    let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "start ota ble");
-                }
-                Some(Action::ToggleUpdate) if !BLE_CONNECTED.load(Ordering::Relaxed) => {
-                    (ble_until, ble_pin) = (None, None);
-                    ble::stop();
-                    println!("BLE update window closed with the button");
-                }
-                _ => {}
+        if screen_mode != ScreenMode::Off {
+            if down && !ui_button.is_down() {
+                ui.button_down(now);
+                manual_until = now + SCREEN_ON_MS;
+                awake_until = now + AWAKE_AFTER_ACTIVITY_MS;
+                next_view = 0;
             }
+            ui.tick(now);
+            if let Some(intent) = ui_button.poll(down, now)
+                && power_off_at.is_none()
+            {
+                manual_until = now + SCREEN_ON_MS;
+                next_view = 0;
+                match ui.press(intent, now) {
+                    Some(Action::PowerOff) => mesh.app.effects.power_off = true,
+                    Some(Action::Advert) => {
+                        let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "advert");
+                        ui.alert(Alert::AdvertSent, now);
+                    }
+                    Some(Action::ToggleUpdate) if ble_until.is_none() => {
+                        let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "start ota ble");
+                    }
+                    Some(Action::ToggleUpdate) if !BLE_CONNECTED.load(Ordering::Relaxed) => {
+                        (ble_until, ble_pin) = (None, None);
+                        ble::stop();
+                        println!("BLE update window closed with the button");
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            ui.tick(now);
+            let _ = ui_button.poll(down, now);
         }
         if has_screen {
             if oled_failures >= 10 {
@@ -1037,12 +1072,23 @@ where
                 board.screen_disable();
                 oled_failures = 0;
             }
-            if !ui.screen_on(now) {
-                if board.screen_is_on() {
-                    info!("OLED: screen off ({} failed I2C transfers since boot)", board.screen_bus_errors());
+            let show = if power_off_at.is_some() {
+                always_on || screen_mode != ScreenMode::Off
+            } else {
+                match screen_mode {
+                    ScreenMode::Auto => ui.screen_on(now),
+                    ScreenMode::Manual => if always_on { now < manual_until } else { ui.screen_on(now) },
+                    ScreenMode::Off => false,
                 }
-                board.screen_set_on(false);
-                screen.forget();
+            };
+            if !show {
+                if !always_on {
+                    if board.screen_is_on() {
+                        info!("OLED: screen off ({} failed I2C transfers since boot)", board.screen_bus_errors());
+                    }
+                    board.screen_set_on(false);
+                    screen.forget();
+                }
             } else if now >= next_view && now >= next_oled_try {
                 next_view = now + 250;
                 let info = ScreenInfo {
@@ -1261,6 +1307,10 @@ where
         if let Some(pin) = fx.start_ble_ota {
             ble_until = Some(now + BLE_OTA_WINDOW_MINS as u64 * 60_000);
             ble_pin = Some(pin);
+            if screen_mode != ScreenMode::Off {
+                ui.wake(now);
+                manual_until = now + SCREEN_ON_MS;
+            }
             next_view = 0;
             let params = ble::Params {
                 name: ota_ssid(&mesh.app.prefs.node_name),
@@ -1330,9 +1380,14 @@ where
         if fx.power_off && power_off_at.is_none() {
             println!("Powering off in {} s (the button turns it on again)...", POWER_OFF_DELAY_MS / 1000);
             power_off_at = Some(now + POWER_OFF_DELAY_MS);
-            ui.wake(now);
+            if screen_mode != ScreenMode::Off {
+                ui.wake(now);
+                manual_until = now + POWER_OFF_DELAY_MS;
+            }
             next_view = 0;
-            board.tx_led(true);
+            if mesh.app.prefs.led_enabled {
+                board.tx_led(true);
+            }
         }
         if power_off_at.is_some_and(|t| now >= t) {
             save(&store, Blob::Clock, &mesh.ctx.current_time().to_le_bytes());

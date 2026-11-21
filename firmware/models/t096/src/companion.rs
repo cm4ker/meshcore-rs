@@ -66,6 +66,10 @@ impl Board for T096 {
         self.set_lna(self.lna_enabled);
     }
 
+    fn tx_led(&mut self, on: bool) {
+        self.base.tx_led(on);
+    }
+
     fn lna_controllable(&self) -> bool {
         true
     }

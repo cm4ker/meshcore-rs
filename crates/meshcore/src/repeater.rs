@@ -300,6 +300,10 @@ pub struct BoardInfo {
     pub has_gps: bool,
     /// A speaker is wired to the board (`set buzzer`); false = this board has none.
     pub has_buzzer: bool,
+    /// A screen is wired to the board (`set screen`); false = this board has none.
+    pub has_screen: bool,
+    /// Software-controlled status/TX LED (`set led`); false = unsupported.
+    pub has_led: bool,
     /// The receiver's latest reading, kept by the firmware for the `gps` CLI; none while the
     /// receiver is off or silent.
     pub gps: Option<GpsReading>,
@@ -2279,6 +2283,16 @@ impl Repeater {
                 true => format!("> {}", onoff(!p.buzzer_quiet)),
                 false => "Error: unsupported".into(),
             }
+        } else if cfg.starts_with("screen") {
+            match self.board.has_screen {
+                true => format!("> {}", ScreenMode::from_code(p.screen_mode).name()),
+                false => "Error: unsupported".into(),
+            }
+        } else if cfg.starts_with("led") {
+            match self.board.has_led {
+                true => format!("> {}", onoff(p.led_enabled)),
+                false => "Error: unsupported".into(),
+            }
         } else if cfg.starts_with("pwrmgt.support") {
             "> unsupported".into()
         } else if cfg.starts_with("pwrmgt.source") || cfg.starts_with("pwrmgt.bootmv") {
@@ -2577,6 +2591,35 @@ impl Repeater {
                     self.prefs.buzzer_quiet = true;
                     self.save_prefs();
                     "OK - speaker off".into()
+                }
+                _ => "Error: on or off".into(),
+            }
+        } else if let Some(v) = cfg.strip_prefix("screen ") {
+            if !self.board.has_screen {
+                return "Error: this board has no screen".into();
+            }
+            match ScreenMode::parse(v.trim()) {
+                Some(mode) => {
+                    self.prefs.screen_mode = mode.code();
+                    self.save_prefs();
+                    format!("OK - screen {}", mode.name())
+                }
+                None => "Error: auto, manual or off".into(),
+            }
+        } else if let Some(v) = cfg.strip_prefix("led ") {
+            if !self.board.has_led {
+                return "Error: unsupported".into();
+            }
+            match v.trim() {
+                "on" | "1" => {
+                    self.prefs.led_enabled = true;
+                    self.save_prefs();
+                    "OK - LED on".into()
+                }
+                "off" | "0" => {
+                    self.prefs.led_enabled = false;
+                    self.save_prefs();
+                    "OK - LED off".into()
                 }
                 _ => "Error: on or off".into(),
             }

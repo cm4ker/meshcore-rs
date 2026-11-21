@@ -2,6 +2,7 @@
 //! its light, the GPS; the clock kept across resets and the bootloader's version, for the repeater.
 
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_nrf::gpio::{Input, Level, Output};
 use embassy_nrf::pac;
@@ -31,6 +32,9 @@ const PAGES: &[Page] = &[
 /// The button (P1.10) as a pin number in P1.
 const BUTTON_PIN: usize = 10;
 
+/// Suppresses the capacitive touch frontlight while `screen` is `off`.
+pub static BACKLIGHT_OFF: AtomicBool = AtomicBool::new(false);
+
 pub struct TEcho {
     /// Green LED, lit while transmitting (active low).
     pub tx_led: Output<'static>,
@@ -54,12 +58,8 @@ impl Board for TEcho {
         22
     }
 
-    fn on_tx_start(&mut self) {
-        self.tx_led.set_low();
-    }
-
-    fn on_tx_end(&mut self) {
-        self.tx_led.set_high();
+    fn tx_led(&mut self, on: bool) {
+        self.tx_led.set_level(if on { Level::Low } else { Level::High });
     }
 
     /// The screen task finishes the job: it draws the "off" page, then calls [`system_off`]
@@ -91,7 +91,12 @@ impl Board for TEcho {
     }
 
     fn show_view(&mut self, view: &View) {
+        BACKLIGHT_OFF.store(false, Ordering::Relaxed);
         SCREEN.signal(view.clone());
+    }
+
+    fn screen_off(&mut self) {
+        BACKLIGHT_OFF.store(true, Ordering::Relaxed);
     }
 
     fn has_gps(&self) -> bool {
@@ -114,7 +119,11 @@ pub async fn battery_mv(adc: &mut Saadc<'static, 1>, mv_per_lsb: f32) -> u16 {
 #[embassy_executor::task]
 pub async fn backlight_task(mut touch: Input<'static>, mut light: Output<'static>) {
     loop {
-        light.set_level(if touch.is_low() { Level::High } else { Level::Low });
+        light.set_level(if touch.is_low() && !BACKLIGHT_OFF.load(Ordering::Relaxed) {
+            Level::High
+        } else {
+            Level::Low
+        });
         touch.wait_for_any_edge().await;
     }
 }

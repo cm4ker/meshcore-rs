@@ -20,6 +20,49 @@ pub const LOOP_DETECT_MINIMAL: u8 = 1;
 pub const LOOP_DETECT_MODERATE: u8 = 2;
 pub const LOOP_DETECT_STRICT: u8 = 3;
 
+/// How a board's screen wakes (`set screen auto|manual|off`, the `screen` custom variable).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScreenMode {
+    /// Wake on boot, button press, new messages (companion) and update window.
+    #[default]
+    Auto = 0,
+    /// Wake only on button press (and BLE pairing PIN / power off); incoming messages do not light it.
+    Manual = 1,
+    /// Keep the screen off (except BLE pairing PIN while pairing).
+    Off = 2,
+}
+
+impl ScreenMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            ScreenMode::Auto => "auto",
+            ScreenMode::Manual => "manual",
+            ScreenMode::Off => "off",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "auto" | "on" | "1" => Some(ScreenMode::Auto),
+            "manual" => Some(ScreenMode::Manual),
+            "off" | "0" => Some(ScreenMode::Off),
+            _ => None,
+        }
+    }
+
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_code(v: u8) -> Self {
+        match v {
+            1 => ScreenMode::Manual,
+            2 => ScreenMode::Off,
+            _ => ScreenMode::Auto,
+        }
+    }
+}
+
 pub const NAME_MAX: usize = 32;
 pub const PASSWORD_MAX: usize = 16;
 pub const OWNER_INFO_MAX: usize = 120;
@@ -138,6 +181,10 @@ pub struct NodePrefs {
     /// it. On by default: a board may have no speaker soldered, and nobody is woken by a chirp
     /// they did not ask for.
     pub buzzer_quiet: bool,
+    /// How the screen wakes (`set screen auto|manual|off`, [`ScreenMode`]).
+    pub screen_mode: u8,
+    /// Software-controlled status/TX LEDs enabled (`set led on|off`); on by default.
+    pub led_enabled: bool,
 }
 
 impl Default for NodePrefs {
@@ -209,6 +256,8 @@ impl Default for NodePrefs {
             time_keys: Vec::new(),
             time_gateway: String::new(),
             buzzer_quiet: true, // a board may have no speaker soldered: silent until asked
+            screen_mode: ScreenMode::Auto.code(),
+            led_enabled: true,
         }
     }
 }
@@ -364,6 +413,8 @@ impl NodePrefs {
         let _ = writeln!(s, "time_keys={}", join_keys(&self.time_keys));
         let _ = writeln!(s, "time_gateway={}", self.time_gateway);
         let _ = writeln!(s, "buzzer_quiet={}", b(self.buzzer_quiet));
+        let _ = writeln!(s, "screen={}", self.screen_mode);
+        let _ = writeln!(s, "led={}", b(self.led_enabled));
         s
     }
 
@@ -451,6 +502,8 @@ impl NodePrefs {
                 "time_keys" => p.time_keys = parse_keys(v).unwrap_or_default(),
                 "time_gateway" => p.time_gateway = v.into(),
                 "buzzer_quiet" => p.buzzer_quiet = flag(),
+                "screen" => p.screen_mode = ScreenMode::from_code(u8v()).code(),
+                "led" => p.led_enabled = flag(),
                 _ => {}
             }
         }
@@ -532,8 +585,26 @@ mod tests {
         p.fw_channel = 1;
         p.fw_source = alloc::vec![0xCE, 0x5B, 0x93];
         p.gps_enabled = true;
+        p.screen_mode = ScreenMode::Manual.code();
+        p.led_enabled = false;
         let q = NodePrefs::deserialize(&p.serialize());
         assert_eq!(p, q);
+    }
+
+    #[test]
+    fn screen_mode_parse_and_codes() {
+        assert_eq!(ScreenMode::parse("auto"), Some(ScreenMode::Auto));
+        assert_eq!(ScreenMode::parse("on"), Some(ScreenMode::Auto));
+        assert_eq!(ScreenMode::parse("1"), Some(ScreenMode::Auto));
+        assert_eq!(ScreenMode::parse("manual"), Some(ScreenMode::Manual));
+        assert_eq!(ScreenMode::parse("off"), Some(ScreenMode::Off));
+        assert_eq!(ScreenMode::parse("0"), Some(ScreenMode::Off));
+        assert_eq!(ScreenMode::parse("bogus"), None);
+        for m in [ScreenMode::Auto, ScreenMode::Manual, ScreenMode::Off] {
+            assert_eq!(ScreenMode::from_code(m.code()), m);
+            assert_eq!(ScreenMode::parse(m.name()), Some(m));
+        }
+        assert_eq!(ScreenMode::from_code(99), ScreenMode::Auto);
     }
 
     #[test]

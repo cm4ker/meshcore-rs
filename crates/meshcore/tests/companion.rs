@@ -2311,3 +2311,52 @@ fn time_zone_in_quarter_hours_and_the_screen_clock() {
     let saved = CompanionPrefs::deserialize(&a.app.prefs.serialize(), 22);
     assert_eq!((saved.tz_offset, saved.ui_show_clock), (-7.5, true));
 }
+
+#[test]
+fn screen_and_led_settings_on_a_companion() {
+    use meshcore::prefs::ScreenMode;
+    let mut a = companion(1, "Alice");
+    let cli = |m: &mut Mesh<Companion>, s: &str| m.app.handle_command(&mut m.ctx, false, s);
+
+    // without screen/LED capability, both CLI and custom vars refuse
+    assert_eq!(cli(&mut a, "get screen"), "Error: unsupported");
+    assert_eq!(cli(&mut a, "set screen manual"), "Error: this board has no screen");
+    assert_eq!(cli(&mut a, "get led"), "Error: unsupported");
+    assert_eq!(cli(&mut a, "set led off"), "Error: unsupported");
+    assert_eq!(cmd(&mut a, b"\x29screen:manual")[0][0], RESP_CODE_ERR);
+    assert_eq!(cmd(&mut a, b"\x29led:0")[0][0], RESP_CODE_ERR);
+
+    a.app.board.has_screen = true;
+    a.app.board.has_led = true;
+    assert_eq!(cli(&mut a, "get screen"), "> auto");
+    assert_eq!(cli(&mut a, "get led"), "> on");
+    assert!(cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..].starts_with(b"screen:auto,led:1,"));
+
+    assert_eq!(cli(&mut a, "set screen manual"), "OK - screen manual");
+    assert!(a.app.take_effects().save_prefs);
+    assert_eq!(a.app.prefs.screen_mode, ScreenMode::Manual.code());
+    assert_eq!(cli(&mut a, "get screen"), "> manual");
+    assert_eq!(cli(&mut a, "set screen bogus"), "Error: auto, manual or off");
+
+    assert_eq!(cmd(&mut a, b"\x29screen:off")[0][0], RESP_CODE_OK);
+    assert!(a.app.take_effects().save_prefs);
+    assert_eq!(a.app.prefs.screen_mode, ScreenMode::Off.code());
+    assert_eq!(cmd(&mut a, b"\x29screen:bogus")[0][0], RESP_CODE_ERR);
+
+    assert_eq!(cli(&mut a, "set led off"), "OK - LED off");
+    assert!(a.app.take_effects().save_prefs);
+    assert!(!a.app.prefs.led_enabled);
+    assert_eq!(cli(&mut a, "get led"), "> off");
+    assert_eq!(cli(&mut a, "set led maybe"), "Error: on or off");
+    assert!(cmd(&mut a, &[CMD_GET_CUSTOM_VARS])[0][1..].starts_with(b"screen:off,led:0,"));
+
+    assert_eq!(cmd(&mut a, b"\x29led:1")[0][0], RESP_CODE_OK);
+    assert!(a.app.take_effects().save_prefs && a.app.prefs.led_enabled);
+    assert_eq!(cmd(&mut a, b"\x29led:off")[0][0], RESP_CODE_OK);
+    assert!(!a.app.prefs.led_enabled);
+    assert_eq!(cmd(&mut a, b"\x29led:2")[0][0], RESP_CODE_ERR);
+
+    let saved = CompanionPrefs::deserialize(&a.app.prefs.serialize(), 22);
+    assert_eq!(saved.screen_mode, ScreenMode::Off.code());
+    assert!(!saved.led_enabled);
+}

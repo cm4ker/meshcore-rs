@@ -441,6 +441,10 @@ pub struct Board {
     pub has_gps: bool,
     /// A speaker: its `buzzer` setting is offered to the app.
     pub has_buzzer: bool,
+    /// A screen: its `screen` setting (`auto`/`manual`/`off`) is offered to the app and CLI.
+    pub has_screen: bool,
+    /// Software-controlled status/TX LED: its `led` setting is offered to the app and CLI.
+    pub has_led: bool,
     /// The receiver's latest reading (`gps::publish` on the firmware), for the `gps` CLI; none
     /// while it is off or silent.
     pub gps: Option<GpsReading>,
@@ -486,6 +490,8 @@ impl Default for Board {
             wifi_ip: None,
             has_gps: false,
             has_buzzer: false,
+            has_screen: false,
+            has_led: false,
             gps: None,
             adc_multiplier: None,
             fem_lna_controllable: false,

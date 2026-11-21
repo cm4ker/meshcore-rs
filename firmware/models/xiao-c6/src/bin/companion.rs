@@ -65,12 +65,8 @@ impl Board for XiaoC6<'_> {
         22
     }
 
-    fn on_tx_start(&mut self) {
-        self.led.set_low();
-    }
-
-    fn on_tx_end(&mut self) {
-        self.led.set_high();
+    fn tx_led(&mut self, on: bool) {
+        self.led.set_level(if on { Level::Low } else { Level::High });
     }
 
     fn power_off(&mut self) {

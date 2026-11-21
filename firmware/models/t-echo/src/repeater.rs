@@ -228,7 +228,9 @@ pub async fn run(spawner: Spawner, parts: Parts) -> ! {
         // a firmware on trial that cannot use the radio counts as one that did not start
         let give_up = in_trial.then(|| now_ms() + 10_000);
         loop {
-            tx_led.toggle();
+            if prefs.led_enabled {
+                tx_led.toggle();
+            }
             Timer::after_millis(200).await;
             if let Some(w) = &mut watchdog {
                 w.pet();
@@ -300,6 +302,8 @@ pub async fn run(spawner: Spawner, parts: Parts) -> ! {
         ble_ota_name: sdc.is_some().then(|| ota_name(&prefs.node_name)),
         sensor_scan: sensors.scan.clone(),
         has_gps: true,
+        has_screen: true,
+        has_led: true,
         ..Default::default()
     };
     // the BLE task waits, switched off, for the update window
@@ -369,6 +373,7 @@ pub async fn run(spawner: Spawner, parts: Parts) -> ! {
         // hosted room server (the radio settings are the repeater's)
         let thr = mesh.app.prefs.interference_threshold as i16;
         let cad = mesh.app.prefs.cad_enabled;
+        let led_on = mesh.app.prefs.led_enabled;
         let mut transmitted = false;
         for m in core::iter::once(&mut mesh).chain(room.as_mut()) {
             if !m.tx_pending(now) {
@@ -388,7 +393,9 @@ pub async fn run(spawner: Spawner, parts: Parts) -> ! {
                     let _ = radio.set_frame_cr(frame.cr);
                 }
                 // DIO2 turns the antenna switch to TX
-                tx_led.set_low();
+                if led_on {
+                    tx_led.set_low();
+                }
                 let res = radio.transmit(frame.bytes(), frame.timeout_ms).await;
                 tx_led.set_high();
                 if frame.cr.is_some() {

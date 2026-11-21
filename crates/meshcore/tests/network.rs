@@ -811,3 +811,36 @@ fn bootloader_version_from_the_board() {
     r.app.board.bootloader_version = Some("0.9.2-OTAFIX2.2-BP1.3".into());
     assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get bootloader.ver"), "> 0.9.2-OTAFIX2.2-BP1.3");
 }
+
+#[test]
+fn screen_and_led_settings_on_a_repeater() {
+    use meshcore::prefs::{NodePrefs, ScreenMode};
+    let mut r = repeater(1);
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get screen"), "Error: unsupported");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set screen manual"), "Error: this board has no screen");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get led"), "Error: unsupported");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set led off"), "Error: unsupported");
+
+    r.app.board.has_screen = true;
+    r.app.board.has_led = true;
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get screen"), "> auto");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get led"), "> on");
+
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set screen manual"), "OK - screen manual");
+    assert!(r.app.take_effects().save_prefs);
+    assert_eq!(r.app.prefs.screen_mode, ScreenMode::Manual.code());
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get screen"), "> manual");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set screen off"), "OK - screen off");
+    assert_eq!(r.app.prefs.screen_mode, ScreenMode::Off.code());
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set screen bogus"), "Error: auto, manual or off");
+
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set led off"), "OK - LED off");
+    assert!(r.app.take_effects().save_prefs);
+    assert!(!r.app.prefs.led_enabled);
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get led"), "> off");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set led bogus"), "Error: on or off");
+
+    let saved = NodePrefs::deserialize(&r.app.prefs.serialize());
+    assert_eq!(saved.screen_mode, ScreenMode::Off.code());
+    assert!(!saved.led_enabled);
+}

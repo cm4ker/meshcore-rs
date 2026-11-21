@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use crate::prefs::{ADVERT_LOC_NONE, NAME_MAX, escape, unescape};
+use crate::prefs::{ADVERT_LOC_NONE, NAME_MAX, ScreenMode, escape, unescape};
 use crate::radio::RadioParams;
 use crate::release::{Fingerprint, join_fingerprints, parse_fingerprints};
 use crate::util::{Shortest, atof, atoi, atoi_signed, from_hex, to_hex, truncate_str};
@@ -113,6 +113,11 @@ pub struct CompanionPrefs {
     /// it, and marks nothing with it. On by default: a board may have no speaker soldered, and
     /// nobody is woken by a chirp they did not ask for.
     pub buzzer_quiet: bool,
+    /// How the screen wakes (`set screen auto|manual|off`, the `screen` custom variable).
+    pub screen_mode: u8,
+    /// Software-controlled status/TX LEDs enabled (`set led on|off`, the `led` custom variable);
+    /// on by default.
+    pub led_enabled: bool,
 }
 
 impl Default for CompanionPrefs {
@@ -167,6 +172,8 @@ impl Default for CompanionPrefs {
             time_keys: Vec::new(),
             time_gateway: String::new(),
             buzzer_quiet: true, // a board may have no speaker soldered: silent until asked
+            screen_mode: ScreenMode::Auto.code(),
+            led_enabled: true,
         }
     }
 }
@@ -250,6 +257,8 @@ impl CompanionPrefs {
         let _ = writeln!(s, "time_sync={}", self.time_sync);
         let _ = writeln!(s, "time_keys={}", crate::prefs::join_keys(&self.time_keys));
         let _ = writeln!(s, "time_gateway={}", self.time_gateway);
+        let _ = writeln!(s, "screen={}", self.screen_mode);
+        let _ = writeln!(s, "led={}", b(self.led_enabled));
         s
     }
 
@@ -324,6 +333,8 @@ impl CompanionPrefs {
                 "time_sync" => p.time_sync = crate::timesync::Mode::from_code(u8v()).code(),
                 "time_keys" => p.time_keys = crate::prefs::parse_keys(v).unwrap_or_default(),
                 "time_gateway" => p.time_gateway = v.into(),
+                "screen" => p.screen_mode = ScreenMode::from_code(u8v()).code(),
+                "led" => p.led_enabled = flag(),
                 _ => {}
             }
         }
@@ -345,6 +356,8 @@ mod tests {
             tz_offset: -5.75,
             ui_show_clock: true,
             fw_server: "server.lan:8095".into(),
+            screen_mode: ScreenMode::Manual.code(),
+            led_enabled: false,
             ..Default::default()
         };
         p.radio.freq_mhz = 869.525;
