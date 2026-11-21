@@ -53,6 +53,8 @@ pub mod board {
     pub const T3S3: u8 = 8;
     /// Heltec Mesh Node T096: nRF52840, SX1262 and KCT8103L FEM.
     pub const HELTEC_T096: u8 = 9;
+    /// Heltec MeshPocket with a 2.13-inch e-paper display.
+    pub const HELTEC_MESH_POCKET: u8 = 10;
 }
 
 /// What the image runs as.
@@ -169,12 +171,13 @@ pub fn board_name(board: u8) -> &'static str {
         board::HELTEC_T114 => "heltec-t114",
         board::T3S3 => "t3s3",
         board::HELTEC_T096 => "heltec-t096",
+        board::HELTEC_MESH_POCKET => "heltec-mesh-pocket",
         _ => "?",
     }
 }
 
 pub fn board_by_name(name: &str) -> Option<u8> {
-    [board::HELTEC_V4, board::HELTEC_V3, board::XIAO_C6, board::T_ECHO, board::PROMICRO, board::HELTEC_PAPER, board::HELTEC_T114, board::T3S3, board::HELTEC_T096]
+    [board::HELTEC_V4, board::HELTEC_V3, board::XIAO_C6, board::T_ECHO, board::PROMICRO, board::HELTEC_PAPER, board::HELTEC_T114, board::T3S3, board::HELTEC_T096, board::HELTEC_MESH_POCKET]
         .into_iter()
         .find(|&b| board_name(b) == name)
 }

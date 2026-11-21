@@ -134,8 +134,11 @@ pub fn enable() -> Result<(), u32> {
     // SAFETY: the address of our vector table
     unsafe { svc::<SD_SOFTDEVICE_VECTOR_TABLE_BASE_SET>(APP_VECTORS, 0, 0, 0) };
     crate::console::record_crash("BLE step: sd enable");
-    // the board has no 32 kHz crystal: the RC, calibrated every 4 s (Nordic's recommendation)
-    let lfclk: [u8; 4] = [0 /* RC */, 16, 2, 1 /* 500 ppm */];
+    let lfclk: [u8; 4] = if cfg!(feature = "mesh-pocket") {
+        [1 /* XTAL */, 0, 0, 0 /* 250 ppm */]
+    } else {
+        [0 /* RC */, 16, 2, 1 /* 500 ppm */]
+    };
     // SAFETY: the clock settings are copied; the fault handler lives forever
     let err = unsafe { svc::<SD_SOFTDEVICE_ENABLE>(lfclk.as_ptr() as u32, fault as *const () as u32, 0, 0) };
     if err != NRF_SUCCESS {

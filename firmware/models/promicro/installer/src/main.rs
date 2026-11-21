@@ -31,17 +31,18 @@ mod ota_layout;
 const DFU_MAGIC_UF2_RESET: u8 = 0x57;
 
 /// The LED, lit while installing: the Pro Micro's P0.15 (active high), the T114's P1.03 (active
-/// low), or the T096's P0.28 (active high).
+/// low), the T096's P0.28 (active high), or MeshPocket's P0.13 (active low).
 #[cfg(not(feature = "t114"))]
 mod led {
     use super::pac;
-    const PIN: usize = if cfg!(feature = "t096") { 28 } else { 15 };
+    const ACTIVE_LOW: bool = cfg!(feature = "mesh-pocket");
+    const PIN: usize = if ACTIVE_LOW { 13 } else if cfg!(feature = "t096") { 28 } else { 15 };
     pub fn on() {
-        pac::P0.outset().write(|w| w.set_pin(PIN, true));
+        pac::P0.out().modify(|w| w.set_pin(PIN, !ACTIVE_LOW));
         pac::P0.pin_cnf(PIN).write(|w| w.set_dir(pac::gpio::vals::Dir::Output));
     }
     pub fn off() {
-        pac::P0.outclr().write(|w| w.set_pin(PIN, true));
+        pac::P0.out().modify(|w| w.set_pin(PIN, ACTIVE_LOW));
     }
 }
 

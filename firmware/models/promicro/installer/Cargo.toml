@@ -12,6 +12,7 @@ swap = []
 t114 = []
 # the T096 flash layout and TX LED
 t096 = []
+mesh-pocket = []
 
 # the swap itself, tested on the host: cargo test --lib --target <host triple> (the plans with the
 # protocol core's: cargo test -p meshcore-inplace)

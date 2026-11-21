@@ -1,0 +1,7 @@
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+# with those of every board, in ../../../.cargo/config.toml (the compact SHA-2: 32 KiB less code,
+# which made room for the BLE window)
+rustflags = ["-C", "link-arg=--nmagic"]
