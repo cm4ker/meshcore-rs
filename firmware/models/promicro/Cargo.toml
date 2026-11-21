@@ -5,6 +5,8 @@ rust-version = "1.88"
 version      = "0.1.0"
 
 [features]
+default = ["nfc-pins-as-gpio"]
+nfc-pins-as-gpio = ["embassy-nrf/nfc-pins-as-gpio"]
 # SHTC3 / SHT4X hand drivers. Off by default: they are a couple of kilobytes the boards that have
 # those sensors turn on (`--features extra-sensors`), and the others do not need. Linear sensors
 # need no feature — add them with `sensor add`.
@@ -13,6 +15,8 @@ extra-sensors = ["meshcore-fw-core/extra-sensors"]
 t114 = []
 # the T096 flash layout and installer using its TX LED
 t096 = []
+# MeshPocket shares the compact T096 layout and uses its external LF crystal.
+mesh-pocket = []
 
 [lib]
 test = false
@@ -39,8 +43,7 @@ critical-section = { version = "1.2", features = ["restore-state-u8"] }
 cortex-m-rt = { version = "0.7.5", features = ["set-vtor"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
 embassy-time = "0.5.1"
-# nfc-pins-as-gpio: the radio's RESET and DIO1 sit on P0.09/P0.10, the NFC antenna pins
-embassy-nrf = { version = "0.11.0", features = ["nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac", "nfc-pins-as-gpio"] }
+embassy-nrf = { version = "0.11.0", features = ["nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac"] }
 embassy-usb = "0.6.0"
 embassy-futures = "0.1.2"
 embassy-sync = "0.8.0"

@@ -25,7 +25,15 @@ fn build_installer(out: &Path) {
     for f in ["installer/src", "installer/Cargo.toml", "installer/memory.x.in", "ota_layout.rs", "installer/build.rs", "installer/.cargo/config.toml", "../../../crates/inplace/src"] {
         println!("cargo:rerun-if-changed={f}");
     }
-    let features = if cfg!(feature = "t096") { "t096" } else if cfg!(feature = "t114") { "t114" } else { "swap" };
+    let features = if cfg!(feature = "mesh-pocket") {
+        "mesh-pocket"
+    } else if cfg!(feature = "t096") {
+        "t096"
+    } else if cfg!(feature = "t114") {
+        "t114"
+    } else {
+        "swap"
+    };
     let target_dir = out.join("installer-target");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);

@@ -133,7 +133,7 @@ where
     let flash = Flash::new(Nvmc::new(chip.nvmc));
     let [data, companion] = spec.companion_regions;
     let store = Store::with_regions(flash, data, Some(companion));
-    #[cfg(feature = "t096")]
+    #[cfg(any(feature = "t096", feature = "mesh-pocket"))]
     let store = store.with_data_from(meshcore_fw_core::storage::Blob::OtaTrial);
     let mut store = if spec.updates.is_some() {
         store.with_lending(crate::ota::COMPANION_ASIDE, spec.companion_before)
