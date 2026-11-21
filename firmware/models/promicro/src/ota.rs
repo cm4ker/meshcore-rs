@@ -48,9 +48,9 @@ use crate::flash::Flash;
 pub use crate::ota_layout::{APP_END, APP_START, INSTALLER, RECORD, SAVED_FIRST, SHIFT};
 use crate::ota_layout::{INSTALLER_END, STAGING, STAGING_END};
 
-#[cfg(not(feature = "t096"))]
+#[cfg(not(any(feature = "t096", feature = "mesh-pocket")))]
 pub use crate::{COMPANION_ASIDE, COMPANION_REGION};
-#[cfg(feature = "t096")]
+#[cfg(any(feature = "t096", feature = "mesh-pocket"))]
 pub use crate::ota_layout::{COMPANION_ASIDE, COMPANION_REGION, TRIAL_REGION};
 
 // the Pro Micro's layout before updates in place (installer/src/lib.rs)
