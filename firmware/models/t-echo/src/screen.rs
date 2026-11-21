@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
 use meshcore::mesh::Mesh;
+use meshcore::prefs::ScreenMode;
 use meshcore::repeater::Repeater;
 use meshcore::util::to_hex;
 use meshcore_fw_core::links::BLE_CONNECTED;
@@ -24,6 +25,8 @@ pub const PAGES: &[Page] =
 /// The page goes to the e-paper's task this often (its policy draws what changed, when due), and
 /// at once after a press.
 const VIEW_EVERY_MS: u64 = 1000;
+/// In Manual mode, allow e-paper updates for this long after a button press or update window.
+const MANUAL_ACTIVE_MS: u64 = 60_000;
 
 /// The repeater's interface: a click turns to the next page, a double click back, a long press
 /// acts on the page (an advert, the update window, power off on the home page).
@@ -31,6 +34,8 @@ pub struct RepeaterUi {
     ui: Ui,
     button: Button,
     next_view: u64,
+    manual_until: u64,
+    mode: Option<ScreenMode>,
     build_date: &'static str,
 }
 
@@ -38,30 +43,51 @@ impl RepeaterUi {
     /// `down`: the button is down at boot (its press woke the board): that press is spent.
     pub fn new(down: bool, build_date: &'static str) -> Self {
         let ui = Ui::new(PAGES).with_home_action(Action::PowerOff);
-        Self { ui, button: if down { Button::held() } else { Button::default() }, next_view: 0, build_date }
+        Self { ui, button: if down { Button::held() } else { Button::default() }, next_view: 0, manual_until: 0, mode: None, build_date }
     }
 
     /// One pass of the main loop: the button, then the page when it is due. An advert and power
     /// off are done here; the update window is the caller's ([`Action::ToggleUpdate`] comes back).
     pub fn poll(&mut self, mesh: &mut Mesh<Repeater>, down: bool, ble_window: Option<(u32, String, u64)>, now: u64) -> Option<Action> {
-        if down && !self.button.is_down() {
-            self.ui.button_down(now);
-            self.next_view = 0;
-        }
-        self.ui.tick(now);
-        let mut asked = None;
-        if let Some(intent) = self.button.poll(down, now) {
-            self.next_view = 0;
-            match self.ui.press(intent, now) {
-                Some(Action::PowerOff) => mesh.app.effects.power_off = true,
-                Some(Action::Advert) => {
-                    let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "advert");
-                    self.ui.alert(Alert::AdvertSent, now);
-                }
-                action => asked = action,
+        let mode = ScreenMode::from_code(mesh.app.prefs.screen_mode);
+        if self.mode.replace(mode) != Some(mode) {
+            crate::board::BACKLIGHT_OFF.store(mode == ScreenMode::Off, Ordering::Relaxed);
+            match mode {
+                ScreenMode::Off => self.manual_until = 0,
+                ScreenMode::Auto => self.next_view = 0,
+                ScreenMode::Manual => {}
             }
         }
-        if now >= self.next_view {
+        let mut asked = None;
+        if mode != ScreenMode::Off {
+            if down && !self.button.is_down() {
+                self.ui.button_down(now);
+                self.manual_until = now + MANUAL_ACTIVE_MS;
+                self.next_view = 0;
+            }
+            self.ui.tick(now);
+            if let Some(intent) = self.button.poll(down, now) {
+                self.manual_until = now + MANUAL_ACTIVE_MS;
+                self.next_view = 0;
+                match self.ui.press(intent, now) {
+                    Some(Action::PowerOff) => mesh.app.effects.power_off = true,
+                    Some(Action::Advert) => {
+                        let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "advert");
+                        self.ui.alert(Alert::AdvertSent, now);
+                    }
+                    action => asked = action,
+                }
+            }
+        } else {
+            self.ui.tick(now);
+            let _ = self.button.poll(down, now);
+        }
+        let show = match mode {
+            ScreenMode::Auto => true,
+            ScreenMode::Manual => now < self.manual_until,
+            ScreenMode::Off => false,
+        };
+        if show && now >= self.next_view {
             self.next_view = now + VIEW_EVERY_MS;
             SCREEN.signal(repeater_view(&mut self.ui, mesh, ble_window, now, self.build_date));
         }
@@ -70,8 +96,11 @@ impl RepeaterUi {
 
     /// Show a page at once (the update window opened).
     pub fn wake(&mut self, now: u64) {
-        self.ui.wake(now);
-        self.next_view = 0;
+        if self.mode != Some(ScreenMode::Off) {
+            self.ui.wake(now);
+            self.manual_until = now + MANUAL_ACTIVE_MS;
+            self.next_view = 0;
+        }
     }
 
     /// The "off" page, the last the e-paper shows: its task then turns the board off.

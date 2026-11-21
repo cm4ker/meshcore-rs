@@ -12,6 +12,7 @@ use core::sync::atomic::Ordering;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use meshcore::mesh::Mesh;
+use meshcore::prefs::ScreenMode;
 use meshcore::repeater::Repeater;
 use meshcore::util::to_hex;
 use meshcore_fw_core::links::BLE_CONNECTED;
@@ -37,13 +38,14 @@ pub struct RepeaterUi {
     screen: &'static Screen,
     next_view: u64,
     lit: bool,
+    mode: Option<ScreenMode>,
 }
 
 impl RepeaterUi {
     /// `down`: the button is down at boot (its press woke the board): that press is spent.
     pub fn new(down: bool, now: u64, screen: &'static Screen) -> Self {
         let ui = Ui::new(PAGES).with_home_action(Action::PowerOff).with_screen_timeout(SCREEN_ON_MS, now);
-        Self { ui, button: if down { Button::held() } else { Button::default() }, screen, next_view: 0, lit: false }
+        Self { ui, button: if down { Button::held() } else { Button::default() }, screen, next_view: 0, lit: false, mode: None }
     }
 
     /// One pass of the main loop: the button, then the page when it is due (four times a second
@@ -52,24 +54,46 @@ impl RepeaterUi {
     pub fn poll(
         &mut self, mesh: &mut Mesh<Repeater>, down: bool, ble_window: Option<(u32, String, u64)>, now: u64, build_date: &str,
     ) -> Option<Action> {
-        if down && !self.button.is_down() {
-            self.ui.button_down(now);
-            self.next_view = 0;
-        }
-        self.ui.tick(now);
-        let mut asked = None;
-        if let Some(intent) = self.button.poll(down, now) {
-            self.next_view = 0;
-            match self.ui.press(intent, now) {
-                Some(Action::PowerOff) => mesh.app.effects.power_off = true,
-                Some(Action::Advert) => {
-                    let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "advert");
-                    self.ui.alert(Alert::AdvertSent, now);
+        let mode = ScreenMode::from_code(mesh.app.prefs.screen_mode);
+        match self.mode.replace(mode) {
+            None => {
+                if mode != ScreenMode::Auto {
+                    self.ui.sleep();
                 }
-                action => asked = action,
             }
+            Some(prev) if prev != mode => match mode {
+                ScreenMode::Off => self.ui.sleep(),
+                ScreenMode::Auto => {
+                    self.ui.wake(now);
+                    self.next_view = 0;
+                }
+                ScreenMode::Manual => {}
+            },
+            _ => {}
         }
-        if !self.ui.screen_on(now) {
+        let mut asked = None;
+        if mode != ScreenMode::Off {
+            if down && !self.button.is_down() {
+                self.ui.button_down(now);
+                self.next_view = 0;
+            }
+            self.ui.tick(now);
+            if let Some(intent) = self.button.poll(down, now) {
+                self.next_view = 0;
+                match self.ui.press(intent, now) {
+                    Some(Action::PowerOff) => mesh.app.effects.power_off = true,
+                    Some(Action::Advert) => {
+                        let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "advert");
+                        self.ui.alert(Alert::AdvertSent, now);
+                    }
+                    action => asked = action,
+                }
+            }
+        } else {
+            self.ui.tick(now);
+            let _ = self.button.poll(down, now);
+        }
+        if mode == ScreenMode::Off || !self.ui.screen_on(now) {
             if self.lit {
                 self.screen.signal(None);
                 self.lit = false;
@@ -84,8 +108,10 @@ impl RepeaterUi {
 
     /// Light the screen (an update window opened).
     pub fn wake(&mut self, now: u64) {
-        self.ui.wake(now);
-        self.next_view = 0;
+        if self.mode != Some(ScreenMode::Off) {
+            self.ui.wake(now);
+            self.next_view = 0;
+        }
     }
 }
 
@@ -187,6 +213,10 @@ pub struct Extras {
 impl crate::repeater_app::Extras for Extras {
     fn has_buzzer(&self) -> bool {
         self.buzzer
+    }
+
+    fn has_screen(&self) -> bool {
+        self.ui.is_some()
     }
 
     fn boot_sound(&mut self, on: bool) {

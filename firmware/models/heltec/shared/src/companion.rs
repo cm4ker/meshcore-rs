@@ -64,12 +64,14 @@ impl<V: Variant> Board for Heltec<'_, V> {
 
     fn on_tx_start(&mut self) {
         self.fem.tx_mode();
-        self.led.set_high();
     }
 
     fn on_tx_end(&mut self) {
-        self.led.set_low();
         self.fem.rx_mode();
+    }
+
+    fn tx_led(&mut self, on: bool) {
+        self.led.set_level(if on { Level::High } else { Level::Low });
     }
 
     fn lna_controllable(&self) -> bool {

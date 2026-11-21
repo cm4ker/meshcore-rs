@@ -181,13 +181,19 @@ impl Board for ProMicro {
         if let Some(r) = &mut self.rxen {
             r.set_low();
         }
-        self.led.on();
     }
 
     fn on_tx_end(&mut self) {
-        self.led.off();
         if let Some(r) = &mut self.rxen {
             r.set_high();
+        }
+    }
+
+    fn tx_led(&mut self, on: bool) {
+        if on {
+            self.led.on();
+        } else {
+            self.led.off();
         }
     }
 

@@ -50,6 +50,10 @@ impl Board for T114 {
         self.base.on_tx_end();
     }
 
+    fn tx_led(&mut self, on: bool) {
+        self.base.tx_led(on);
+    }
+
     fn power_off(&mut self) {
         crate::board::system_off();
     }

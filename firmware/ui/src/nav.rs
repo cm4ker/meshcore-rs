@@ -100,6 +100,11 @@ impl Ui {
         }
     }
 
+    /// Put a timed screen dark at once; it stays dark until [`Self::wake`] or [`Self::button_down`].
+    pub fn sleep(&mut self) {
+        self.lit_until = 0;
+    }
+
     pub fn screen_on(&self, now: u64) -> bool {
         self.lit_ms.is_none() || now < self.lit_until
     }
@@ -178,5 +183,15 @@ mod tests {
         ui.button_down(10_000_000);
         assert_eq!(ui.press(Intent::Next, 10_000_300), None);
         assert_eq!(ui.page(), Page::Neighbours);
+    }
+
+    #[test]
+    fn sleep_puts_a_timed_screen_dark_at_once() {
+        let mut ui = Ui::new(PAGES).with_screen_timeout(60_000, 1_000);
+        assert!(ui.screen_on(1_000));
+        ui.sleep();
+        assert!(!ui.screen_on(1_000));
+        ui.wake(1_000);
+        assert!(ui.screen_on(1_000));
     }
 }

@@ -90,6 +90,11 @@ pub trait Extras {
         false
     }
 
+    /// A screen is wired (`set screen` is offered).
+    fn has_screen(&self) -> bool {
+        false
+    }
+
     /// The firmware started: a boot chirp if the node is not muted (`on`), and a board with a
     /// speaker sounds it.
     fn boot_sound(&mut self, _on: bool) {}
@@ -280,7 +285,9 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
         // a firmware on trial that cannot use the radio counts as one that did not start
         let give_up = in_trial.then(|| now_ms() + 10_000);
         loop {
-            led.toggle();
+            if prefs.led_enabled {
+                led.toggle();
+            }
             Timer::after_millis(200).await;
             if let Some(w) = &mut watchdog {
                 w.pet();
@@ -354,6 +361,8 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
         sensor_scan: sensors.scan.clone(),
         has_gps: extras.has_gps(),
         has_buzzer: extras.has_buzzer(),
+        has_screen: extras.has_screen(),
+        has_led: true,
         ..Default::default()
     };
     if sd::present() {
@@ -422,6 +431,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
         // hosted room server (the radio settings are the repeater's)
         let thr = mesh.app.prefs.interference_threshold as i16;
         let cad = mesh.app.prefs.cad_enabled;
+        let led_on = mesh.app.prefs.led_enabled;
         let mut transmitted = false;
         for m in core::iter::once(&mut mesh).chain(room.as_mut()) {
             if !m.tx_pending(now) {
@@ -444,7 +454,9 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
                 if let Some(r) = &mut rxen {
                     r.set_low();
                 }
-                led.on();
+                if led_on {
+                    led.on();
+                }
                 let res = radio.transmit(frame.bytes(), frame.timeout_ms).await;
                 led.off();
                 if let Some(r) = &mut rxen {

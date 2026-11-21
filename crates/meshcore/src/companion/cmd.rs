@@ -4,6 +4,7 @@ use alloc::format;
 
 use super::*;
 use crate::fwstate::{self, FwState};
+use crate::prefs::ScreenMode;
 use crate::util::{Fixed, atof, atoi, ftoa};
 use crate::ota::{OtaEndpoint, OtaOutcome};
 use crate::{FIRMWARE_VERSION, MAX_GROUP_DATA_LENGTH, SIGNATURE_SIZE};
@@ -685,6 +686,33 @@ impl Companion {
                         self.effects.save_prefs = true;
                         self.write_ok();
                     }
+                    b"screen" if self.board.has_screen => {
+                        let value = core::str::from_utf8(value).unwrap_or("").trim();
+                        match ScreenMode::parse(value) {
+                            Some(mode) => {
+                                self.prefs.screen_mode = mode.code();
+                                self.effects.save_prefs = true;
+                                self.write_ok();
+                            }
+                            None => self.write_err(ERR_CODE_ILLEGAL_ARG),
+                        }
+                    }
+                    b"led" if self.board.has_led => {
+                        let value = core::str::from_utf8(value).unwrap_or("").trim();
+                        match value {
+                            "1" | "on" => {
+                                self.prefs.led_enabled = true;
+                                self.effects.save_prefs = true;
+                                self.write_ok();
+                            }
+                            "0" | "off" => {
+                                self.prefs.led_enabled = false;
+                                self.effects.save_prefs = true;
+                                self.write_ok();
+                            }
+                            _ => self.write_err(ERR_CODE_ILLEGAL_ARG),
+                        }
+                    }
                     b"time_sync" => {
                         let value = core::str::from_utf8(value).unwrap_or("").trim();
                         match self.time_command(ctx, value) {
@@ -1022,6 +1050,12 @@ impl Companion {
         }
         if self.board.has_buzzer {
             vars.push(alloc::format!("buzzer:{}", !self.prefs.buzzer_quiet as u8));
+        }
+        if self.board.has_screen {
+            vars.push(alloc::format!("screen:{}", ScreenMode::from_code(self.prefs.screen_mode).name()));
+        }
+        if self.board.has_led {
+            vars.push(alloc::format!("led:{}", self.prefs.led_enabled as u8));
         }
         vars.push(fps("fw_root", &self.prefs.ota_roots));
         vars.push(fps("fw_owner", &self.prefs.ota_owners));
@@ -1504,6 +1538,44 @@ impl Companion {
             p.ui_show_clock = atoi(v.trim()) != 0;
             self.effects.save_prefs = true;
             format!("> now {}", p.ui_show_clock as u8)
+        } else if cmd == "get screen" {
+            match self.board.has_screen {
+                true => format!("> {}", ScreenMode::from_code(p.screen_mode).name()),
+                false => "Error: unsupported".into(),
+            }
+        } else if let Some(v) = cmd.strip_prefix("set screen ") {
+            if !self.board.has_screen {
+                "Error: this board has no screen".into()
+            } else if let Some(mode) = ScreenMode::parse(v.trim()) {
+                p.screen_mode = mode.code();
+                self.effects.save_prefs = true;
+                format!("OK - screen {}", mode.name())
+            } else {
+                "Error: auto, manual or off".into()
+            }
+        } else if cmd == "get led" {
+            match self.board.has_led {
+                true => format!("> {}", if p.led_enabled { "on" } else { "off" }),
+                false => "Error: unsupported".into(),
+            }
+        } else if let Some(v) = cmd.strip_prefix("set led ") {
+            if !self.board.has_led {
+                "Error: unsupported".into()
+            } else {
+                match v.trim() {
+                    "on" | "1" => {
+                        p.led_enabled = true;
+                        self.effects.save_prefs = true;
+                        "OK - LED on".into()
+                    }
+                    "off" | "0" => {
+                        p.led_enabled = false;
+                        self.effects.save_prefs = true;
+                        "OK - LED off".into()
+                    }
+                    _ => "Error: on or off".into(),
+                }
+            }
         } else {
             let v = cmd.strip_prefix("set tz.offset ")?;
             let tz = atof(v) as f32;

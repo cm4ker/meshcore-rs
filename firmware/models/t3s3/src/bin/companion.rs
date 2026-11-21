@@ -80,12 +80,8 @@ impl Board for T3S3<'_> {
         TX_DBM
     }
 
-    fn on_tx_start(&mut self) {
-        self.led.set_high();
-    }
-
-    fn on_tx_end(&mut self) {
-        self.led.set_low();
+    fn tx_led(&mut self, on: bool) {
+        self.led.set_level(if on { Level::High } else { Level::Low });
     }
 
     async fn battery_mv(&mut self) -> u16 {

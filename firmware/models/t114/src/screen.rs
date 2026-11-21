@@ -22,6 +22,10 @@ impl promicro::repeater_app::Extras for Extras {
         true
     }
 
+    fn has_screen(&self) -> bool {
+        true
+    }
+
     fn set_gps(&mut self, on: bool) {
         crate::gps::GPS_ON.signal(on);
     }

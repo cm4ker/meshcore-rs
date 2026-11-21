@@ -54,12 +54,8 @@ impl Board for Paper {
         MAX_TX_POWER_DBM
     }
 
-    fn on_tx_start(&mut self) {
-        self.led.set_high();
-    }
-
-    fn on_tx_end(&mut self) {
-        self.led.set_low();
+    fn tx_led(&mut self, on: bool) {
+        self.led.set_level(if on { Level::High } else { Level::Low });
     }
 
     /// The e-paper task draws the "off" page first; then deep sleep until the button.
