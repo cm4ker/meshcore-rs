@@ -29,8 +29,8 @@ lora_max=163840
 lora_room() {
   case "$1" in
     promicro-*) if [ "${2##*-r}" -le 62 ]; then local img; img=$(stat -c %s "images/$1.bin"); echo $(( 385024 - (img + 4095) / 4096 * 4096 )); else echo "$lora_max"; fi ;;
-    # OtaEndpoint::delta_room reserves a third of the T096's 224 KiB staging area.
-    heltec-t096-*) echo $(( 229376 / 3 * 2 )) ;;
+    # OtaEndpoint::delta_room reserves a third of the T096/MeshPocket 224 KiB staging area.
+    heltec-t096-*|heltec-mesh-pocket-*) echo $(( 229376 / 3 * 2 )) ;;
     *) echo "$lora_max" ;;
   esac
 }
@@ -52,6 +52,14 @@ for mcfw in out/*.mcfw; do
   for tag in $tags; do
     base=$(printf '%s\n' "${assets[$tag]}" | grep -E "^$name-.*\.mcfw$" | head -1 || true)
     [ -n "$base" ] || continue
+    # In-place nRF52840 releases before the 0.9.0-dev.13 bridge (r142..=r167) require both forward
+    # and rollback plans to fit in staging simultaneously, so they cannot jump straight to the
+    # shrunk nightly/build-std images; omit those deltas so they step through 0.9.0-dev.13 first.
+    case "$name" in
+      promicro-*|heltec-t114-*|heltec-t096-*|heltec-mesh-pocket-*)
+        rel=${tag##*-r}
+        [ "$rel" -ge 142 ] && [ "$rel" -le 167 ] && continue ;;
+    esac
     is_stable=0
     [[ "$stable_tags" == *" $tag "* ]] && is_stable=1
     if [ "$n" -lt 3 ] || { [ "$MCFW_CHANNEL" = stable ] && [ "$is_stable" = 1 ] && [ "$s" -lt 2 ]; }; then
