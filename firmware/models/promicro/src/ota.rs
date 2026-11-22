@@ -270,6 +270,16 @@ struct InPlaceTarget<const LENDS: bool> {
     store: SharedStore<Flash>,
 }
 
+/// Outcome of writing and verifying the reverse (rollback) plan beside the forward plan.
+enum PlanBack {
+    /// Reverse plan written and verified against the running firmware.
+    Ready,
+    /// Forward plan is valid, but `forward + reverse` does not fit in the staging area.
+    NoRoom,
+    /// Heap, flash, or verification error: do not install.
+    Failed,
+}
+
 impl<const LENDS: bool> InPlaceTarget<LENDS> {
     /// The staging area is the update's from here on.
     fn claim(&mut self) -> bool {
@@ -316,16 +326,31 @@ impl<const LENDS: bool> InPlaceTarget<LENDS> {
 
     /// The plan back from the image the staged plan makes to the running firmware, written after
     /// it and checked: made from the new image (as the plan makes it), it must hash as the running
-    /// firmware does. `false`: no room for it, or it does not hold together.
-    fn plan_back(&mut self, plan: &Header) -> bool {
+    /// firmware does. Returns [`PlanBack::NoRoom`] when the forward plan is valid but there is not
+    /// enough staging room for a rollback plan beside it (large toolchain/layout jumps).
+    fn plan_back(&mut self, plan: &Header) -> PlanBack {
         let (forward, old_len) = (flash_bytes(STAGING, plan.len), plan.old_len);
-        let old_sha = sha256_at(APP_START, old_len);
         let at = back_at(plan);
         let room = self.capacity();
+        // Clear any stale plan header at `at` whenever we give up on writing a rollback plan, so
+        // `way_back()` after reboot can never mistake leftover staging bytes for a valid plan.
+        let clear_header = |store: &mut NrfStore| {
+            let start = STAGING + at;
+            if start + PAGE <= STAGING + room && flash_bytes(start, 4) != [0xFF; 4] {
+                feed_watchdog();
+                let _ = NorFlash::erase(store.flash(), start, start + PAGE);
+            }
+        };
+        if at + PAGE >= room {
+            log::warn!("OTA: back plan overflow (at={at}, room={room})");
+            clear_header(&mut self.store.borrow_mut());
+            return PlanBack::NoRoom;
+        }
+        let old_sha = sha256_at(APP_START, old_len);
         let mut store = self.store.borrow_mut();
         // the records from the plan back's second page on, a sector at a time
-        let (mut sector, mut written, mut ok) = (Vec::with_capacity(PAGE as usize), 0u32, true);
-        let mut put = |r: &[u8], sector: &mut Vec<u8>, written: &mut u32, flush: bool| -> bool {
+        let (mut sector, mut written, mut ok, mut no_room) = (Vec::with_capacity(PAGE as usize), 0u32, true, false);
+        let mut put = |r: &[u8], sector: &mut Vec<u8>, written: &mut u32, no_room: &mut bool, flush: bool| -> bool {
             let mut r = r;
             while !r.is_empty() || (flush && !sector.is_empty()) {
                 let n = r.len().min(PAGE as usize - sector.len());
@@ -337,6 +362,7 @@ impl<const LENDS: bool> InPlaceTarget<LENDS> {
                     feed_watchdog();
                     if to + PAGE > STAGING + room {
                         log::warn!("OTA: back plan overflow (at={at}, written={}, room={room})", *written);
+                        *no_room = true;
                         return false;
                     }
                     if NorFlash::erase(store.flash(), to, to + PAGE).is_err() {
@@ -354,48 +380,53 @@ impl<const LENDS: bool> InPlaceTarget<LENDS> {
             true
         };
         let first = meshcore_inplace::reverse(forward, flash_bytes(APP_START, old_len), old_sha, &mut |r| {
-            ok = ok && put(r, &mut sector, &mut written, false);
+            ok = ok && put(r, &mut sector, &mut written, &mut no_room, false);
             ok
         });
+        if no_room {
+            clear_header(&mut store);
+            return PlanBack::NoRoom;
+        }
         let Some(first) = first else {
             if ok {
                 log::warn!("OTA: reverse plan failed (out of heap?)");
             }
-            return false;
+            return PlanBack::Failed;
         };
-        if !ok || !put(&[], &mut sector, &mut written, true) {
-            return false;
+        if !ok || !put(&[], &mut sector, &mut written, &mut no_room, true) {
+            if no_room {
+                clear_header(&mut store);
+                return PlanBack::NoRoom;
+            }
+            return PlanBack::Failed;
         }
         let start = STAGING + at;
-        if start + PAGE > STAGING + room {
-            log::warn!("OTA: back plan header overflow (at={at}, room={room})");
-            return false;
-        }
         if NorFlash::erase(store.flash(), start, start + PAGE).is_err() {
             log::warn!("OTA: back plan header erase failed at {start:#x}");
-            return false;
+            return PlanBack::Failed;
         }
         if NorFlash::write(store.flash(), start, &first).is_err() {
             log::warn!("OTA: back plan header write failed at {start:#x}");
-            return false;
+            return PlanBack::Failed;
         }
         drop(store);
         // made from the new image as the plan makes it, the plan back must give this firmware
         let Some((back, back_plan)) = plan_at(at) else {
             log::warn!("OTA: back plan header unreadable at {start:#x}");
-            return false;
+            return PlanBack::Failed;
         };
         let Some(mut new_image) = Rebuilt::new(forward, running) else {
             log::warn!("OTA: forward plan unreadable during back check");
-            return false;
+            return PlanBack::Failed;
         };
         let mut hash = Sha256::new();
         let made = make_all(&back, back_plan, &mut |at, out| new_image.read(at, out), |_, page| hash.update(page));
         let verified = made.is_some() && hash.finalize()[..] == old_sha;
         if !verified {
             log::warn!("OTA: back plan verification failed");
+            return PlanBack::Failed;
         }
-        verified
+        PlanBack::Ready
     }
 }
 
@@ -463,16 +494,29 @@ impl<const LENDS: bool> FirmwareTarget for InPlaceTarget<LENDS> {
             log::warn!("OTA: the plan does not make the image it should");
             return false;
         };
-        if !self.plan_back(&plan) {
-            log::warn!("OTA: no room for the way back beside the plan (or it does not hold together): not installed");
-            return false;
-        }
+        let has_back = match self.plan_back(&plan) {
+            PlanBack::Ready => true,
+            PlanBack::NoRoom => {
+                log::warn!("OTA: no room for rollback plan beside update; installing without rollback");
+                false
+            }
+            PlanBack::Failed => {
+                log::warn!("OTA: rollback plan failed: not installed");
+                return false;
+            }
+        };
         let own = own();
         let mut store = self.store.borrow_mut();
-        // the update runs on trial; the plan back is the way to this firmware, should it fail
-        let record = FwRecord { trial: Some(0), skip: FwRecord::load(&mut store).skip, trial_hash, ..FwRecord::left(own) };
+        let skip = FwRecord::load(&mut store).skip;
+        let record = if has_back {
+            // the update runs on trial; the plan back is the way to this firmware, should it fail
+            FwRecord { trial: Some(0), skip, trial_hash, ..FwRecord::left(own) }
+        } else {
+            // large jump whose forward plan filled staging: SHA-256 verified, no rollback plan fits
+            FwRecord { skip, ..FwRecord::default() }
+        };
         if !record.save(&mut store) {
-            log::warn!("OTA: no room to record the trial");
+            log::warn!("OTA: no room to record the update");
             return false;
         }
         if !plan_request(&mut store, 0, plan.len, plan.old_len) {
