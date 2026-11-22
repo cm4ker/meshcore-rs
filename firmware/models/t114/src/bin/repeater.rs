@@ -15,7 +15,7 @@ use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::{bind_interrupts, config, peripherals, saadc, spim, twim, usb};
 use embassy_time::Instant;
-use embedded_alloc::LlffHeap as Heap;
+use promicro::console::Heap;
 use promicro::repeater_app::{self, Chip};
 use promicro::{Spec, console, sd};
 use t114::screen::{Extras, RepeaterUi};
@@ -48,10 +48,7 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[cortex_m_rt::exception]
 unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
-    let mut s: heapless::String<120> = heapless::String::new();
-    let _ = core::fmt::write(&mut s, format_args!("hard fault at pc {:#010x} lr {:#010x}", frame.pc(), frame.lr()));
-    console::record_crash(&s);
-    cortex_m::peripheral::SCB::sys_reset()
+    console::record_hard_fault(frame)
 }
 
 #[embassy_executor::main]

@@ -94,9 +94,9 @@ pub fn enabled() -> bool {
 
 /// The SoftDevice asserted (or a protected memory was touched): note it for the next start.
 extern "C" fn fault(id: u32, pc: u32, info: u32) {
-    let mut s: heapless::String<120> = heapless::String::new();
-    let _ = core::fmt::write(&mut s, format_args!("SoftDevice fault {id:#x} at pc {pc:#x} info {info:#x}"));
-    crate::console::record_crash(&s);
+    let mut buf = [0u8; 120];
+    let text = meshcore_fw_core::crash::format_softdevice_fault(id, pc, info, meshcore::release::release_counter(), &mut buf);
+    crate::console::record_crash(text);
     cortex_m::peripheral::SCB::sys_reset()
 }
 

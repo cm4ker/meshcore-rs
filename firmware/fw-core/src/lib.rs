@@ -9,6 +9,7 @@
 extern crate alloc;
 
 pub mod companion;
+pub mod crash;
 pub mod frames;
 pub mod fwtext;
 pub mod gps;

@@ -8,7 +8,7 @@ use embassy_executor::Spawner;
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::temp::{self, Temp};
 use embassy_nrf::{bind_interrupts, config, peripherals, saadc, spim, twim, usb};
-use embedded_alloc::LlffHeap as Heap;
+use promicro::console::Heap;
 use mesh_pocket::companion::{MeshPocket, power_off_task};
 use mesh_pocket::{board, epaper};
 use promicro::companion::ProMicro;
@@ -41,17 +41,7 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[cortex_m_rt::exception]
 unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
-    let mut message = heapless::String::<120>::new();
-    let _ = core::fmt::write(
-        &mut message,
-        format_args!(
-            "hard fault at pc {:#010x} lr {:#010x}",
-            frame.pc(),
-            frame.lr()
-        ),
-    );
-    console::record_crash(&message);
-    cortex_m::peripheral::SCB::sys_reset()
+    console::record_hard_fault(frame)
 }
 
 #[embassy_executor::main]

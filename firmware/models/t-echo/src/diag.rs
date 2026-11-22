@@ -6,6 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -83,4 +84,44 @@ pub fn panic_text(info: &core::panic::PanicInfo) -> heapless::String<120> {
         let _ = write!(s, " at {}:{}", l.file().rsplit(['/', '\\']).next().unwrap_or(""), l.line());
     }
     s
+}
+
+static LAST_OOM: AtomicUsize = AtomicUsize::new(0);
+
+/// Wrapper around `embedded_alloc::LlffHeap` that remembers the size of a failed allocation until
+/// the next successful alloc/dealloc so [`record_hard_fault`] tags fatal OOM traps as `E02`.
+pub struct Heap(embedded_alloc::LlffHeap);
+
+impl Heap {
+    pub const fn empty() -> Self {
+        Self(embedded_alloc::LlffHeap::empty())
+    }
+
+    /// # Safety
+    /// Same requirements as [`embedded_alloc::LlffHeap::init`].
+    pub unsafe fn init(&self, start_addr: usize, size: usize) {
+        unsafe { self.0.init(start_addr, size) }
+    }
+}
+
+unsafe impl core::alloc::GlobalAlloc for Heap {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let p = unsafe { self.0.alloc(layout) };
+        LAST_OOM.store(if p.is_null() { layout.size().max(1) } else { 0 }, Ordering::Relaxed);
+        p
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        LAST_OOM.store(0, Ordering::Relaxed);
+        unsafe { self.0.dealloc(ptr, layout) };
+    }
+}
+
+/// Record a `HardFault` (including `-C panic=immediate-abort` traps) as a compact error code
+/// (`E01`–`E07`, see `meshcore_fw_core::crash`) and reset.
+#[inline(never)]
+pub fn record_hard_fault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
+    let oom = LAST_OOM.swap(0, Ordering::Relaxed);
+    meshcore_fw_core::crash::record_arm_hard_fault(frame.pc(), frame.lr(), 0x0002_6000..0x0010_0000, oom, record_crash);
+    cortex_m::peripheral::SCB::sys_reset()
 }

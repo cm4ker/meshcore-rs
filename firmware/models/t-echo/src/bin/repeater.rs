@@ -28,7 +28,7 @@ use embassy_nrf::{bind_interrupts, config, peripherals, usb};
 use embassy_time::Timer;
 use embassy_usb::Builder;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
-use embedded_alloc::LlffHeap as Heap;
+use t_echo::diag::Heap;
 use log::warn;
 use meshcore_fw_core::radio::WaitIrq;
 use meshcore_fw_core::storage::Store;
@@ -98,10 +98,7 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[cortex_m_rt::exception]
 unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
-    let mut s: heapless::String<120> = heapless::String::new();
-    let _ = core::fmt::write(&mut s, format_args!("hard fault at pc {:#010x} lr {:#010x}", frame.pc(), frame.lr()));
-    diag::record_crash(&s);
-    cortex_m::peripheral::SCB::sys_reset()
+    diag::record_hard_fault(frame)
 }
 
 #[embassy_executor::main]

@@ -12,7 +12,7 @@ use embassy_executor::Spawner;
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::temp::{self, Temp};
 use embassy_nrf::{bind_interrupts, config, peripherals, saadc, spim, twim, usb};
-use embedded_alloc::LlffHeap as Heap;
+use promicro::console::Heap;
 use promicro::companion::ProMicro;
 use promicro::companion_app::{self, Chip};
 use promicro::{Spec, board, console, sd};
@@ -29,7 +29,7 @@ static SPEC: Spec = Spec {
     usb: board::USB_ID,
     batt_mv_per_lsb: board::BATT_MV_PER_LSB,
     system_off: board::system_off,
-    updates: Some(&promicro::ota::IN_PLACE_AFTER_SWAP),
+    updates: Some(promicro::ota::IN_PLACE_AFTER_SWAP),
     companion_regions: promicro::COMPANION_REGIONS,
     companion_tx_dbm: 22,
     companion_before: Some(promicro::COMPANION_BEFORE),
@@ -57,10 +57,7 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[cortex_m_rt::exception]
 unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
-    let mut s: heapless::String<120> = heapless::String::new();
-    let _ = core::fmt::write(&mut s, format_args!("hard fault at pc {:#010x} lr {:#010x}", frame.pc(), frame.lr()));
-    console::record_crash(&s);
-    cortex_m::peripheral::SCB::sys_reset()
+    console::record_hard_fault(frame)
 }
 
 #[embassy_executor::main]
