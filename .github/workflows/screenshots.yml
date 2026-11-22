@@ -30,7 +30,7 @@ jobs:
             ./MeshCore &
             for i in {1..30}; do id=$(wmctrl -l | grep -i meshcore | cut -d" " -f1 | head -1); test -n "$id" && break; sleep 1; done
             wmctrl -lpG
-            xwininfo -root -tree
+            # Capture the mapped window once its controls have rendered.
             test -n "$id"
             sleep 2
             import -window "$id" "$PLATFORM.png"'
