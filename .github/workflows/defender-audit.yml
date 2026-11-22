@@ -11,15 +11,21 @@ jobs:
       - shell: powershell
         run: |
           $ErrorActionPreference='Stop'
+          Set-MpPreference -DisableRealtimeMonitoring $false
+          Start-Sleep 5
           Get-MpComputerStatus | Format-List AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,AntivirusSignatureVersion,AntivirusSignatureLastUpdated
           $prefs=Get-MpPreference
           if ($prefs.ThreatIDDefaultAction_Ids -contains 2147731250) { throw 'Unexpected local rule' }
-          $path=Join-Path $env:RUNNER_TEMP 'ota-app-1.1-Windows-x86-x64.exe'
+          $dir=New-Item -ItemType Directory C:/ota-release-audit
+          $path=Join-Path $dir.FullName 'ota-app-1.1-Windows-x86-x64.exe'
           $scan=Join-Path $env:ProgramFiles 'Windows Defender/MpCmdRun.exe'
-          & $scan -CheckExclusion -path $path
+          $platform=Get-ChildItem 'C:/ProgramData/Microsoft/Windows Defender/Platform' -Directory | Where-Object Name -match '^[0-9]' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if($platform){$scan=Join-Path $platform.FullName 'MpCmdRun.exe'}
           $start=Get-Date
           try {
             Invoke-WebRequest -UseBasicParsing 'https://github.com/AVA55LV/meshcore-rs/releases/download/desktop-v1.1/ota-app-1.1-Windows-x86-x64.exe' -OutFile $path
+            & $scan -CheckExclusion -path $path
+            Write-Host "Exclusion check returned $LASTEXITCODE"
             $hash=(Get-FileHash $path).Hash
             Write-Host "Release file SHA256 $hash"
             if($hash -ne '560317A019F40C6D226CA0530353F904C7257BB1C70EA91FCA48583DD6314388'){throw 'Hash mismatch'}
