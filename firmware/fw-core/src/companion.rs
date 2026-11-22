@@ -518,13 +518,16 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         sensor_scan: board.sensor_scan(),
         ..Default::default()
     };
-    let mut mesh = Mesh::new(ctx, Companion::new(prefs, info));
+    let blobs: Box<dyn BlobStore> = match &store {
+        Some(s) => Box::new(FlashBlobs(s.clone())),
+        None => Box::new(meshcore::companion::NoopBlobStore),
+    };
+    let mut mesh = Mesh::new(ctx, Companion::with_blobs(prefs, info, blobs));
     (mesh.app.board.fw_rollback, mesh.app.board.fw_prev, mesh.app.board.fw_skip) = platform.other_slot();
-    if let Some(s) = &store {
-        mesh.app.blobs = Box::new(FlashBlobs(s.clone()));
-        if let Some(contacts) = s.borrow_mut().comp_log_latest() {
-            mesh.app.contacts_load(&contacts);
-        }
+    if let Some(s) = &store
+        && let Some(contacts) = s.borrow_mut().comp_log_latest()
+    {
+        mesh.app.contacts_load(&contacts);
     }
     if let Some(channels) = comp_load(&store, CompBlob::Channels) {
         mesh.app.channels_load(&channels);
@@ -562,6 +565,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         if links.tcp { ", TCP 5000" } else { "" }
     );
     // on Wi-Fi, updates come from the release server rather than over the air
+    #[cfg(feature = "net")]
     if links.tcp {
         mesh.app.fw_store = platform.fw_store(&spawner);
     }
@@ -847,21 +851,24 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
         }
 
         // network: SNTP time, address for `get wifi.*`, the release server for the update store
-        let (time, ip) = platform.poll_network(&mesh.app.prefs.fw_server);
-        if let Some(t) = time {
-            if t.abs_diff(mesh.ctx.current_time()) > 2 {
-                mesh.ctx.set_current_time(t);
-                mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
-            } else if mesh.app.timesync.clock() == Clock::Unknown {
-                // the clock kept across a reset was right: as good as SNTP's
-                mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
+        #[cfg(feature = "net")]
+        {
+            let (time, ip) = platform.poll_network(&mesh.app.prefs.fw_server);
+            if let Some(t) = time {
+                if t.abs_diff(mesh.ctx.current_time()) > 2 {
+                    mesh.ctx.set_current_time(t);
+                    mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
+                } else if mesh.app.timesync.clock() == Clock::Unknown {
+                    // the clock kept across a reset was right: as good as SNTP's
+                    mesh.app.timesync.note_set(&mesh.ctx, Clock::Approx, None);
+                }
             }
-        }
-        if links.tcp {
-            mesh.app.board.wifi_ip = ip;
-        }
-        if let Some(s) = platform.fw_status() {
-            mesh.app.board.fw_store = s;
+            if links.tcp {
+                mesh.app.board.wifi_ip = ip;
+            }
+            if let Some(s) = platform.fw_status() {
+                mesh.app.board.fw_store = s;
+            }
         }
 
         // GPS: the node's position, and now and then the clock, once the fix has held for a few

@@ -47,6 +47,23 @@ pub enum ParseError {
     NoFields,
 }
 
+impl ParseError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "Empty",
+            Self::TooLong => "TooLong",
+            Self::BadAddress => "BadAddress",
+            Self::BadInit => "BadInit",
+            Self::BadField => "BadField",
+            Self::BadLppType => "BadLppType",
+            Self::BadRegister => "BadRegister",
+            Self::BadLength => "BadLength",
+            Self::BadNumber => "BadNumber",
+            Self::NoFields => "NoFields",
+        }
+    }
+}
+
 /// One value read from the sensor: a register run scaled linearly to an LPP type.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {

@@ -6,7 +6,4 @@ version      = "0.1.0"
 description  = "A small BLE host for the MeshCore firmware: one peer at a time, the Nordic UART service, LE Secure Connections pairing with a passkey, bonds. Takes and gives HCI packets; no I/O of its own"
 
 [dependencies]
-# as the protocol core's, so one AES in the image
-aes = { version = "0.9.3", default-features = false }
-# the Diffie-Hellman of LE Secure Connections pairing
-p256 = { version = "0.13.2", default-features = false, features = ["arithmetic"] }
+# Zero external dependencies: compact AES-128 and P-256 live in-crate.

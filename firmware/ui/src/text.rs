@@ -90,18 +90,30 @@ pub fn quarter_signed(v: i16) -> String {
     if v > 0 { format!("+{}", quarter(v)) } else { quarter(v) }
 }
 
-/// `v` to at most `decimals` decimals (up to 8), trailing zeros dropped. By hand: core's float
-/// formatting is 9 KB on the firmware.
+/// `v` to at most `decimals` decimals (up to 8), trailing zeros dropped. Pure integer bit
+/// extraction from IEEE-754 `f32`, avoiding both core's 9 KB float formatter and soft-`f64`.
 pub fn trim_float(v: f32, decimals: usize) -> String {
-    let unit = 10u64.pow(decimals as u32);
-    // exact: an f32 times such a power of ten fits an f64
-    let scaled = v.abs() as f64 * unit as f64;
-    let mut n = scaled as u64;
-    let rest = scaled - n as f64;
-    if rest > 0.5 || (rest == 0.5 && n % 2 == 1) {
-        n += 1;
+    if !v.is_finite() {
+        return "0".into();
     }
-    let sign = if v < 0.0 { "-" } else { "" };
+    let unit = 10u64.pow(decimals as u32);
+    let bits = v.to_bits();
+    let neg = (bits >> 31) != 0;
+    let biased = ((bits >> 23) & 0xFF) as i32;
+    let frac = bits & 0x7F_FFFF;
+    let (mant, exp) = if biased == 0 { (frac as u64, -149) } else { ((frac | (1 << 23)) as u64, biased - 150) };
+    let scaled = mant as u128 * unit as u128;
+    let n = match exp {
+        0..=40 => (scaled << exp).min(u64::MAX as u128) as u64,
+        41.. => u64::MAX,
+        -127..0 => {
+            let (whole, rest) = (scaled >> -exp, scaled & ((1u128 << -exp) - 1));
+            let half = 1u128 << (-exp - 1);
+            (whole + (rest > half || (rest == half && whole % 2 == 1)) as u128).min(u64::MAX as u128) as u64
+        }
+        _ => 0,
+    };
+    let sign = if neg && n != 0 { "-" } else { "" };
     let s = format!("{sign}{}.{:0decimals$}", n / unit, n % unit);
     s.trim_end_matches('0').trim_end_matches('.').into()
 }
@@ -148,6 +160,9 @@ mod tests {
         assert_eq!(trim_float(62.5, 1), "62.5");
         assert_eq!(trim_float(250.0, 1), "250");
         assert_eq!(trim_float(-0.26, 1), "-0.3");
+        assert_eq!(trim_float(-0.0, 1), "0");
+        assert_eq!(trim_float(-0.01, 1), "0");
+        assert_eq!(trim_float(f32::NAN, 1), "0");
         assert_eq!(trim_float(7.8125, 3), "7.812");
         assert_eq!(clean("PKIO🎃 Ёлка"), "PKIO Елка");
         assert_eq!(coarse_minutes(3 * 3600 + 59), 180);

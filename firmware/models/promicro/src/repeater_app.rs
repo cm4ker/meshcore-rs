@@ -381,7 +381,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
         mesh.app.sensors_load(&String::from_utf8_lossy(&sensors));
     }
     mesh.app.ota.build.board = spec.release_board;
-    match store.clone().and_then(|s| updates.target(s, false)) {
+    match store.clone().and_then(|s| updates.target::<false>(s)) {
         Some(t) => mesh.app.ota.target = Some(t),
         None => warn!("OTA: the bootloader checks this app's CRC (BLE DFU): updates over USB only"),
     }

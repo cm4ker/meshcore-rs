@@ -104,7 +104,7 @@ fn bw_code(bw_khz: f32) -> u8 {
     ];
     let mut best = TABLE[0];
     for e in TABLE {
-        if libm::fabsf(e.0 - bw_khz) < libm::fabsf(best.0 - bw_khz) {
+        if meshcore::util::fabsf(e.0 - bw_khz) < meshcore::util::fabsf(best.0 - bw_khz) {
             best = e;
         }
     }
@@ -302,7 +302,8 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Sx126
         self.command(CMD_SET_STANDBY, &[STDBY_RC])?;
         self.command(CMD_CALIBRATE_IMAGE, &image_cal(p.freq_mhz))?;
         self.wait_busy(50)?;
-        let frf = ((p.freq_mhz as f64 * 1_000_000.0) * (1u64 << 25) as f64 / 32_000_000.0) as u32;
+        // freq_mhz * 1_000_000 * 2^25 / 32_000_000 == freq_mhz * 2^20 (exact in f32, no soft-f64)
+        let frf = (p.freq_mhz * (1u32 << 20) as f32) as u32;
         self.command(CMD_SET_RF_FREQUENCY, &frf.to_be_bytes())?;
         let ldro = if p.ldro() { 1 } else { 0 };
         self.command(CMD_SET_MODULATION_PARAMS, &[p.sf, bw_code(p.bw_khz), p.cr - 4, ldro])?;

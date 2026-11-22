@@ -21,15 +21,19 @@ fn build_installer(out: &Path) {
     for f in ["installer/src", "installer/Cargo.toml", "installer/memory.x", "installer/build.rs"] {
         println!("cargo:rerun-if-changed={f}");
     }
-    let target_dir = out.join("installer-target");
+    let target_dir = out.join("i");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
     cmd.current_dir("installer")
         .args(["build", "--release", "--target", "thumbv7em-none-eabihf", "--target-dir"])
         .arg(&target_dir);
-    // our own build's settings are not the installer's
+    // our own build's settings are not the installer's (keep RUSTC_WRAPPER so an empty override
+    // stays empty instead of re-enabling a global wrapper on Windows long paths)
     for (k, _) in std::env::vars() {
-        if k.starts_with("CARGO_") && k != "CARGO_HOME" || k == "RUSTFLAGS" || k.starts_with("RUSTC") {
+        if k.starts_with("CARGO_") && k != "CARGO_HOME"
+            || k == "RUSTFLAGS"
+            || (k.starts_with("RUSTC") && k != "RUSTC_WRAPPER")
+        {
             cmd.env_remove(k);
         }
     }

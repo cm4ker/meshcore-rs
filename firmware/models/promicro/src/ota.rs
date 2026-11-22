@@ -63,8 +63,8 @@ const BOOTLOADER_SETTINGS: u32 = 0xFF000;
 
 pub const MAX_TRIAL_BOOTS: u8 = 3;
 
-static INSTALLER_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/installer.bin"));
-const _: () = assert!(INSTALLER_BIN.len().next_multiple_of(4) <= (INSTALLER_END - INSTALLER) as usize);
+static INSTALLER_DEFLATE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/installer.bin.deflate"));
+const _: () = assert!(INSTALLER_DEFLATE.len() >= 2);
 
 type NrfStore = Store<Flash>;
 
@@ -540,7 +540,13 @@ fn clear_request(store: &SharedStore<Flash>) {
 /// the app's first page for it, point that page at it, reset. Interrupts stay off from here: this
 /// firmware is gone once its first page is.
 fn hand_over() -> ! {
-    let installer = INSTALLER_BIN;
+    // inflate while the heap and allocator are active, before stopping the SoftDevice and IRQs
+    let raw_len = u16::from_le_bytes([INSTALLER_DEFLATE[0], INSTALLER_DEFLATE[1]]) as usize;
+    let Some(installer) = meshcore::ota::inflate_raw(&INSTALLER_DEFLATE[2..], raw_len)
+        .filter(|b| b.len().next_multiple_of(4) <= (INSTALLER_END - INSTALLER) as usize)
+    else {
+        cortex_m::peripheral::SCB::sys_reset();
+    };
     // the flash controller is the SoftDevice's while it runs
     crate::sd::disable();
     cortex_m::interrupt::disable();
@@ -633,42 +639,19 @@ fn nvmc_write(addr: u32, word: u32) {
 }
 
 /// How the repeater and the companion take updates (see the module's top): [`IN_PLACE`] on the
-/// T114, [`IN_PLACE_AFTER_SWAP`] on the Pro Micro.
-pub trait Updates: Sync {
-    /// At start: a request left behind has been carried out, or was never handed over.
-    fn clear_request(&self, store: &SharedStore<Flash>);
-    /// Run at boot, before anything that could hang: `true` while on a trial boot. Never returns
-    /// if the trial boots are used up and there is a firmware to go back to.
-    fn check_trial(&self, store: &SharedStore<Flash>) -> bool;
-    /// Where an update comes in; `lends`: the companion's, its data lent to the update.
-    fn target(&self, store: SharedStore<Flash>, lends: bool) -> Option<Box<dyn FirmwareTarget>>;
-    /// What `fw` and `fw rollback` know of the firmware to go back to: whether there is a way back
-    /// to it, its name, the release rolled back from, and whether it failed its trial boots.
-    fn previous(&self, store: &SharedStore<Flash>) -> (bool, String, u32, bool);
-    /// Go back to the firmware that ran before (`fw rollback`); the restart is the caller's, and
-    /// hands over to the installer.
-    fn rollback(&self, store: &SharedStore<Flash>) -> bool;
-    /// The new firmware is healthy: keep it.
-    fn confirm(&self, store: &SharedStore<Flash>);
-    /// The way back is still there: no update has come in over it.
-    fn previous_kept(&self) -> bool;
-    /// An update is staged and checked: the reboot hands over to the installer.
-    fn install_pending(&self) -> bool;
-    fn hand_over(&self) -> !;
-}
-
-/// Updates applied in place; `after_swap`: the board took them by a swap before (the Pro Micro).
+/// T114/T096/MeshPocket, [`IN_PLACE_AFTER_SWAP`] on the Pro Micro.
+#[derive(Clone, Copy)]
 pub struct InPlace {
     after_swap: bool,
 }
 
-/// The T114's.
-pub static IN_PLACE: InPlace = InPlace { after_swap: false };
+/// The T114's (and T096's / MeshPocket's).
+pub const IN_PLACE: InPlace = InPlace { after_swap: false };
 /// The Pro Micro's: the way back from the first firmware with updates in place is the swap.
-pub static IN_PLACE_AFTER_SWAP: InPlace = InPlace { after_swap: true };
+pub const IN_PLACE_AFTER_SWAP: InPlace = InPlace { after_swap: true };
 
 impl InPlace {
-    /// [`Updates::rollback`], also by itself after failed trial boots (`failed`).
+    /// [`Self::rollback`], also by itself after failed trial boots (`failed`).
     fn go_back(&self, store: &SharedStore<Flash>, failed: bool) -> bool {
         let mut s = store.borrow_mut();
         let Some(way) = way_back(self.after_swap, &FwRecord::load(&mut s)) else {
@@ -683,14 +666,15 @@ impl InPlace {
             WayBack::Swap(len) => swap_request(&mut s, len, own.map_or(0, |(l, _)| l)),
         }
     }
-}
 
-impl Updates for InPlace {
-    fn clear_request(&self, store: &SharedStore<Flash>) {
+    /// At start: a request left behind has been carried out, or was never handed over.
+    pub fn clear_request(&self, store: &SharedStore<Flash>) {
         clear_request(store)
     }
 
-    fn check_trial(&self, store: &SharedStore<Flash>) -> bool {
+    /// Run at boot, before anything that could hang: `true` while on a trial boot. Never returns
+    /// if the trial boots are used up and there is a firmware to go back to.
+    pub fn check_trial(&self, store: &SharedStore<Flash>) -> bool {
         let mut s = store.borrow_mut();
         let mut record = FwRecord::load(&mut s);
         let Some(boots) = record.trial else {
@@ -721,17 +705,19 @@ impl Updates for InPlace {
         true
     }
 
-    fn target(&self, store: SharedStore<Flash>, lends: bool) -> Option<Box<dyn FirmwareTarget>> {
+    /// Where an update comes in; `LENDS`: the companion's, its data lent to the update (a const
+    /// generic so repeaters never compile `InPlaceTarget<true>` or `Store::lend`, and companions
+    /// never compile `InPlaceTarget<false>`).
+    pub fn target<const LENDS: bool>(&self, store: SharedStore<Flash>) -> Option<Box<dyn FirmwareTarget>> {
         if !no_app_crc() {
             return None;
         }
-        Some(match lends {
-            true => Box::new(InPlaceTarget::<true> { store }),
-            false => Box::new(InPlaceTarget::<false> { store }),
-        })
+        Some(Box::new(InPlaceTarget::<LENDS> { store }))
     }
 
-    fn previous(&self, store: &SharedStore<Flash>) -> (bool, String, u32, bool) {
+    /// What `fw` and `fw rollback` know of the firmware to go back to: whether there is a way back
+    /// to it, its name, the release rolled back from, and whether it failed its trial boots.
+    pub fn previous(&self, store: &SharedStore<Flash>) -> (bool, String, u32, bool) {
         let record = FwRecord::load(&mut store.borrow_mut());
         let kept = way_back(self.after_swap, &record).is_some();
         PREVIOUS_KEPT.store(kept, Ordering::Relaxed);
@@ -741,11 +727,14 @@ impl Updates for InPlace {
         (kept, record.prev, record.skip, record.failed)
     }
 
-    fn rollback(&self, store: &SharedStore<Flash>) -> bool {
+    /// Go back to the firmware that ran before (`fw rollback`); the restart is the caller's, and
+    /// hands over to the installer.
+    pub fn rollback(&self, store: &SharedStore<Flash>) -> bool {
         self.go_back(store, false)
     }
 
-    fn confirm(&self, store: &SharedStore<Flash>) {
+    /// The new firmware is healthy: keep it.
+    pub fn confirm(&self, store: &SharedStore<Flash>) {
         if INSTALL_PENDING.load(Ordering::Relaxed) {
             return; // the record is the next update's trial already
         }
@@ -755,15 +744,17 @@ impl Updates for InPlace {
         record.save(&mut s);
     }
 
-    fn previous_kept(&self) -> bool {
+    /// The way back is still there: no update has come in over it.
+    pub fn previous_kept(&self) -> bool {
         PREVIOUS_KEPT.load(Ordering::Relaxed)
     }
 
-    fn install_pending(&self) -> bool {
+    /// An update is staged and checked: the reboot hands over to the installer.
+    pub fn install_pending(&self) -> bool {
         INSTALL_PENDING.load(Ordering::Relaxed)
     }
 
-    fn hand_over(&self) -> ! {
+    pub fn hand_over(&self) -> ! {
         hand_over()
     }
 }

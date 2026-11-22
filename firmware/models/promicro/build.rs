@@ -34,15 +34,19 @@ fn build_installer(out: &Path) {
     } else {
         "swap"
     };
-    let target_dir = out.join("installer-target");
+    let target_dir = out.join("i");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
     cmd.current_dir("installer")
         .args(["build", "--release", "--target", "thumbv7em-none-eabihf", "--features", features, "--target-dir"])
         .arg(&target_dir);
-    // our own build's settings are not the installer's
+    // our own build's settings are not the installer's (keep RUSTC_WRAPPER so an empty override
+    // stays empty instead of re-enabling a global wrapper on Windows long paths)
     for (k, _) in std::env::vars() {
-        if k.starts_with("CARGO_") && k != "CARGO_HOME" || k == "RUSTFLAGS" || k.starts_with("RUSTC") {
+        if k.starts_with("CARGO_") && k != "CARGO_HOME"
+            || k == "RUSTFLAGS"
+            || (k.starts_with("RUSTC") && k != "RUSTC_WRAPPER")
+        {
             cmd.env_remove(k);
         }
     }
@@ -52,7 +56,11 @@ fn build_installer(out: &Path) {
     let (start, image) = flat_image(&elf);
     assert_eq!(start, ota_layout::INSTALLER, "wrong installer address");
     assert!(image.len() <= (ota_layout::INSTALLER_END - ota_layout::INSTALLER) as usize, "the installer does not fit");
-    std::fs::write(out.join("installer.bin"), image).unwrap();
+    let compressed = miniz_oxide::deflate::compress_to_vec(&image, 10);
+    let mut out_bytes = Vec::with_capacity(2 + compressed.len());
+    out_bytes.extend_from_slice(&(image.len() as u16).to_le_bytes());
+    out_bytes.extend_from_slice(&compressed);
+    std::fs::write(out.join("installer.bin.deflate"), out_bytes).unwrap();
 }
 
 /// The loadable segments of a little-endian ELF32 as one image from the lowest address, gaps

@@ -15,7 +15,9 @@
 use alloc::string::ToString;
 
 use super::*;
-use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, MAX_LORA_FILE, Offer, status};
+#[cfg(feature = "net")]
+use crate::fwshare::{self, Offer};
+use crate::fwshare::{FW_PIECE, FwQuery, Loader, MAX_LORA_FILE, status};
 use crate::fwstate::{self, FwState, mode};
 use crate::ota::{REQ_TYPE_OTA_ABORT, REQ_TYPE_OTA_COMMIT};
 
@@ -28,6 +30,7 @@ const RETRY_LATER_MS: u64 = 3_600_000;
 /// While an update from someone else is under way.
 const BUSY_RETRY_MS: u64 = 10 * 60_000;
 /// Pieces fed per pass of the main loop: it keeps serving the radio meanwhile.
+#[cfg(feature = "net")]
 const PIECES_PER_PASS: usize = 8;
 /// Over LoRa: a request and its answer take well under a second on air; past this it is asked again.
 const ANSWER_WAIT_MS: u64 = 8_000;
@@ -44,12 +47,14 @@ const HEARD_RECENTLY_SECS: u32 = 2 * 86_400;
 const MAX_ASKED: usize = 4;
 /// A loaded update waits for its restart while a neighbour is loading one from this node (the
 /// restart would cut that transfer off): looked at again this often.
+#[cfg(feature = "net")]
 const INSTALL_WAIT_MS: u64 = 30_000;
 
 /// [`Repeater::matching_peers`]' entry for the neighbour an update is pulled from (not a client).
 pub(super) const FW_PEER: usize = usize::MAX;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(not(feature = "net"), allow(dead_code))]
 enum Step {
     Sleep,
     /// From the store, the piece at `offset` of its file `id` next.
@@ -149,6 +154,7 @@ impl Repeater {
         let mut s = fwstate::head(&self.board.build_date, self.prefs.fw_channel, self.prefs.fw_mode);
         s.push('\n');
         s.push_str(&self.fw_line(ctx));
+        #[cfg(feature = "net")]
         if self.prefs.fw_serve && self.fw_store.is_some() {
             s.push('\n');
             s.push_str(if self.board.fw_store.is_empty() { "serves nothing yet" } else { &self.board.fw_store });
@@ -198,11 +204,13 @@ impl Repeater {
         self.autoupdate.at = ctx.now;
         // asked by hand: not what the store (or the neighbour's) last heard from the server
         self.autoupdate.fresh = true;
+        #[cfg(feature = "net")]
         if let Some(q) = self.own_query()
             && let Some(store) = self.fw_store.as_deref_mut()
         {
             store.refresh(&q);
         }
+        #[cfg(feature = "net")]
         let whom = if self.prefs.fw_source.is_empty() && self.fw_store.is_some() {
             self.prefs.fw_server.clone()
         } else if self.prefs.fw_source.is_empty() {
@@ -210,6 +218,8 @@ impl Repeater {
         } else {
             self.source_name()
         };
+        #[cfg(not(feature = "net"))]
+        let whom = if self.prefs.fw_source.is_empty() { "the neighbours".into() } else { self.source_name() };
         if update {
             format!("OK - asking {whom}; if there is an update the node installs it and is silent for 1-2 min")
         } else {
@@ -285,7 +295,10 @@ impl Repeater {
         }
         match self.autoupdate.step {
             Step::Sleep => self.auto_check(ctx),
+            #[cfg(feature = "net")]
             Step::Load { id, offset } => self.auto_load(ctx, id, offset),
+            #[cfg(not(feature = "net"))]
+            Step::Load { .. } => {}
             Step::Ask if self.autoupdate.tries >= QUERY_TRIES => self.lora_next(ctx),
             Step::Ask => self.lora_query(ctx),
             Step::Get { .. } if self.autoupdate.tries >= PIECE_TRIES => {
@@ -308,10 +321,12 @@ impl Repeater {
             self.autoupdate.at = ctx.now + BUSY_RETRY_MS;
             return;
         }
+        #[cfg(feature = "net")]
         let Some(q) = self.own_query() else {
             return self.auto_fail(ctx, "can't read this firmware's image".into());
         };
         self.autoupdate.server_down = false;
+        #[cfg(feature = "net")]
         if self.prefs.fw_source.is_empty()
             && let Some(store) = self.fw_store.as_deref_mut()
         {
@@ -369,6 +384,7 @@ impl Repeater {
         if self.autoupdate.by_hand == Some(Hand::Update) { room } else { room.min(MAX_LORA_FILE) }
     }
 
+    #[cfg(feature = "net")]
     fn auto_load(&mut self, ctx: &mut MeshCtx, id: u32, mut offset: u32) {
         let mut buf = [0u8; FW_PIECE];
         for _ in 0..PIECES_PER_PASS {
@@ -449,8 +465,11 @@ impl Repeater {
     /// The next neighbour to ask, or the check is over.
     fn lora_next(&mut self, ctx: &mut MeshCtx) {
         let Some(id) = self.autoupdate.others.pop() else {
+            #[cfg(feature = "net")]
             let server =
                 if self.autoupdate.server_down { format!("{} not reachable, ", self.prefs.fw_server) } else { String::new() };
+            #[cfg(not(feature = "net"))]
+            let server = "";
             let why = match (self.autoupdate.asked, self.prefs.fw_source.is_empty()) {
                 (0, true) => format!("{server}no repeater heard directly to ask"),
                 (0, false) => format!("{server}{} not heard lately", self.source_name()),
@@ -645,17 +664,25 @@ impl Repeater {
     fn auto_install(&mut self, ctx: &mut MeshCtx, now: bool) {
         let release = self.autoupdate.release.clone();
         // a neighbour loading an update from this node would lose it to the restart
-        let serving_until = self.fw_served_at.map_or(0, |t| t + fwshare::STORE_IDLE_SECS * 1000);
-        if ctx.now < serving_until && !now {
-            let a = &mut self.autoupdate;
-            a.step = Step::Install;
-            a.at = ctx.now + INSTALL_WAIT_MS;
-            a.state = FwState::Held { release };
-            return;
+        #[cfg(feature = "net")]
+        {
+            let serving_until = self.fw_served_at.map_or(0, |t| t + fwshare::STORE_IDLE_SECS * 1000);
+            if ctx.now < serving_until && !now {
+                let a = &mut self.autoupdate;
+                a.step = Step::Install;
+                a.at = ctx.now + INSTALL_WAIT_MS;
+                a.state = FwState::Held { release };
+                return;
+            }
         }
+        #[cfg(not(feature = "net"))]
+        let _ = now;
         let source = match &self.autoupdate.peer {
             Some(_) => format!("neighbour {}", self.peer_name()),
+            #[cfg(feature = "net")]
             None => self.prefs.fw_server.clone(),
+            #[cfg(not(feature = "net"))]
+            None => String::from("update"),
         };
         let (reply, outcome) = self.ota.handle(&[REQ_TYPE_OTA_COMMIT], FIRMWARE_VERSION);
         if outcome == OtaOutcome::Committed {

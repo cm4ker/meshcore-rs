@@ -16,13 +16,12 @@ embedded-hal = "1.0"
 embedded-hal-async = "1.0"
 embedded-io-async = { version = "0.7.0", optional = true }
 embedded-storage = "0.3"
-libm = "0.2.16"
-meshcore = { path = "../../crates/meshcore" }
+meshcore = { path = "../../crates/meshcore", default-features = false }
 meshcore-ui = { version = "0.1.0", path = "../ui" }
 
 [features]
-# the companion TCP server (embassy-net)
-net = ["dep:embassy-net", "dep:embedded-io-async"]
+# the companion TCP server (embassy-net) and Wi-Fi/MQTT/bridge/HTTP protocol parts
+net = ["dep:embassy-net", "dep:embedded-io-async", "meshcore/net"]
 # SHTC3 / SHT4X in the I2C scan (`sensors::Sensors`); AHTX0, BME280, BMP280, INA219 and SHT3X are
 # always in it
 extra-sensors = []

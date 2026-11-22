@@ -32,7 +32,7 @@ impl AdvertData {
     }
 
     pub fn with_location(mut self, lat: f64, lon: f64) -> Self {
-        self.location = Some(((lat * 1e6) as i32, (lon * 1e6) as i32));
+        self.location = Some((crate::util::f64_mul_10n_i32(lat, 6), crate::util::f64_mul_10n_i32(lon, 6)));
         self
     }
 

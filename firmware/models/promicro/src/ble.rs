@@ -26,9 +26,7 @@ use log::{info, warn};
 use meshcore::ota::REQ_TYPE_OTA_BEGIN;
 use meshcore_fw_core::frames::{self, Link};
 use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED, pairing_begins, pairing_succeeded};
-use p256::elliptic_curve::point::AffineCoordinates;
-use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use p256::{AffinePoint, EncodedPoint, NonZeroScalar, ProjectivePoint};
+use meshcore_ble::p256::Secret as P256Secret;
 
 use crate::sd::{self, NRF_ERROR_NO_MEM, NRF_ERROR_RESOURCES, NRF_SUCCESS, svc};
 
@@ -406,7 +404,7 @@ struct Window {
     adv_handle: u8,
     peer: [u8; 7],
     authenticated: bool,
-    secret: Option<NonZeroScalar>,
+    secret: Option<P256Secret>,
     /// The companion's app link (`Role::Companion`).
     companion: bool,
 }
@@ -837,19 +835,18 @@ async fn take_frame(w: &Window, frame: Vec<u8>) {
 
 /// A fresh P-256 key pair from the chip's RNG: the secret, and the public key as the SoftDevice
 /// takes it (X then Y, each little-endian).
-fn lesc_keypair() -> Option<NonZeroScalar> {
+fn lesc_keypair() -> Option<P256Secret> {
     let mut seed = [0u8; 32];
     for _ in 0..4 {
         if !sd::random(&mut seed) {
             return None;
         }
-        let Some(secret) = Option::<NonZeroScalar>::from(NonZeroScalar::from_repr(seed.into())) else {
+        let Some(secret) = P256Secret::from_be_bytes(seed) else {
             continue; // not below the group order: rare
         };
-        let point = (ProjectivePoint::GENERATOR * *secret).to_affine().to_encoded_point(false);
+        let pub_be = secret.public_key();
         let pk = &mut shared().own_pk;
-        pk[..32].copy_from_slice(point.x()?);
-        pk[32..].copy_from_slice(point.y()?);
+        pk.copy_from_slice(&pub_be);
         pk[..32].reverse();
         pk[32..].reverse();
         return Some(secret);
@@ -858,14 +855,11 @@ fn lesc_keypair() -> Option<NonZeroScalar> {
 }
 
 /// The Diffie-Hellman key with the peer's public key (little-endian halves), little-endian.
-fn dhkey(secret: &NonZeroScalar, peer: &[u8; 64]) -> Option<[u8; 32]> {
-    let mut x: [u8; 32] = peer[..32].try_into().unwrap();
-    let mut y: [u8; 32] = peer[32..].try_into().unwrap();
-    x.reverse();
-    y.reverse();
-    let point = EncodedPoint::from_affine_coordinates(&x.into(), &y.into(), false);
-    let point = Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&point))?;
-    let mut key: [u8; 32] = (ProjectivePoint::from(point) * **secret).to_affine().x().into();
+fn dhkey(secret: &P256Secret, peer: &[u8; 64]) -> Option<[u8; 32]> {
+    let mut peer_be = *peer;
+    peer_be[..32].reverse();
+    peer_be[32..].reverse();
+    let mut key = secret.dh_key(&peer_be)?;
     key.reverse();
     Some(key)
 }

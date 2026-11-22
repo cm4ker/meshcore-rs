@@ -91,7 +91,7 @@ impl Calib {
         let temp_c = ((t_fine * 5 + 128) >> 8) as f32 / 100.0;
         let pressure_hpa = self.pressure_q24_8(adc_p, t_fine) as f32 / 256.0 / 100.0;
         let humidity_pct = self.humidity_q22_10(adc_h, t_fine) as f32 / 1024.0;
-        let altitude_m = 44330.0 * (1.0 - libm::powf(pressure_hpa / SEALEVEL_HPA, 0.1903));
+        let altitude_m = 44330.0 * (1.0 - crate::util::powf(pressure_hpa / SEALEVEL_HPA, 0.1903));
         Reading { temp_c, humidity_pct, pressure_hpa, altitude_m }
     }
 

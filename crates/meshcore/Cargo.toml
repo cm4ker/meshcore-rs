@@ -6,17 +6,18 @@ description = "Wire-compatible MeshCore protocol core (no_std): packets, crypto,
 license = "MIT"
 
 [dependencies]
-aes = { version = "0.9.3", default-features = false }
 curve25519-dalek = { version = "5.0.0", default-features = false }
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["hazmat"] }
-hmac = { version = "0.13.0", default-features = false }
-libm = "0.2.16"
 # deltas applied in place, for a target with no room for the image they make (the T114)
 meshcore-inplace = { path = "../inplace", optional = true }
 miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
 sha2 = { version = "0.11.1", default-features = false }
 
 [features]
+default = ["net"]
+# Wi-Fi, MQTT observer, ESP-NOW bridge, HTTP release/time server (ESP32 boards and host tests;
+# off on nRF52840 boards that have no Wi-Fi)
+net = []
 # deltas taken as plans for a target that applies them in place (`ota::FirmwareTarget::
 # in_place_shift`): the T114's firmware; other boards carry none of it
 inplace = ["dep:meshcore-inplace"]

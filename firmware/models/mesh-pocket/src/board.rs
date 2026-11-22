@@ -19,7 +19,7 @@ pub const fn spec(build_epoch: &'static str, build_date: &'static str) -> Spec {
         usb: (0x239A, 0x4405, "HT-n5262"),
         batt_mv_per_lsb: BATT_MV_PER_LSB,
         system_off,
-        updates: Some(&promicro::ota::IN_PLACE),
+        updates: Some(promicro::ota::IN_PLACE),
         companion_regions: [TRIAL_REGION, COMPANION_REGION],
         companion_tx_dbm: 22,
         companion_before: None,

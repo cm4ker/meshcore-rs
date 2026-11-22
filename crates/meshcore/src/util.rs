@@ -142,16 +142,86 @@ pub fn atof(s: &str) -> f64 {
     }
     let v = match exponent {
         -18..=0 => ratio(mantissa, 10u64.pow(exponent.unsigned_abs())),
-        // longer than anyone types: within a rounding or two
-        _ => {
-            let mut scale = 1.0f64;
-            for _ in 0..exponent.unsigned_abs().min(400) {
-                scale *= 10.0;
-            }
-            if exponent < 0 { mantissa as f64 / scale } else { mantissa as f64 * scale }
-        }
+        // longer than anyone types: pure integer scaling so Cortex-M never pulls soft-f64
+        _ => scale_pow10(mantissa, exponent),
     };
-    if bytes[0] == b'-' { -v } else { v }
+    if bytes[0] == b'-' { f64::from_bits(v.to_bits() | (1u64 << 63)) } else { v }
+}
+
+/// Pack positive `(q + eps) * 2^exp2_lsb` (`eps > 0` iff `sticky`) into an IEEE-754 `f64`
+/// (ties to even), using pure integer ops so soft-float `__muldf3`/`__divdf3` are never linked.
+fn pack_f64(q: u128, sticky: bool, exp2_lsb: i32) -> f64 {
+    if q == 0 {
+        return 0.0;
+    }
+    let bits = 128 - q.leading_zeros();
+    let (mut sig, e) = if bits > 53 {
+        let shift = bits - 53;
+        let mut s = (q >> shift) as u64;
+        let half = 1u128 << (shift - 1);
+        let rem = q & ((1u128 << shift) - 1);
+        if rem > half || (rem == half && (sticky || (s & 1) == 1)) {
+            s += 1;
+        }
+        let mut e = exp2_lsb + shift as i32 + 52;
+        if s == (1u64 << 53) {
+            s >>= 1;
+            e += 1;
+        }
+        (s, e)
+    } else {
+        let shift = 53 - bits;
+        ((q as u64) << shift, exp2_lsb - shift as i32 + 52)
+    };
+    let biased = e + 1023;
+    if biased <= 0 {
+        let sub = (1 - biased) as u32;
+        if sub >= 54 {
+            return 0.0;
+        }
+        sig >>= sub;
+        return f64::from_bits(sig);
+    }
+    if biased >= 2047 {
+        return f64::INFINITY;
+    }
+    f64::from_bits(((biased as u64) << 52) | (sig & ((1u64 << 52) - 1)))
+}
+
+fn scale_pow10(mantissa: u64, mut exp10: i32) -> f64 {
+    if mantissa == 0 {
+        return 0.0;
+    }
+    let mut val = mantissa as u128;
+    let mut exp2 = 0i32;
+    let mut sticky = false;
+    while exp10 > 0 {
+        if val >= (1u128 << 124) {
+            sticky |= (val & 0xF) != 0;
+            val >>= 4;
+            exp2 += 4;
+        }
+        val *= 10;
+        exp10 -= 1;
+        if exp2 > 1100 {
+            return f64::INFINITY;
+        }
+    }
+    while exp10 < 0 {
+        let free = val.leading_zeros();
+        if free > 0 {
+            val <<= free;
+            exp2 -= free as i32;
+        }
+        let rem = val % 10;
+        sticky |= rem != 0;
+        val /= 10;
+        exp10 += 1;
+        if exp2 < -1200 {
+            return 0.0;
+        }
+    }
+    pack_f64(val, sticky, exp2)
 }
 
 /// `n / unit` as the nearest f64 (ties to even), for a unit up to 10^18: a long division in
@@ -172,12 +242,101 @@ fn ratio(n: u64, unit: u64) -> f64 {
             quotient |= 1;
         }
     }
-    // its top 64 bits, the lowest standing for all that was cut off: enough to round by
-    let cut = 64 - quotient.leading_zeros();
-    let inexact = rest != 0 || quotient & ((1 << cut) - 1) != 0;
-    let top = (quotient >> cut) as u64 | inexact as u64;
-    let exponent = cut as i32 - 64 - lift as i32; // -127..=0
-    top as f64 * f64::from_bits(((1023 + exponent) as u64) << 52)
+    pack_f64(quotient, rest != 0, -64 - lift as i32)
+}
+
+/// `v / 10^exp10` as an exact `f64` without soft-float `__divdf3` (for GPS microdegrees / mm).
+pub fn i32_div_10n(v: i32, exp10: u32) -> f64 {
+    let mag = ratio(v.unsigned_abs() as u64, 10u64.pow(exp10));
+    if v < 0 { f64::from_bits(mag.to_bits() | (1u64 << 63)) } else { mag }
+}
+
+/// `(|v| * 10^exp10)` rounded half-to-even (matches IEEE-754 `f64` multiplication on decimal
+/// coordinates like `37.6175 * 1e6` without pulling soft-float `__muldf3`).
+pub fn f64_mul_10n_u64(v: f64, exp10: u32) -> u64 {
+    if !v.is_finite() {
+        return 0;
+    }
+    in_units(v, exp10 as usize).0
+}
+
+/// `(v * 10^exp10)` rounded half-to-even and clamped to `i32`, without soft-float `__muldf3`.
+pub fn f64_mul_10n_i32(v: f64, exp10: u32) -> i32 {
+    let neg = (v.to_bits() >> 63) != 0;
+    let mag = f64_mul_10n_u64(v, exp10);
+    if neg {
+        -(mag.min(i32::MAX as u64 + 1) as i64) as i32
+    } else {
+        mag.min(i32::MAX as u64) as i32
+    }
+}
+
+/// Convert `f32` to `f64` using pure integer bit manipulation (avoids `__aeabi_f2d`).
+#[inline]
+pub fn f32_to_f64(v: f32) -> f64 {
+    let b = v.to_bits();
+    let sign = ((b >> 31) as u64) << 63;
+    let exp = (b >> 23) & 0xFF;
+    let frac = b & 0x7F_FFFF;
+    if exp == 0 {
+        if frac == 0 {
+            return f64::from_bits(sign);
+        }
+        let shift = frac.leading_zeros() - 8;
+        let norm_frac = ((frac << shift) & 0x7F_FFFF) as u64;
+        let new_exp = (1023 - 126 - shift) as u64;
+        return f64::from_bits(sign | (new_exp << 52) | (norm_frac << 29));
+    }
+    if exp == 0xFF {
+        return f64::from_bits(sign | (0x7FFu64 << 52) | ((frac as u64) << 29));
+    }
+    let new_exp = (exp as u64) + (1023 - 127);
+    f64::from_bits(sign | (new_exp << 52) | ((frac as u64) << 29))
+}
+
+/// Convert `f64` to `f32` (nearest, ties to even) using pure integer bit ops (avoids `__aeabi_d2f`).
+pub fn f64_to_f32(v: f64) -> f32 {
+    let b = v.to_bits();
+    let sign = ((b >> 63) as u32) << 31;
+    let exp = ((b >> 52) & 0x7FF) as i32;
+    let frac = b & ((1u64 << 52) - 1);
+    if exp == 0 {
+        return f32::from_bits(sign);
+    }
+    if exp == 0x7FF {
+        let f = if frac != 0 { 0x40_0000 } else { 0 };
+        return f32::from_bits(sign | (0xFF << 23) | f);
+    }
+    let mut new_exp = exp - 1023 + 127;
+    if new_exp >= 255 {
+        return f32::from_bits(sign | (0xFF << 23));
+    }
+    if new_exp <= 0 {
+        let shift = (1 - new_exp) as u32 + 29;
+        if shift >= 55 {
+            return f32::from_bits(sign);
+        }
+        let m = frac | (1u64 << 52);
+        let q = (m >> shift) as u32;
+        let half = 1u64 << (shift - 1);
+        let rem = m & ((1u64 << shift) - 1);
+        let r = q + (rem > half || (rem == half && (q & 1) == 1)) as u32;
+        return f32::from_bits(sign | r);
+    }
+    let mut q = (frac >> 29) as u32;
+    let rem = frac & ((1u64 << 29) - 1);
+    let half = 1u64 << 28;
+    if rem > half || (rem == half && (q & 1) == 1) {
+        q += 1;
+        if q == (1 << 23) {
+            q = 0;
+            new_exp += 1;
+            if new_exp >= 255 {
+                return f32::from_bits(sign | (0xFF << 23));
+            }
+        }
+    }
+    f32::from_bits(sign | ((new_exp as u32) << 23) | q)
 }
 
 /// A float with a fixed number of decimals, as `{:.N}` prints it (half to even), without core's
@@ -238,9 +397,10 @@ pub struct Shortest<T>(pub T);
 
 impl core::fmt::Display for Shortest<f64> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let abs_bits = self.0.to_bits() & !(1u64 << 63);
         let reads_back = |d: &usize| {
             let (n, unit) = in_units(self.0, *d);
-            ratio(n, unit) == self.0.abs()
+            ratio(n, unit).to_bits() == abs_bits
         };
         Fixed(self.0, (0..MAX_DECIMALS).find(reads_back).unwrap_or(MAX_DECIMALS)).fmt(f)
     }
@@ -248,10 +408,11 @@ impl core::fmt::Display for Shortest<f64> {
 
 impl core::fmt::Display for Shortest<f32> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let v = self.0 as f64;
+        let v = f32_to_f64(self.0);
+        let abs_bits = self.0.to_bits() & 0x7FFF_FFFF;
         let reads_back = |d: &usize| {
             let (n, unit) = in_units(v, *d);
-            ratio(n, unit) as f32 == self.0.abs()
+            f64_to_f32(ratio(n, unit)).to_bits() == abs_bits
         };
         Fixed(v, (0..MAX_DECIMALS).find(reads_back).unwrap_or(MAX_DECIMALS)).fmt(f)
     }
@@ -308,6 +469,44 @@ pub fn contact_link_within(name: &str, pub_key: &[u8], adv_type: u8, max_len: us
         }
         name = &name[..name.char_indices().last().map_or(0, |(i, _)| i)];
     }
+}
+
+/// Absolute value of an `f32` without `libm` (clears the sign bit: one `vabs.f32` on Cortex-M4F).
+#[inline]
+pub fn fabsf(x: f32) -> f32 {
+    f32::from_bits(x.to_bits() & 0x7FFF_FFFF)
+}
+
+/// `base.powf(exp)` in ~150 bytes of hardware-FPU `f32` arithmetic (instead of `libm::powf`'s ~2 KiB),
+/// accurate to ~1e-6 relative error for `base > 0` (barometric altitude and RX score delay).
+pub fn powf(base: f32, exp: f32) -> f32 {
+    if exp == 0.0 || base == 1.0 {
+        return 1.0;
+    }
+    if !base.is_finite() || base <= 0.0 || !exp.is_finite() {
+        return 0.0;
+    }
+    // base = m * 2^e with m in [1, 2); log2(m) via atanh series in t = (m - 1) / (m + 1) in [0, 1/3)
+    let bits = base.to_bits();
+    let e = ((bits >> 23) as i32) - 127;
+    let m = f32::from_bits((bits & 0x007F_FFFF) | 0x3F80_0000);
+    let t = (m - 1.0) / (m + 1.0);
+    let t2 = t * t;
+    let ln_m = 2.0 * t * (1.0 + t2 * (1.0 / 3.0 + t2 * (1.0 / 5.0 + t2 * (1.0 / 7.0 + t2 * (1.0 / 9.0)))));
+    let log2_base = e as f32 + ln_m * core::f32::consts::LOG2_E;
+
+    // 2^z = 2^k * e^(f * ln2) with f in [-0.5, 0.5]
+    let z = exp * log2_base;
+    if z < -126.0 {
+        return 0.0;
+    }
+    if z > 127.0 {
+        return f32::INFINITY;
+    }
+    let k = if z >= 0.0 { (z + 0.5) as i32 } else { (z - 0.5) as i32 };
+    let u = (z - k as f32) * core::f32::consts::LN_2;
+    let exp_u = 1.0 + u * (1.0 + u * (0.5 + u * (1.0 / 6.0 + u * (1.0 / 24.0 + u * (1.0 / 120.0 + u / 720.0)))));
+    f32::from_bits(((k + 127) as u32) << 23) * exp_u
 }
 
 /// Days-from-civil inverse: epoch seconds to (year, month, day, hour, minute, second), UTC.
@@ -422,5 +621,47 @@ mod tests {
     fn datetime() {
         assert_eq!(epoch_to_datetime(1715770351), (2024, 5, 15, 10, 52, 31));
         assert_eq!(epoch_to_datetime(0), (1970, 1, 1, 0, 0, 0));
+    }
+
+    #[test]
+    fn powf_matches_std() {
+        for base in [0.25f32, 0.5, 0.9, 1.0, 1.01325, 2.0, 5.0, 10.0, 20.0] {
+            for exp in [-0.5f32, -0.15, 0.0, 0.1903, 0.5, 0.85, 1.5] {
+                let got = powf(base, exp);
+                let want = base.powf(exp);
+                assert!((got - want).abs() <= want.abs() * 1e-5 + 1e-6, "powf({base}, {exp}): got={got} want={want}");
+            }
+        }
+        assert_eq!(powf(0.0, 0.5), 0.0);
+        assert_eq!(powf(0.0, 0.0), 1.0);
+        assert_eq!(powf(f32::NAN, 0.5), 0.0);
+    }
+
+    #[test]
+    fn float_helpers_match_hardware_casts() {
+        for v in [0.0f32, -0.0, 1.0, -1.0, 869.525, 62.5, f32::MIN_POSITIVE, f32::from_bits(1), f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(f32_to_f64(v).to_bits(), (v as f64).to_bits(), "f32_to_f64({v})");
+        }
+        assert!(f32_to_f64(f32::NAN).is_nan());
+        for v in [
+            0.0f64,
+            -0.0,
+            1.0,
+            -1.0,
+            55.751244,
+            -37.618423,
+            1e-40,
+            1e-45,
+            1e40,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert_eq!(f64_to_f32(v).to_bits(), (v as f32).to_bits(), "f64_to_f32({v})");
+        }
+        assert!(f64_to_f32(f64::NAN).is_nan());
+        assert_eq!(i32_div_10n(55_751_244, 6), 55.751244);
+        assert_eq!(i32_div_10n(-37_618_423, 6), -37.618423);
+        assert_eq!(f64_mul_10n_i32(37.6175, 6), 37_617_500);
+        assert_eq!(f64_mul_10n_i32(-37.6175, 6), -37_617_500);
     }
 }

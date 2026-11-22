@@ -250,7 +250,31 @@ pub fn reverse(forward: &[u8], old: &[u8], old_sha256: [u8; 32], out: &mut impl 
             at = next;
         }
     }
-    runs.sort_unstable_by_key(|r| r.old);
+    // In-place heapsort by `r.old`: O(n log n) worst-case, ~150 B instead of core's ~2.5 KiB ipnsort.
+    fn sift_down(s: &mut [Run], mut root: usize) {
+        let n = s.len();
+        loop {
+            let mut child = root * 2 + 1;
+            if child >= n {
+                break;
+            }
+            if child + 1 < n && s[child + 1].old > s[child].old {
+                child += 1;
+            }
+            if s[root].old >= s[child].old {
+                break;
+            }
+            s.swap(root, child);
+            root = child;
+        }
+    }
+    for i in (0..runs.len() / 2).rev() {
+        sift_down(&mut runs, i);
+    }
+    for end in (1..runs.len()).rev() {
+        runs.swap(0, end);
+        sift_down(&mut runs[..end], 0);
+    }
     let mut back = Planner::new(h.new_len, h.old_len, h.shift)?;
     let mut diff = Vec::new();
     diff.try_reserve_exact(PAGE as usize).ok()?;

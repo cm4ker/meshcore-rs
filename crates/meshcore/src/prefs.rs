@@ -113,33 +113,49 @@ pub struct NodePrefs {
     /// Pick the coding rate per hop from the link SNR (direct packets to known neighbours).
     pub dynamic_cr: bool,
     /// Wi-Fi station (MQTT observer, LAN OTA).
+    #[cfg(feature = "net")]
     pub wifi_ssid: String,
+    #[cfg(feature = "net")]
     pub wifi_pwd: String,
     /// `set wifi.enabled off` keeps the station down without forgetting the network.
+    #[cfg(feature = "net")]
     pub wifi_enabled: bool,
     /// MQTT observer: region code in topics; `UNSET` disables publishing.
+    #[cfg(feature = "net")]
     pub mqtt_iata: String,
     /// Enabled brokers, bits as in the C++ firmware: 1 meshcoretel, 8 ommesh (2/4 letsmesh eu/us
     /// were wss-only and dropped with TLS; the bits stay reserved).
+    #[cfg(feature = "net")]
     pub mqtt_brokers: u8,
+    #[cfg(feature = "net")]
     pub mqtt_packets: bool,
+    #[cfg(feature = "net")]
     pub mqtt_tx: bool,
     /// Also publish every packet as a RAW message (`.../raw`).
+    #[cfg(feature = "net")]
     pub mqtt_raw: bool,
+    #[cfg(feature = "net")]
     pub mqtt_status: bool,
+    #[cfg(feature = "net")]
     pub mqtt_owner: String,
+    #[cfg(feature = "net")]
     pub mqtt_email: String,
     /// Also host a room server on this device (a second node with its own identity).
     pub room: bool,
     /// Bridge to other repeaters over ESP-NOW (upstream `bridge.*`, see [`crate::bridge`]).
+    #[cfg(feature = "net")]
     pub bridge_enabled: bool,
     /// Packets from the bridge are processed this many milliseconds after they come in.
+    #[cfg(feature = "net")]
     pub bridge_delay: u16,
     /// Bridge the packets this node receives (`bridge.source rx`), not those it transmits.
+    #[cfg(feature = "net")]
     pub bridge_source_rx: bool,
     /// Wi-Fi channel of the ESP-NOW bridge (the router's while the Wi-Fi station runs).
+    #[cfg(feature = "net")]
     pub bridge_channel: u8,
     /// Shared by the bridged repeaters.
+    #[cfg(feature = "net")]
     pub bridge_secret: String,
     /// Fingerprints of the root keys whose signed releases this node installs (see
     /// [`crate::release`]); none = unsigned updates are accepted.
@@ -149,8 +165,10 @@ pub struct NodePrefs {
     pub ota_owners: Vec<Fingerprint>,
     /// Hand firmware updates on to the nodes next to this one (`set fw.serve on`, see
     /// [`crate::fwshare`]), fetched from `fw_server` over the Wi-Fi link. Off by default.
+    #[cfg(feature = "net")]
     pub fw_serve: bool,
     /// Host of the release server (plain HTTP: what it serves is signed).
+    #[cfg(feature = "net")]
     pub fw_server: String,
     /// What this node does about updates by itself (`set fw.auto`, `crate::fwstate::mode`): only
     /// with a pinned root. Off by default.
@@ -166,10 +184,13 @@ pub struct NodePrefs {
     pub time_sync: u8,
     /// Pass the time server's signed time on (`set time.serve on`): beacons, and answers to
     /// requests, fetched from `time_server` over the Wi-Fi link. Off by default.
+    #[cfg(feature = "net")]
     pub time_serve: bool,
     /// Host of the time server (plain HTTP: what it serves is signed).
+    #[cfg(feature = "net")]
     pub time_server: String,
     /// Beacons a day a gateway sends (`set time.beacon`); 0 = answers to requests only.
+    #[cfg(feature = "net")]
     pub time_beacons: u8,
     /// The time server's keys (`set time.key`, on the serial console only); none = the built-in
     /// ones (`crate::timesync::TIME_KEYS`).
@@ -224,34 +245,55 @@ impl Default for NodePrefs {
             gps_enabled: false,
             adc_multiplier: 0.0,
             dynamic_cr: false,
+            #[cfg(feature = "net")]
             wifi_ssid: String::new(),
+            #[cfg(feature = "net")]
             wifi_pwd: String::new(),
+            #[cfg(feature = "net")]
             wifi_enabled: true,
+            #[cfg(feature = "net")]
             mqtt_iata: "UNSET".into(),
+            #[cfg(feature = "net")]
             mqtt_brokers: 0x01,
+            #[cfg(feature = "net")]
             mqtt_packets: true,
+            #[cfg(feature = "net")]
             mqtt_tx: false,
+            #[cfg(feature = "net")]
             mqtt_raw: false,
+            #[cfg(feature = "net")]
             mqtt_status: true,
+            #[cfg(feature = "net")]
             mqtt_owner: String::new(),
+            #[cfg(feature = "net")]
             mqtt_email: String::new(),
             room: false,
             // upstream's bridge defaults, but off: bridging is a build of its own there
+            #[cfg(feature = "net")]
             bridge_enabled: false,
+            #[cfg(feature = "net")]
             bridge_delay: 500,
+            #[cfg(feature = "net")]
             bridge_source_rx: false,
+            #[cfg(feature = "net")]
             bridge_channel: 1,
+            #[cfg(feature = "net")]
             bridge_secret: "LVSITANOS".into(),
             ota_roots: crate::release::default_roots(),
             ota_owners: Vec::new(),
+            #[cfg(feature = "net")]
             fw_serve: false,
+            #[cfg(feature = "net")]
             fw_server: "nw.ommesh.ru".into(),
             fw_mode: crate::fwstate::mode::OFF,
             fw_channel: 0,
             fw_source: Vec::new(),
             time_sync: crate::timesync::Mode::Listen.code(),
+            #[cfg(feature = "net")]
             time_serve: false,
+            #[cfg(feature = "net")]
             time_server: "nw.ommesh.ru".into(),
+            #[cfg(feature = "net")]
             time_beacons: 4,
             time_keys: Vec::new(),
             time_gateway: String::new(),
@@ -338,9 +380,12 @@ impl NodePrefs {
         self.password = truncate_str(&self.password, PASSWORD_MAX);
         self.guest_password = truncate_str(&self.guest_password, PASSWORD_MAX);
         self.owner_info = truncate_str(&self.owner_info, OWNER_INFO_MAX);
-        self.bridge_delay = self.bridge_delay.min(10_000);
-        self.bridge_channel = self.bridge_channel.clamp(1, 14);
-        self.bridge_secret = truncate_str(&self.bridge_secret, BRIDGE_SECRET_MAX);
+        #[cfg(feature = "net")]
+        {
+            self.bridge_delay = self.bridge_delay.min(10_000);
+            self.bridge_channel = self.bridge_channel.clamp(1, 14);
+            self.bridge_secret = truncate_str(&self.bridge_secret, BRIDGE_SECRET_MAX);
+        }
     }
 
     pub fn serialize(&self) -> String {
@@ -382,34 +427,37 @@ impl NodePrefs {
         let _ = writeln!(s, "gps={}", b(self.gps_enabled));
         let _ = writeln!(s, "adc_mult={}", Shortest(self.adc_multiplier));
         let _ = writeln!(s, "dyn_cr={}", b(self.dynamic_cr));
-        let _ = writeln!(s, "wifi_ssid={}", escape(&self.wifi_ssid));
-        let _ = writeln!(s, "wifi_pwd={}", escape(&self.wifi_pwd));
-        let _ = writeln!(s, "wifi_enabled={}", b(self.wifi_enabled));
-        let _ = writeln!(s, "mqtt_iata={}", self.mqtt_iata);
-        let _ = writeln!(s, "mqtt_brokers={}", self.mqtt_brokers);
-        let _ = writeln!(s, "mqtt_packets={}", b(self.mqtt_packets));
-        let _ = writeln!(s, "mqtt_tx={}", b(self.mqtt_tx));
-        let _ = writeln!(s, "mqtt_raw={}", b(self.mqtt_raw));
+        #[cfg(feature = "net")]
+        {
+            let _ = writeln!(s, "wifi_ssid={}", escape(&self.wifi_ssid));
+            let _ = writeln!(s, "wifi_pwd={}", escape(&self.wifi_pwd));
+            let _ = writeln!(s, "wifi_enabled={}", b(self.wifi_enabled));
+            let _ = writeln!(s, "mqtt_iata={}", self.mqtt_iata);
+            let _ = writeln!(s, "mqtt_brokers={}", self.mqtt_brokers);
+            let _ = writeln!(s, "mqtt_packets={}", b(self.mqtt_packets));
+            let _ = writeln!(s, "mqtt_tx={}", b(self.mqtt_tx));
+            let _ = writeln!(s, "mqtt_raw={}", b(self.mqtt_raw));
+            let _ = writeln!(s, "mqtt_status={}", b(self.mqtt_status));
+            let _ = writeln!(s, "mqtt_owner={}", self.mqtt_owner);
+            let _ = writeln!(s, "mqtt_email={}", escape(&self.mqtt_email));
+            let _ = writeln!(s, "bridge={}", b(self.bridge_enabled));
+            let _ = writeln!(s, "bridge_delay={}", self.bridge_delay);
+            let _ = writeln!(s, "bridge_src={}", b(self.bridge_source_rx));
+            let _ = writeln!(s, "bridge_ch={}", self.bridge_channel);
+            let _ = writeln!(s, "bridge_secret={}", escape(&self.bridge_secret));
+            let _ = writeln!(s, "fw_serve={}", b(self.fw_serve));
+            let _ = writeln!(s, "fw_server={}", escape(&self.fw_server));
+            let _ = writeln!(s, "time_serve={}", b(self.time_serve));
+            let _ = writeln!(s, "time_server={}", escape(&self.time_server));
+            let _ = writeln!(s, "time_beacons={}", self.time_beacons);
+        }
         let _ = writeln!(s, "room={}", b(self.room));
-        let _ = writeln!(s, "mqtt_status={}", b(self.mqtt_status));
-        let _ = writeln!(s, "mqtt_owner={}", self.mqtt_owner);
-        let _ = writeln!(s, "mqtt_email={}", escape(&self.mqtt_email));
-        let _ = writeln!(s, "bridge={}", b(self.bridge_enabled));
-        let _ = writeln!(s, "bridge_delay={}", self.bridge_delay);
-        let _ = writeln!(s, "bridge_src={}", b(self.bridge_source_rx));
-        let _ = writeln!(s, "bridge_ch={}", self.bridge_channel);
-        let _ = writeln!(s, "bridge_secret={}", escape(&self.bridge_secret));
         let _ = writeln!(s, "ota_root={}", join_fingerprints(&self.ota_roots, ","));
         let _ = writeln!(s, "ota_owner={}", join_fingerprints(&self.ota_owners, ","));
-        let _ = writeln!(s, "fw_serve={}", b(self.fw_serve));
-        let _ = writeln!(s, "fw_server={}", escape(&self.fw_server));
         let _ = writeln!(s, "fw_mode={}", self.fw_mode);
         let _ = writeln!(s, "fw_channel={}", self.fw_channel);
         let _ = writeln!(s, "fw_source={}", crate::util::to_hex(&self.fw_source));
         let _ = writeln!(s, "time_sync={}", self.time_sync);
-        let _ = writeln!(s, "time_serve={}", b(self.time_serve));
-        let _ = writeln!(s, "time_server={}", escape(&self.time_server));
-        let _ = writeln!(s, "time_beacons={}", self.time_beacons);
         let _ = writeln!(s, "time_keys={}", join_keys(&self.time_keys));
         let _ = writeln!(s, "time_gateway={}", self.time_gateway);
         let _ = writeln!(s, "buzzer_quiet={}", b(self.buzzer_quiet));
@@ -463,26 +511,44 @@ impl NodePrefs {
                 "gps" => p.gps_enabled = flag(),
                 "adc_mult" => p.adc_multiplier = (atof(v) as f32).clamp(0.0, 10.0),
                 "dyn_cr" => p.dynamic_cr = flag(),
+                #[cfg(feature = "net")]
                 "wifi_ssid" => p.wifi_ssid = unescape(v),
+                #[cfg(feature = "net")]
                 "wifi_pwd" => p.wifi_pwd = unescape(v),
+                #[cfg(feature = "net")]
                 "wifi_enabled" => p.wifi_enabled = flag(),
+                #[cfg(feature = "net")]
                 "mqtt_iata" => p.mqtt_iata = v.into(),
+                #[cfg(feature = "net")]
                 "mqtt_brokers" => p.mqtt_brokers = u8v(),
+                #[cfg(feature = "net")]
                 "mqtt_packets" => p.mqtt_packets = flag(),
+                #[cfg(feature = "net")]
                 "mqtt_tx" => p.mqtt_tx = flag(),
+                #[cfg(feature = "net")]
                 "mqtt_raw" => p.mqtt_raw = flag(),
                 "room" => p.room = flag(),
+                #[cfg(feature = "net")]
                 "mqtt_status" => p.mqtt_status = flag(),
+                #[cfg(feature = "net")]
                 "mqtt_owner" => p.mqtt_owner = v.into(),
+                #[cfg(feature = "net")]
                 "mqtt_email" => p.mqtt_email = unescape(v),
+                #[cfg(feature = "net")]
                 "bridge" => p.bridge_enabled = flag(),
+                #[cfg(feature = "net")]
                 "bridge_delay" => p.bridge_delay = atoi(v).min(u16::MAX as u32) as u16,
+                #[cfg(feature = "net")]
                 "bridge_src" => p.bridge_source_rx = flag(),
+                #[cfg(feature = "net")]
                 "bridge_ch" => p.bridge_channel = u8v(),
+                #[cfg(feature = "net")]
                 "bridge_secret" => p.bridge_secret = unescape(v),
                 "ota_root" => p.ota_roots = parse_fingerprints(v).unwrap_or_default(),
                 "ota_owner" => p.ota_owners = parse_fingerprints(v).unwrap_or_default(),
+                #[cfg(feature = "net")]
                 "fw_serve" => p.fw_serve = flag(),
+                #[cfg(feature = "net")]
                 "fw_server" => p.fw_server = unescape(v),
                 "fw_mode" => p.fw_mode = u8v().min(crate::fwstate::mode::INSTALL),
                 // before the three modes: on was what `install` is now
@@ -496,8 +562,11 @@ impl NodePrefs {
                     }
                 }
                 "time_sync" => p.time_sync = crate::timesync::Mode::from_code(u8v()).code(),
+                #[cfg(feature = "net")]
                 "time_serve" => p.time_serve = flag(),
+                #[cfg(feature = "net")]
                 "time_server" => p.time_server = unescape(v),
+                #[cfg(feature = "net")]
                 "time_beacons" => p.time_beacons = u8v().min(24),
                 "time_keys" => p.time_keys = parse_keys(v).unwrap_or_default(),
                 "time_gateway" => p.time_gateway = v.into(),

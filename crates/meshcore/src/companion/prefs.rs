@@ -71,8 +71,11 @@ pub struct CompanionPrefs {
     /// so an e-paper home page never ticks.
     pub ui_show_clock: bool,
     /// Wi-Fi station for the TCP companion interface.
+    #[cfg(feature = "net")]
     pub wifi_ssid: String,
+    #[cfg(feature = "net")]
     pub wifi_pwd: String,
+    #[cfg(feature = "net")]
     pub wifi_enabled: bool,
     /// The GPS receiver on (boards that have one); off by default, as upstream.
     pub gps_enabled: bool,
@@ -96,6 +99,7 @@ pub struct CompanionPrefs {
     pub fw_mode: u8,
     /// Host of the release server, asked while the node is on Wi-Fi (plain HTTP: what it serves
     /// is signed).
+    #[cfg(feature = "net")]
     pub fw_server: String,
     /// Public key prefix of the repeater to ask, over LoRa even with Wi-Fi; empty = the release
     /// server, else the best repeater heard directly.
@@ -155,8 +159,11 @@ impl Default for CompanionPrefs {
             default_scope_key: [0; 16],
             tz_offset: 0.0,
             ui_show_clock: false,
+            #[cfg(feature = "net")]
             wifi_ssid: String::new(),
+            #[cfg(feature = "net")]
             wifi_pwd: String::new(),
+            #[cfg(feature = "net")]
             wifi_enabled: true,
             gps_enabled: false,
             gps_interval: 0,
@@ -165,6 +172,7 @@ impl Default for CompanionPrefs {
             ota_roots: crate::release::default_roots(),
             ota_owners: Vec::new(),
             fw_mode: crate::fwstate::mode::OFF,
+            #[cfg(feature = "net")]
             fw_server: "nw.ommesh.ru".into(),
             fw_source: Vec::new(),
             fw_channel: 0,
@@ -241,9 +249,13 @@ impl CompanionPrefs {
         let _ = writeln!(s, "defs_key={}", to_hex(&self.default_scope_key));
         let _ = writeln!(s, "tz_offset={}", Shortest(self.tz_offset));
         let _ = writeln!(s, "ui_show_clock={}", b(self.ui_show_clock));
-        let _ = writeln!(s, "wifi_ssid={}", escape(&self.wifi_ssid));
-        let _ = writeln!(s, "wifi_pwd={}", escape(&self.wifi_pwd));
-        let _ = writeln!(s, "wifi_enabled={}", b(self.wifi_enabled));
+        #[cfg(feature = "net")]
+        {
+            let _ = writeln!(s, "wifi_ssid={}", escape(&self.wifi_ssid));
+            let _ = writeln!(s, "wifi_pwd={}", escape(&self.wifi_pwd));
+            let _ = writeln!(s, "wifi_enabled={}", b(self.wifi_enabled));
+            let _ = writeln!(s, "fw_server={}", escape(&self.fw_server));
+        }
         let _ = writeln!(s, "gps={}", b(self.gps_enabled));
         let _ = writeln!(s, "gps_int={}", self.gps_interval);
         let _ = writeln!(s, "adc_mult={}", Shortest(self.adc_multiplier));
@@ -251,7 +263,6 @@ impl CompanionPrefs {
         let _ = writeln!(s, "ota_root={}", join_fingerprints(&self.ota_roots, ","));
         let _ = writeln!(s, "ota_owner={}", join_fingerprints(&self.ota_owners, ","));
         let _ = writeln!(s, "fw_mode={}", self.fw_mode);
-        let _ = writeln!(s, "fw_server={}", escape(&self.fw_server));
         let _ = writeln!(s, "fw_source={}", crate::util::to_hex(&self.fw_source));
         let _ = writeln!(s, "fw_channel={}", self.fw_channel);
         let _ = writeln!(s, "time_sync={}", self.time_sync);
@@ -310,8 +321,11 @@ impl CompanionPrefs {
                 }
                 "tz_offset" => p.tz_offset = (atof(v) as f32).clamp(-12.0, 14.0),
                 "ui_show_clock" => p.ui_show_clock = atoi(v) != 0,
+                #[cfg(feature = "net")]
                 "wifi_ssid" => p.wifi_ssid = unescape(v),
+                #[cfg(feature = "net")]
                 "wifi_pwd" => p.wifi_pwd = unescape(v),
+                #[cfg(feature = "net")]
                 "wifi_enabled" => p.wifi_enabled = flag(),
                 "gps" => p.gps_enabled = flag(),
                 "gps_int" => p.gps_interval = atoi(v),
@@ -322,6 +336,7 @@ impl CompanionPrefs {
                 // `fw_pull` before the rename, with the same numbers (on = download, auto = install)
                 "fw_mode" | "fw_pull" => p.fw_mode = u8v().min(crate::fwstate::mode::INSTALL),
                 "fw_channel" => p.fw_channel = u8v().min(1),
+                #[cfg(feature = "net")]
                 "fw_server" => p.fw_server = unescape(v),
                 "fw_source" => {
                     let mut key = alloc::vec![0u8; (v.len() / 2).min(32)];

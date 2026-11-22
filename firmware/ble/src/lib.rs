@@ -16,6 +16,7 @@ extern crate alloc;
 
 mod att;
 pub mod crypto;
+pub mod p256;
 mod smp;
 #[cfg(test)]
 mod tests;

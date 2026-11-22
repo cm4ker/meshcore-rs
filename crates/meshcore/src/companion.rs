@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 
 use crate::advert::*;
 use crate::crypto::{self, Secret};
+#[cfg(feature = "net")]
 use crate::fwshare::FwStore;
 use crate::gps::GpsReading;
 use crate::identity::Identity;
@@ -381,6 +382,21 @@ pub trait BlobStore {
     }
 }
 
+/// A no-op [`BlobStore`] (zero-sized), used when a board has no flash store so firmware images
+/// do not pull `BTreeMap` in via [`MemBlobStore`].
+#[derive(Default)]
+pub struct NoopBlobStore;
+
+impl BlobStore for NoopBlobStore {
+    fn get(&self, _: &[u8; PUB_KEY_SIZE]) -> Option<Vec<u8>> {
+        None
+    }
+    fn put(&mut self, _: &[u8; PUB_KEY_SIZE], _: &[u8]) -> bool {
+        false
+    }
+    fn delete(&mut self, _: &[u8; PUB_KEY_SIZE]) {}
+}
+
 /// A [`BlobStore`] in RAM, for hosts without flash (tests, simulators).
 #[derive(Default)]
 pub struct MemBlobStore {
@@ -435,7 +451,9 @@ pub struct Board {
     pub mcu_temp_c: Option<f32>,
     pub max_tx_power_dbm: i8,
     /// Status line for `get wifi.status`.
+    #[cfg(feature = "net")]
     pub wifi_status: String,
+    #[cfg(feature = "net")]
     pub wifi_ip: Option<String>,
     /// A GPS receiver: its `gps` setting is offered to the app.
     pub has_gps: bool,
@@ -475,6 +493,7 @@ pub struct Board {
     pub fw_skip: u32,
     /// What the release server last said, on a node that asks it over Wi-Fi: the third line of
     /// `fw` (empty: none yet).
+    #[cfg(feature = "net")]
     pub fw_store: String,
 }
 
@@ -486,7 +505,9 @@ impl Default for Board {
             batt_mv: 0,
             mcu_temp_c: None,
             max_tx_power_dbm: 22,
+            #[cfg(feature = "net")]
             wifi_status: String::new(),
+            #[cfg(feature = "net")]
             wifi_ip: None,
             has_gps: false,
             has_buzzer: false,
@@ -503,6 +524,7 @@ impl Default for Board {
             fw_prev: String::new(),
             fw_rollback: false,
             fw_skip: 0,
+            #[cfg(feature = "net")]
             fw_store: String::new(),
         }
     }
@@ -590,6 +612,7 @@ pub struct Companion {
     /// The latest nodes heard advertising, most recent first.
     pub heard: VecDeque<HeardNode>,
     /// Updates from the release server, on a board with a network (Wi-Fi); set by the firmware.
+    #[cfg(feature = "net")]
     pub fw_store: Option<Box<dyn FwStore>>,
     /// Firmware updates pulled from the release server or a neighbouring repeater (`fw.auto`).
     fwpull: fwpull::FwPull,
@@ -639,6 +662,10 @@ fn c_str(b: &[u8]) -> &[u8] {
 
 impl Companion {
     pub fn new(prefs: CompanionPrefs, board: Board) -> Self {
+        Self::with_blobs(prefs, board, Box::new(MemBlobStore::default()))
+    }
+
+    pub fn with_blobs(prefs: CompanionPrefs, board: Board, blobs: Box<dyn BlobStore>) -> Self {
         let ota = OtaEndpoint::new(prefs.ota_roots.clone(), prefs.ota_owners.clone(), release::role::COMPANION);
         let mut timesync = TimeSync::new(timesync::Mode::from_code(prefs.time_sync), &prefs.time_keys);
         timesync.remember(&prefs.time_gateway, 0);
@@ -646,12 +673,13 @@ impl Companion {
             prefs,
             board,
             effects: Effects::default(),
-            blobs: Box::new(MemBlobStore::default()),
+            blobs,
             ota,
             connected: true,
             recent: VecDeque::new(),
             messages_received: 0,
             heard: VecDeque::new(),
+            #[cfg(feature = "net")]
             fw_store: None,
             fwpull: fwpull::FwPull::default(),
             fw_done: String::new(),
@@ -1125,7 +1153,8 @@ impl Companion {
         if self.timesync.clock() == timesync::Clock::Unknown {
             return Some(None);
         }
-        let secs = ctx.current_time() as i64 + libm::roundf(self.prefs.tz_offset * 3600.0) as i64;
+        let tz_s = self.prefs.tz_offset * 3600.0;
+        let secs = ctx.current_time() as i64 + if tz_s >= 0.0 { (tz_s + 0.5) as i64 } else { (tz_s - 0.5) as i64 };
         let day = secs.rem_euclid(86_400);
         Some(Some(((day / 3600) as u8, (day % 3600 / 60) as u8)))
     }
@@ -1145,9 +1174,9 @@ impl Companion {
     /// A position from the GPS (`EnvironmentSensorManager::loop`), in millionths of a degree and
     /// millimetres: the node's location from now on.
     pub fn set_gps_position(&mut self, lat: i32, lon: i32, alt_mm: i32) {
-        self.prefs.node_lat = lat as f64 / 1e6;
-        self.prefs.node_lon = lon as f64 / 1e6;
-        self.board.altitude_m = alt_mm as f64 / 1000.0;
+        self.prefs.node_lat = crate::util::i32_div_10n(lat, 6);
+        self.prefs.node_lon = crate::util::i32_div_10n(lon, 6);
+        self.board.altitude_m = crate::util::i32_div_10n(alt_mm, 3);
     }
 
     fn lpp_voltage(&self, out: &mut Vec<u8>) {
@@ -1169,7 +1198,11 @@ impl Companion {
             out.extend_from_slice(&[TELEM_CHANNEL_SELF, LPP_GPS]);
             // 1/10000 degree and centimetres, 24 bits each
             let p = &self.prefs;
-            for v in [(p.node_lat * 10_000.0) as i32, (p.node_lon * 10_000.0) as i32, (self.board.altitude_m * 100.0) as i32] {
+            for v in [
+                crate::util::f64_mul_10n_i32(p.node_lat, 4),
+                crate::util::f64_mul_10n_i32(p.node_lon, 4),
+                crate::util::f64_mul_10n_i32(self.board.altitude_m, 2),
+            ] {
                 out.extend_from_slice(&v.to_be_bytes()[1..]);
             }
         }
@@ -1408,7 +1441,7 @@ impl MeshApp for Companion {
         if self.prefs.rx_delay_base <= 0.0 {
             return 0;
         }
-        ((libm::powf(self.prefs.rx_delay_base, 0.85 - score) - 1.0) * air_time as f32) as i32
+        ((crate::util::powf(self.prefs.rx_delay_base, 0.85 - score) - 1.0) * air_time as f32) as i32
     }
 
     fn log_rx_raw(&mut self, _ctx: &MeshCtx, raw: &[u8], snr: f32, rssi: f32) {

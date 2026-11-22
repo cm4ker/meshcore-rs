@@ -1090,11 +1090,13 @@ impl OtaEndpoint {
                     (Err(e), Some(s), Some(t)) => {
                         let staged = s.staged_sha256(t).map(|h| crate::util::to_hex(&h[..8]));
                         OtaOutcome::CommitFailed(alloc::format!(
-                            "OTA: commit failed: {e:?} (received {} bytes, sha256 {staged:?})",
-                            s.size()
+                            "OTA: commit failed: #{} (received {} bytes, sha256 {})",
+                            e as u8,
+                            s.size(),
+                            staged.as_deref().unwrap_or("-"),
                         ))
                     }
-                    (Err(e), ..) => OtaOutcome::CommitFailed(alloc::format!("OTA: commit failed: {e:?}")),
+                    (Err(e), ..) => OtaOutcome::CommitFailed(alloc::format!("OTA: commit failed: #{}", e as u8)),
                 };
                 (Some(vec![status(res)]), outcome)
             }
@@ -1275,6 +1277,22 @@ impl Inflater {
         }
         Ok(())
     }
+}
+
+/// Inflate a raw DEFLATE stream of known uncompressed length `out_len`, reusing the heap-allocated
+/// `DecompressorOxide` path (never putting its ~11 KiB state on the stack).
+pub fn inflate_raw(data: &[u8], out_len: usize) -> Option<Vec<u8>> {
+    use miniz_oxide::inflate::TINFLStatus;
+    use miniz_oxide::inflate::core::decompress_with_limit;
+    use miniz_oxide::inflate::core::inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
+
+    // SAFETY: same invariant as `Inflater::new()` above.
+    let mut state: Box<miniz_oxide::inflate::core::DecompressorOxide> = unsafe { Box::new_zeroed().assume_init() };
+    state.init();
+    let mut out = vec![0u8; out_len];
+    let (status, _, written) =
+        decompress_with_limit(&mut state, data, &mut out, 0, out_len, TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+    (status == TINFLStatus::Done && written == out_len).then_some(out)
 }
 
 /// A delta applied as its chunks come, in order: for a slot without the room to keep the patch
@@ -1957,5 +1975,15 @@ mod tests {
         }
         assert_eq!(send(&mut ep, &cosigned.to_bytes()), 0);
         assert_eq!(begin_status(&mut ep), 0);
+    }
+
+    #[test]
+    fn inflate_raw_roundtrip() {
+        let src: Vec<u8> = (0..6400usize).map(|i| ((i * 73) ^ (i >> 3)) as u8).collect();
+        let compressed = miniz_oxide::deflate::compress_to_vec(&src, 10);
+        assert!(compressed.len() < src.len());
+        assert_eq!(inflate_raw(&compressed, src.len()).as_deref(), Some(src.as_slice()));
+        assert_eq!(inflate_raw(&compressed, src.len() - 1), None);
+        assert_eq!(inflate_raw(&compressed[..compressed.len() - 4], src.len()), None);
     }
 }

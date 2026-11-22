@@ -227,148 +227,58 @@ impl Scalar29 {
     }
 
     /// Compute `a * b`.
-    ///
-    /// This is implemented with a one-level refined Karatsuba decomposition
-    // meshcore-rust patch: once in the image, not a copy in each caller (was inline(always))
+    // meshcore-rust patch: compact constant-time schoolbook loop (replaces unrolled Karatsuba)
     #[inline(never)]
-    #[rustfmt::skip] // keep alignment of z[*] calculations
-    pub (crate) fn mul_internal(a: &Scalar29, b: &Scalar29) -> [u64; 17] {
+    pub(crate) fn mul_internal(a: &Scalar29, b: &Scalar29) -> [u64; 17] {
         let mut z = [0u64; 17];
-
-        z[0] = m(a[0], b[0]);                                                                 // c00
-        z[1] = m(a[0], b[1]) + m(a[1], b[0]);                                                 // c01
-        z[2] = m(a[0], b[2]) + m(a[1], b[1]) + m(a[2], b[0]);                                 // c02
-        z[3] = m(a[0], b[3]) + m(a[1], b[2]) + m(a[2], b[1]) + m(a[3], b[0]);                 // c03
-        z[4] = m(a[0], b[4]) + m(a[1], b[3]) + m(a[2], b[2]) + m(a[3], b[1]) + m(a[4], b[0]); // c04
-        z[5] =                 m(a[1], b[4]) + m(a[2], b[3]) + m(a[3], b[2]) + m(a[4], b[1]); // c05
-        z[6] =                                 m(a[2], b[4]) + m(a[3], b[3]) + m(a[4], b[2]); // c06
-        z[7] =                                                 m(a[3], b[4]) + m(a[4], b[3]); // c07
-        z[8] =                                                                (m(a[4], b[4])).wrapping_sub(z[3]); // c08 - c03
-
-        z[10] = z[5].wrapping_sub(m(a[5], b[5]));                                                // c05mc10
-        z[11] = z[6].wrapping_sub(m(a[5], b[6]) + m(a[6], b[5]));                                // c06mc11
-        z[12] = z[7].wrapping_sub(m(a[5], b[7]) + m(a[6], b[6]) + m(a[7], b[5]));                // c07mc12
-        z[13] =                   m(a[5], b[8]) + m(a[6], b[7]) + m(a[7], b[6]) + m(a[8], b[5]); // c13
-        z[14] =                                   m(a[6], b[8]) + m(a[7], b[7]) + m(a[8], b[6]); // c14
-        z[15] =                                                   m(a[7], b[8]) + m(a[8], b[7]); // c15
-        z[16] =                                                                   m(a[8], b[8]); // c16
-
-        z[ 5] = z[10].wrapping_sub(z[ 0]); // c05mc10 - c00
-        z[ 6] = z[11].wrapping_sub(z[ 1]); // c06mc11 - c01
-        z[ 7] = z[12].wrapping_sub(z[ 2]); // c07mc12 - c02
-        z[ 8] = z[ 8].wrapping_sub(z[13]); // c08mc13 - c03
-        z[ 9] = z[14].wrapping_add(z[ 4]); // c14 + c04
-        z[10] = z[15].wrapping_add(z[10]); // c15 + c05mc10
-        z[11] = z[16].wrapping_add(z[11]); // c16 + c06mc11
-
-        let aa = [
-            a[0] + a[5],
-            a[1] + a[6],
-            a[2] + a[7],
-            a[3] + a[8]
-        ];
-
-        let bb = [
-            b[0] + b[5],
-            b[1] + b[6],
-            b[2] + b[7],
-            b[3] + b[8]
-        ];
-
-        z[ 5] = (m(aa[0], bb[0]))                                                                       .wrapping_add(z[ 5]); // c20 + c05mc10 - c00
-        z[ 6] = (m(aa[0], bb[1]) + m(aa[1], bb[0]))                                                     .wrapping_add(z[ 6]); // c21 + c06mc11 - c01
-        z[ 7] = (m(aa[0], bb[2]) + m(aa[1], bb[1]) + m(aa[2], bb[0]))                                   .wrapping_add(z[ 7]); // c22 + c07mc12 - c02
-        z[ 8] = (m(aa[0], bb[3]) + m(aa[1], bb[2]) + m(aa[2], bb[1]) + m(aa[3], bb[0]))                 .wrapping_add(z[ 8]); // c23 + c08mc13 - c03
-        z[ 9] = (m(aa[0],  b[4]) + m(aa[1], bb[3]) + m(aa[2], bb[2]) + m(aa[3], bb[1]) + m(a[4], bb[0])).wrapping_sub(z[ 9]); // c24 - c14 - c04
-        z[10] = (                  m(aa[1],  b[4]) + m(aa[2], bb[3]) + m(aa[3], bb[2]) + m(a[4], bb[1])).wrapping_sub(z[10]); // c25 - c15 - c05mc10
-        z[11] = (                                    m(aa[2],  b[4]) + m(aa[3], bb[3]) + m(a[4], bb[2])).wrapping_sub(z[11]); // c26 - c16 - c06mc11
-        z[12] = (                                                      m(aa[3],  b[4]) + m(a[4], bb[3])).wrapping_sub(z[12]); // c27 - c07mc12
-
+        for i in 0..9 {
+            let ai = a[i] as u64;
+            for j in 0..9 {
+                z[i + j] += ai * (b[j] as u64);
+            }
+        }
         z
     }
 
     /// Compute `a^2`.
-    // meshcore-rust patch: once in the image, not a copy in each caller (was inline(always))
-    #[inline(never)]
-    #[rustfmt::skip] // keep alignment of calculations
+    // meshcore-rust patch: reuse mul_internal instead of a separate unrolled squaring routine
+    #[inline(always)]
     fn square_internal(a: &Scalar29) -> [u64; 17] {
-        let aa = [
-            a[0] * 2,
-            a[1] * 2,
-            a[2] * 2,
-            a[3] * 2,
-            a[4] * 2,
-            a[5] * 2,
-            a[6] * 2,
-            a[7] * 2
-        ];
-
-        [
-            m( a[0], a[0]),
-            m(aa[0], a[1]),
-            m(aa[0], a[2]) + m( a[1], a[1]),
-            m(aa[0], a[3]) + m(aa[1], a[2]),
-            m(aa[0], a[4]) + m(aa[1], a[3]) + m( a[2], a[2]),
-            m(aa[0], a[5]) + m(aa[1], a[4]) + m(aa[2], a[3]),
-            m(aa[0], a[6]) + m(aa[1], a[5]) + m(aa[2], a[4]) + m( a[3], a[3]),
-            m(aa[0], a[7]) + m(aa[1], a[6]) + m(aa[2], a[5]) + m(aa[3], a[4]),
-            m(aa[0], a[8]) + m(aa[1], a[7]) + m(aa[2], a[6]) + m(aa[3], a[5]) + m( a[4], a[4]),
-                             m(aa[1], a[8]) + m(aa[2], a[7]) + m(aa[3], a[6]) + m(aa[4], a[5]),
-                                              m(aa[2], a[8]) + m(aa[3], a[7]) + m(aa[4], a[6]) + m( a[5], a[5]),
-                                                               m(aa[3], a[8]) + m(aa[4], a[7]) + m(aa[5], a[6]),
-                                                                                m(aa[4], a[8]) + m(aa[5], a[7]) + m( a[6], a[6]),
-                                                                                                 m(aa[5], a[8]) + m(aa[6], a[7]),
-                                                                                                                  m(aa[6], a[8]) + m( a[7], a[7]),
-                                                                                                                                   m(aa[7], a[8]),
-                                                                                                                                                    m( a[8], a[8]),
-        ]
+        Scalar29::mul_internal(a, a)
     }
 
     /// Compute `limbs/R` (mod l), where R is the Montgomery modulus 2^261
-    // meshcore-rust patch: once in the image, not a copy in each caller (was inline(always))
+    // meshcore-rust patch: compact constant-time loop (replaces unrolled reduction)
     #[inline(never)]
-    #[rustfmt::skip] // keep alignment of part1() and part2() computations
-    pub (crate) fn montgomery_reduce(limbs: &[u64; 17]) -> Scalar29 {
-
-        #[inline(always)]
-        fn part1(sum: u64) -> (u64, u32) {
-            let p = (sum as u32).wrapping_mul(constants::LFACTOR) & ((1u32 << 29) - 1);
-            ((sum + m(p,constants::L[0])) >> 29, p)
-        }
-
-        #[inline(always)]
-        fn part2(sum: u64) -> (u64, u32) {
-            let w = (sum as u32) & ((1u32 << 29) - 1);
-            (sum >> 29, w)
-        }
-
-        // note: l5,l6,l7 are zero, so their multiplies can be skipped
+    pub(crate) fn montgomery_reduce(limbs: &[u64; 17]) -> Scalar29 {
+        const MASK: u32 = (1u32 << 29) - 1;
         let l = &constants::L;
+        let mut n = [0u32; 9];
+        let mut r = [0u32; 9];
+        let mut carry = 0u64;
 
-        // the first half computes the Montgomery adjustment factor n, and begins adding n*l to make limbs divisible by R
-        let (carry, n0) = part1(        limbs[ 0]);
-        let (carry, n1) = part1(carry + limbs[ 1] + m(n0,l[1]));
-        let (carry, n2) = part1(carry + limbs[ 2] + m(n0,l[2]) + m(n1,l[1]));
-        let (carry, n3) = part1(carry + limbs[ 3] + m(n0,l[3]) + m(n1,l[2]) + m(n2,l[1]));
-        let (carry, n4) = part1(carry + limbs[ 4] + m(n0,l[4]) + m(n1,l[3]) + m(n2,l[2]) + m(n3,l[1]));
-        let (carry, n5) = part1(carry + limbs[ 5]              + m(n1,l[4]) + m(n2,l[3]) + m(n3,l[2]) + m(n4,l[1]));
-        let (carry, n6) = part1(carry + limbs[ 6]                           + m(n2,l[4]) + m(n3,l[3]) + m(n4,l[2]) + m(n5,l[1]));
-        let (carry, n7) = part1(carry + limbs[ 7]                                        + m(n3,l[4]) + m(n4,l[3]) + m(n5,l[2]) + m(n6,l[1]));
-        let (carry, n8) = part1(carry + limbs[ 8] + m(n0,l[8])                                        + m(n4,l[4]) + m(n5,l[3]) + m(n6,l[2]) + m(n7,l[1]));
+        for k in 0..9 {
+            let mut sum = carry + limbs[k];
+            for j in 0..k {
+                sum += m(n[j], l[k - j]);
+            }
+            let p = (sum as u32).wrapping_mul(constants::LFACTOR) & MASK;
+            n[k] = p;
+            carry = (sum + m(p, l[0])) >> 29;
+        }
 
-        // limbs is divisible by R now, so we can divide by R by simply storing the upper half as the result
-        let (carry, r0) = part2(carry + limbs[ 9]              + m(n1,l[8])                                        + m(n5,l[4]) + m(n6,l[3]) + m(n7,l[2]) + m(n8,l[1]));
-        let (carry, r1) = part2(carry + limbs[10]                           + m(n2,l[8])                                        + m(n6,l[4]) + m(n7,l[3]) + m(n8,l[2]));
-        let (carry, r2) = part2(carry + limbs[11]                                        + m(n3,l[8])                                        + m(n7,l[4]) + m(n8,l[3]));
-        let (carry, r3) = part2(carry + limbs[12]                                                     + m(n4,l[8])                                        + m(n8,l[4]));
-        let (carry, r4) = part2(carry + limbs[13]                                                                  + m(n5,l[8])                                       );
-        let (carry, r5) = part2(carry + limbs[14]                                                                               + m(n6,l[8])                          );
-        let (carry, r6) = part2(carry + limbs[15]                                                                                            + m(n7,l[8])             );
-        let (carry, r7) = part2(carry + limbs[16]                                                                                                         + m(n8,l[8]));
-        let         r8 = carry as u32;
+        for k in 9..17 {
+            let mut sum = carry + limbs[k];
+            for j in (k - 8)..9 {
+                sum += m(n[j], l[k - j]);
+            }
+            r[k - 9] = (sum as u32) & MASK;
+            carry = sum >> 29;
+        }
+        r[8] = carry as u32;
 
         // result may be >= l, so attempt to subtract l
-        Scalar29::sub(&Scalar29([r0,r1,r2,r3,r4,r5,r6,r7,r8]), l)
+        Scalar29::sub(&Scalar29(r), l)
     }
 
     /// Compute `a * b` (mod l).

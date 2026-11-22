@@ -37,7 +37,7 @@ pub struct Nrf {
     pub in_trial: bool,
     /// The data could not be put back in the region: it stays aside until the next start.
     pub stays_aside: bool,
-    pub updates: Option<&'static dyn ota::Updates>,
+    pub updates: Option<ota::InPlace>,
 }
 
 impl Platform for Nrf {
@@ -57,7 +57,7 @@ impl Platform for Nrf {
     }
 
     fn ota_target(&mut self) -> Option<Box<dyn FirmwareTarget>> {
-        self.updates?.target(self.store.clone(), true)
+        self.updates?.target::<true>(self.store.clone())
     }
 
     fn in_trial(&self) -> bool {

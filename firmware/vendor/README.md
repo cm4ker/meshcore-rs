@@ -38,13 +38,12 @@ The T-Echo crate uses it through `[patch.crates-io]`.
 
 ## curve25519-dalek 5.0.0
 
-Curve25519 and Ed25519 arithmetic (dalek-cryptography), BSD-3-Clause, from crates.io with one
-change, marked `meshcore-rust patch` in `src/backend/serial/u32/scalar.rs`: the 32-bit backend's
-`mul_internal`, `square_internal` and `montgomery_reduce` are `inline(never)` instead of
-`inline(always)`. Inlined, each of the scalar operations that use them (a product mod l, the
-reduction of a hash, of a key) carried its own copy, unrolled: 21 KB of the Heltec V4 repeater,
-9 KB on the nRF52. Once each, the boards are 5.5 to 15.5 KB smaller. The arithmetic is the same,
-statement for statement; a signature takes a few calls more.
+Curve25519 and Ed25519 arithmetic (dalek-cryptography), BSD-3-Clause, from crates.io with compact
+32-bit backend patches marked `meshcore-rust patch` in `src/backend/serial/u32/{scalar.rs,field.rs}`:
+- `Scalar29::{mul_internal, montgomery_reduce}` use compact constant-time loops (`#[inline(never)]`)
+  instead of unrolled Karatsuba/reduction, and `square_internal` reuses `mul_internal`.
+- `FieldElement2625::{Mul::mul, square_inner}` share a single compact constant-time loop
+  (`mul_inner`) instead of two unrolled 10×10 limb matrices.
 
 Every board crate, firmware/common and the repository's workspace (so that the tests run this
 copy; with `--cfg curve25519_dalek_bits="32"` they run the 32-bit backend the boards use) take it

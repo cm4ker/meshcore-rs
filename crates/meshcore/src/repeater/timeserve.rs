@@ -6,22 +6,31 @@
 //! about as many beacons as one would send. Its own clock follows the tokens it fetches.
 
 use super::*;
+#[cfg(feature = "net")]
 use crate::mesh::GroupChannel;
-use crate::timesync::{self, NONCE_LEN, TOKEN_LEN, Token, status};
+#[cfg(feature = "net")]
+use crate::timesync::{NONCE_LEN, TOKEN_LEN, Token, status};
+use crate::timesync;
 
-/// The first beacon, a while after boot (a power cut restarts the gateways too: their nodes
+/// First beacon goes out this long after boot (a power cut restarts the gateways too: their nodes
 /// are waiting), plus up to a minute by the node's key.
+#[cfg(feature = "net")]
 const FIRST_BEACON_MS: u64 = 5 * 60_000;
 /// After a failed fetch, or while the link is down.
+#[cfg(feature = "net")]
 const BEACON_RETRY_MS: u64 = 60_000;
 /// An answer waits this long for its token; the asker gives up at `timesync::MAX_RTT_MS`.
+#[cfg(feature = "net")]
 const FETCH_WAIT_MS: u64 = 10_000;
 /// Requests waiting for a token at once.
+#[cfg(feature = "net")]
 const MAX_WAITING: usize = 4;
 /// What a busy gateway tells an asker to wait.
+#[cfg(feature = "net")]
 const BUSY_RETRY_SECS: u16 = 60;
 
 /// A request waiting for its token.
+#[cfg(feature = "net")]
 struct Waiting {
     nonce: [u8; NONCE_LEN],
     to: Identity,
@@ -32,6 +41,7 @@ struct Waiting {
     until: u64,
 }
 
+#[cfg(feature = "net")]
 pub(super) struct TimeServe {
     waiting: Vec<Waiting>,
     /// The beacon's token being fetched: its nonce, and when it was asked for.
@@ -44,12 +54,14 @@ pub(super) struct TimeServe {
     poll_at: Option<u64>,
 }
 
+#[cfg(feature = "net")]
 impl TimeServe {
     pub(super) fn new() -> Self {
         Self { waiting: Vec::new(), beacon: None, next_beacon: 0, heard: None, limiter: RateLimiter::new(20, 60), poll_at: None }
     }
 }
 
+#[cfg(feature = "net")]
 impl Repeater {
     fn beacon_period_ms(&self) -> u64 {
         24 * 3_600_000 / self.prefs.time_beacons.max(1) as u64
@@ -205,13 +217,9 @@ impl Repeater {
         (self.time_serving() && self.prefs.time_beacons > 0).then_some(self.timeserve.next_beacon)
     }
 
-    /// The server keys this node checks against.
-    pub(super) fn time_keys(&self) -> Vec<[u8; PUB_KEY_SIZE]> {
-        if self.prefs.time_keys.is_empty() { timesync::TIME_KEYS.to_vec() } else { self.prefs.time_keys.clone() }
-    }
-
     /// `get time.serve`'s detail.
-    pub(super) fn time_serve_status(&self, ctx: &MeshCtx) -> String {
+    #[cfg(feature = "net")]
+    fn time_serve_status(&self, ctx: &MeshCtx) -> String {
         if !self.prefs.time_serve {
             return "off".into();
         }
@@ -231,6 +239,11 @@ impl Repeater {
 }
 
 impl Repeater {
+    /// The server keys this node checks against.
+    pub(super) fn time_keys(&self) -> Vec<[u8; PUB_KEY_SIZE]> {
+        if self.prefs.time_keys.is_empty() { timesync::TIME_KEYS.to_vec() } else { self.prefs.time_keys.clone() }
+    }
+
     /// `get time.*`.
     pub(super) fn handle_get_time(&self, ctx: &MeshCtx, cfg: &str) -> Option<String> {
         let p = &self.prefs;
@@ -238,17 +251,21 @@ impl Repeater {
             format!("> {}", self.timesync.status(ctx))
         } else if cfg.starts_with("time.sync") {
             format!("> {}", timesync::Mode::from_code(p.time_sync).name())
-        } else if cfg.starts_with("time.server") {
-            format!("> {}", p.time_server)
-        } else if cfg.starts_with("time.serve") {
-            format!("> {}", self.time_serve_status(ctx))
-        } else if cfg.starts_with("time.beacon") {
-            format!("> {}", p.time_beacons)
         } else if cfg.starts_with("time.key") {
             let ids: Vec<String> = self.time_keys().iter().map(|k| to_hex(&timesync::key_id(k))).collect();
             let whose = if p.time_keys.is_empty() { "built in (nw.ommesh.ru)" } else { "set by hand" };
             format!("> {} ({whose})", ids.join(", "))
         } else {
+            #[cfg(feature = "net")]
+            {
+                if cfg.starts_with("time.server") {
+                    return Some(format!("> {}", p.time_server));
+                } else if cfg.starts_with("time.serve") {
+                    return Some(format!("> {}", self.time_serve_status(ctx)));
+                } else if cfg.starts_with("time.beacon") {
+                    return Some(format!("> {}", p.time_beacons));
+                }
+            }
             return None;
         })
     }
@@ -273,15 +290,17 @@ impl Repeater {
                 .into(),
             );
         }
+        #[cfg(feature = "net")]
         if let Some(v) = cfg.strip_prefix("time.server ") {
             let v = v.trim();
-            if v.is_empty() || v.len() > 63 || v.contains(char::is_whitespace) {
+            if v.is_empty() || v.len() > 63 || v.bytes().any(|b| b.is_ascii_whitespace()) {
                 return Some("Error: a host name, or host:port".into());
             }
             self.prefs.time_server = v.into();
             self.save_prefs();
             return Some(format!("OK - time server {v}"));
         }
+        #[cfg(feature = "net")]
         if let Some(v) = cfg.strip_prefix("time.serve ") {
             let on = match v.trim() {
                 "on" => true,
@@ -307,6 +326,7 @@ impl Repeater {
                 (false, _, _) => "OK - the time server's time not passed on".into(),
             });
         }
+        #[cfg(feature = "net")]
         if let Some(v) = cfg.strip_prefix("time.beacon ") {
             let n = atoi(v.trim());
             if n > 24 {

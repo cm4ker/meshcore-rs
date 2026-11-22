@@ -151,7 +151,7 @@ pub trait MeshApp {
 
     /// Delay before processing a received flood packet, from its reception score.
     fn calc_rx_delay(&self, score: f32, air_time: u32) -> i32 {
-        ((libm::powf(10.0, 0.85 - score) - 1.0) * air_time as f32) as i32
+        ((crate::util::powf(10.0, 0.85 - score) - 1.0) * air_time as f32) as i32
     }
 
     /// Number of known peers whose hash matches; the app remembers their indexes.

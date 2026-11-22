@@ -80,8 +80,8 @@ impl Companion {
                 let p = &self.prefs;
                 let mut f = alloc::vec![RESP_CODE_SELF_INFO, ADV_TYPE_CHAT, p.tx_power_dbm as u8, self.board.max_tx_power_dbm as u8];
                 f.extend_from_slice(ctx.self_id.pub_key());
-                f.extend_from_slice(&((p.node_lat * 1e6) as i32).to_le_bytes());
-                f.extend_from_slice(&((p.node_lon * 1e6) as i32).to_le_bytes());
+                f.extend_from_slice(&crate::util::f64_mul_10n_i32(p.node_lat, 6).to_le_bytes());
+                f.extend_from_slice(&crate::util::f64_mul_10n_i32(p.node_lon, 6).to_le_bytes());
                 f.push(p.multi_acks);
                 f.push(p.advert_loc_policy);
                 f.push((p.telemetry_mode_env << 4) | (p.telemetry_mode_loc << 2) | p.telemetry_mode_base);
@@ -199,8 +199,8 @@ impl Companion {
                 let lat = u32_at(1) as i32;
                 let lon = u32_at(5) as i32;
                 if (-90_000_000..=90_000_000).contains(&lat) && (-180_000_000..=180_000_000).contains(&lon) {
-                    self.prefs.node_lat = lat as f64 / 1e6;
-                    self.prefs.node_lon = lon as f64 / 1e6;
+                    self.prefs.node_lat = crate::util::i32_div_10n(lat, 6);
+                    self.prefs.node_lon = crate::util::i32_div_10n(lon, 6);
                     self.effects.save_prefs = true;
                     self.write_ok();
                 } else {
@@ -1224,10 +1224,15 @@ impl Companion {
             "get fw.channel" => format!("> {}", release::channel_name(self.prefs.fw_channel)),
             "get fw.source" if self.prefs.fw_source.is_empty() => "> auto".into(),
             "get fw.source" => format!("> {}", self.fw_source_label()),
+            #[cfg(feature = "net")]
             "get fw.server" => format!("> {}", self.prefs.fw_server),
             _ => {
                 let (name, value) = cmd.strip_prefix("set fw.")?.split_once(' ')?;
-                if !["root", "owner", "auto", "channel", "source", "server"].contains(&name) {
+                #[cfg(feature = "net")]
+                let allowed = ["root", "owner", "auto", "channel", "source", "server"].contains(&name);
+                #[cfg(not(feature = "net"))]
+                let allowed = ["root", "owner", "auto", "channel", "source"].contains(&name);
+                if !allowed {
                     return None;
                 }
                 reply(self.fw_setting(ctx, remote, &format!("fw_{name}"), value.trim()))
@@ -1285,6 +1290,7 @@ impl Companion {
                     (fwstate::mode::OFF, _) => "no updates by itself".into(),
                     (_, Some(s @ (FwState::NoRoot | FwState::NoSlot))) => format!("but {}", s.line()),
                     (fwstate::mode::DOWNLOAD, _) => format!("downloads {ch} releases by itself; fw install installs them"),
+                    #[cfg(feature = "net")]
                     _ if self.fw_store.is_some() => {
                         format!("installs {ch} releases by itself, from {} or a repeater nearby", self.prefs.fw_server)
                     }
@@ -1312,14 +1318,20 @@ impl Companion {
                 };
                 self.prefs.fw_source = key;
                 save(self);
-                Ok(match (self.prefs.fw_source.is_empty(), self.fw_store.is_some()) {
+                #[cfg(feature = "net")]
+                let has_store = self.fw_store.is_some();
+                #[cfg(not(feature = "net"))]
+                let has_store = false;
+                Ok(match (self.prefs.fw_source.is_empty(), has_store) {
+                    #[cfg(feature = "net")]
                     (true, true) => format!("updates from {}, or from the best repeater heard directly without it", self.prefs.fw_server),
-                    (true, false) => "updates from the best repeater heard directly".into(),
+                    (true, _) => "updates from the best repeater heard directly".into(),
                     (false, _) => format!("updates from {} over LoRa", self.fw_source_label()),
                 })
             }
+            #[cfg(feature = "net")]
             "fw_server" => {
-                if value.is_empty() || value.len() > 63 || value.contains(char::is_whitespace) {
+                if value.is_empty() || value.len() > 63 || value.bytes().any(|b| b.is_ascii_whitespace()) {
                     return Err(FwError::Value("a host name, or host:port".into()));
                 }
                 self.prefs.fw_server = value.into();
@@ -1451,6 +1463,10 @@ impl Companion {
         if cmd == "gps" || cmd.starts_with("gps ") {
             return Some(self.gps_command(ctx, cmd[3..].trim()));
         }
+        #[cfg(feature = "net")]
+        if let Some(r) = self.handle_wifi_cli(cmd) {
+            return Some(r);
+        }
         let p = &mut self.prefs;
         let r: String = if cmd == "reboot" {
             self.effects.reboot = true;
@@ -1484,34 +1500,6 @@ impl Companion {
             } else {
                 "Error, the PIN is 0 or 6 digits".into()
             }
-        } else if let Some(v) = cmd.strip_prefix("set wifi.ssid ") {
-            p.wifi_ssid = crate::util::truncate_str(v, 33);
-            self.effects.save_prefs = true;
-            self.effects.network_changed = true;
-            format!("> wifi.ssid is now {} (set wifi.pwd too, then reboot)", p.wifi_ssid)
-        } else if let Some(v) = cmd.strip_prefix("set wifi.pwd ") {
-            p.wifi_pwd = crate::util::truncate_str(v, 64);
-            self.effects.save_prefs = true;
-            self.effects.network_changed = true;
-            "> wifi.pwd updated (reboot to apply)".into()
-        } else if cmd == "get wifi.pwd" {
-            format!("> {}", p.wifi_pwd)
-        } else if cmd == "set wifi.clear" {
-            p.wifi_ssid.clear();
-            p.wifi_pwd.clear();
-            self.effects.save_prefs = true;
-            self.effects.network_changed = true;
-            "> wifi config cleared (reboot to apply)".into()
-        } else if cmd == "get wifi.ssid" {
-            format!("> {}", if p.wifi_ssid.is_empty() { "(not set)" } else { &p.wifi_ssid })
-        } else if let Some(v) = cmd.strip_prefix("set wifi.enabled ") {
-            p.wifi_enabled = atoi(v) != 0;
-            self.effects.save_prefs = true;
-            format!("> wifi.enabled is now {} (reboot to apply)", p.wifi_enabled as u8)
-        } else if cmd == "get wifi.enabled" {
-            format!("> {}", p.wifi_enabled as u8)
-        } else if cmd == "get wifi.status" {
-            format!("> {}", if self.board.wifi_ip.is_some() { "connected" } else { "disconnected" })
         } else if cmd == "sensor scan" {
             crate::sensor::scan_reply(&self.board.sensor_scan)
         } else if cmd == "log" {
@@ -1521,8 +1509,6 @@ impl Companion {
             let at = log.len().saturating_sub(max);
             let at = (at..log.len()).find(|&i| log.is_char_boundary(i)).unwrap_or(log.len());
             String::from(&log[at..])
-        } else if cmd == "get wifi.ip" {
-            format!("> {}", self.board.wifi_ip.as_deref().unwrap_or("(not connected)"))
         } else if cmd == "board" {
             self.board.manufacturer.clone()
         } else if cmd == "ver" {
@@ -1530,7 +1516,7 @@ impl Companion {
         } else if cmd == "get tz.offset" {
             // as upstream: one decimal, two for a quarter-hour zone
             let q = p.tz_offset * 4.0;
-            let quarter = q == libm::truncf(q) && (q as i32) % 2 != 0;
+            let quarter = q == (q as i32) as f32 && (q as i32) % 2 != 0;
             format!("> {}", Fixed(p.tz_offset as f64, if quarter { 2 } else { 1 }))
         } else if cmd == "get ui.show_clock" {
             format!("> {}", p.ui_show_clock as u8)
@@ -1710,6 +1696,45 @@ impl Companion {
             } else {
                 "Error, must be 0-2".into()
             }
+        };
+        Some(r)
+    }
+
+    #[cfg(feature = "net")]
+    fn handle_wifi_cli(&mut self, cmd: &str) -> Option<String> {
+        let p = &mut self.prefs;
+        let r = if let Some(v) = cmd.strip_prefix("set wifi.ssid ") {
+            p.wifi_ssid = crate::util::truncate_str(v, 33);
+            self.effects.save_prefs = true;
+            self.effects.network_changed = true;
+            format!("> wifi.ssid is now {} (set wifi.pwd too, then reboot)", p.wifi_ssid)
+        } else if let Some(v) = cmd.strip_prefix("set wifi.pwd ") {
+            p.wifi_pwd = crate::util::truncate_str(v, 64);
+            self.effects.save_prefs = true;
+            self.effects.network_changed = true;
+            "> wifi.pwd updated (reboot to apply)".into()
+        } else if cmd == "get wifi.pwd" {
+            format!("> {}", p.wifi_pwd)
+        } else if cmd == "set wifi.clear" {
+            p.wifi_ssid.clear();
+            p.wifi_pwd.clear();
+            self.effects.save_prefs = true;
+            self.effects.network_changed = true;
+            "> wifi config cleared (reboot to apply)".into()
+        } else if cmd == "get wifi.ssid" {
+            format!("> {}", if p.wifi_ssid.is_empty() { "(not set)" } else { &p.wifi_ssid })
+        } else if let Some(v) = cmd.strip_prefix("set wifi.enabled ") {
+            p.wifi_enabled = atoi(v) != 0;
+            self.effects.save_prefs = true;
+            format!("> wifi.enabled is now {} (reboot to apply)", p.wifi_enabled as u8)
+        } else if cmd == "get wifi.enabled" {
+            format!("> {}", p.wifi_enabled as u8)
+        } else if cmd == "get wifi.status" {
+            format!("> {}", if self.board.wifi_ip.is_some() { "connected" } else { "disconnected" })
+        } else if cmd == "get wifi.ip" {
+            format!("> {}", self.board.wifi_ip.as_deref().unwrap_or("(not connected)"))
+        } else {
+            return None;
         };
         Some(r)
     }

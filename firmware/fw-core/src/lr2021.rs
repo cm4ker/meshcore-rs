@@ -97,7 +97,7 @@ fn bw_code(bw_khz: f32) -> u8 {
     ];
     let mut best = TABLE[0];
     for e in TABLE {
-        if libm::fabsf(e.0 - bw_khz) < libm::fabsf(best.0 - bw_khz) {
+        if meshcore::util::fabsf(e.0 - bw_khz) < meshcore::util::fabsf(best.0 - bw_khz) {
             best = e;
         }
     }
@@ -316,10 +316,11 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Lr202
     fn apply_params(&mut self, p: RadioParams) -> Result<(), Error> {
         self.params = p;
         self.standby()?;
-        if libm::fabsf(p.freq_mhz - self.cal_freq_mhz) >= CAL_IMG_FREQ_TRIG_MHZ {
+        if meshcore::util::fabsf(p.freq_mhz - self.cal_freq_mhz) >= CAL_IMG_FREQ_TRIG_MHZ {
             self.calibrate_front_end(p.freq_mhz)?;
         }
-        self.write(CMD_SET_RF_FREQUENCY, &((p.freq_mhz as f64 * 1_000_000.0) as u32).to_be_bytes())?;
+        let hz = meshcore::util::f64_mul_10n_u64(meshcore::util::f32_to_f64(p.freq_mhz), 6) as u32;
+        self.write(CMD_SET_RF_FREQUENCY, &hz.to_be_bytes())?;
         self.set_modulation(p.cr)?;
         self.write(CMD_SET_LORA_SYNCWORD, &[SYNC_WORD_PRIVATE])?;
         self.set_packet_params(255)?;

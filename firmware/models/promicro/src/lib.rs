@@ -46,7 +46,7 @@ pub struct Spec {
     /// System OFF, which only the button ends; the radio is asleep, the SoftDevice off.
     pub system_off: fn() -> !,
     /// How updates come in and go on ([`ota::IN_PLACE_AFTER_SWAP`] on the Pro Micro).
-    pub updates: Option<&'static dyn ota::Updates>,
+    pub updates: Option<ota::InPlace>,
     /// The common data and companion flash regions, as (address, size).
     pub companion_regions: [(u32, u32); 2],
     /// The SX1262 TX power on a fresh Companion install, before any external PA.

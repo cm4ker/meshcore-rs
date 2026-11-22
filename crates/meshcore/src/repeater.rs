@@ -12,10 +12,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+#[cfg(feature = "net")]
 use crate::bridge::Bridge;
 use crate::advert::{ADV_TYPE_REPEATER, ADV_TYPE_ROOM, AdvertData, is_valid_name};
 use crate::companion::{CMD_DEVICE_QUERY, RESP_CODE_DEVICE_INFO};
 use crate::crypto::{self, Secret};
+#[cfg(feature = "net")]
 use crate::fwshare::{self, FwStore};
 use crate::fwstate::{self, FwState};
 use crate::gps::GpsReading;
@@ -29,7 +31,9 @@ use crate::radio::RadioParams;
 use crate::region::{REGION_DENY_FLOOD, RegionMap, TransportKey, is_name_char};
 use crate::rtc::DEFAULT_EPOCH;
 use crate::sensor::descriptor::Descriptor;
-use crate::timesync::{self, TimeFetch, TimeSync};
+#[cfg(feature = "net")]
+use crate::timesync::TimeFetch;
+use crate::timesync::{self, TimeSync};
 use crate::util::{Fixed, atof, atoi, atoi_signed, epoch_to_datetime, from_hex, ftoa, parse_key_prefix, to_hex, truncate_str};
 use crate::{FIRMWARE_VERSION, MAX_ADVERT_DATA_SIZE, MAX_PACKET_PAYLOAD, MAX_PATH_SIZE, PRV_KEY_SIZE, PUB_KEY_SIZE};
 
@@ -91,6 +95,7 @@ const BOOT_ADVERT_DELAY: u32 = 16_000;
 
 const LPP_VOLTAGE: u8 = 116;
 /// Packets buffered for the MQTT observer before new ones are dropped.
+#[cfg(feature = "net")]
 const UPLINK_QUEUE_MAX: usize = 24;
 const LPP_TEMPERATURE: u8 = 103;
 const TELEM_CHANNEL_SELF: u8 = 1;
@@ -150,7 +155,7 @@ pub struct Neighbour {
 /// The neighbours by a key, the smallest first, those of one key in the order they were. By
 /// insertion: the table is short, and core's sort is 2 KB of code for each key it is used with on
 /// a board whose core is not built for size.
-pub(crate) fn sort_neighbours(list: &mut [&Neighbour], key: fn(&Neighbour) -> i64) {
+pub fn sort_neighbours(list: &mut [&Neighbour], key: fn(&Neighbour) -> i64) {
     for i in 1..list.len() {
         let mut j = i;
         while j > 0 && key(list[j - 1]) > key(list[j]) {
@@ -207,6 +212,7 @@ pub struct Effects {
     pub fem_lna: Option<bool>,
     /// Bring up the Wi-Fi update page (`fw wifi`): the one-time code uploads must carry, and
     /// the passphrase of the access point (one per boot, as the point comes up only once).
+    #[cfg(feature = "net")]
     pub start_ota: Option<(u32, String)>,
     /// Open the BLE update window (`fw ble`) with this pairing PIN.
     pub start_ble_ota: Option<u32>,
@@ -218,18 +224,22 @@ pub struct Effects {
     /// Persist the text-described sensors.
     pub save_sensors: bool,
     /// Wi-Fi or MQTT settings changed: reconnect.
+    #[cfg(feature = "net")]
     pub network_changed: bool,
     /// The bridge was switched on or off, or moved to another channel: restart its medium.
+    #[cfg(feature = "net")]
     pub bridge_changed: bool,
     /// The GPS was switched on or off (`prefs.gps_enabled`): the firmware powers the receiver.
     pub gps: bool,
     /// Publish a status message now (`send mqtt.status`).
+    #[cfg(feature = "net")]
     pub send_mqtt_status: bool,
     /// Lines for the serial console (packet log, ACL dumps).
     pub console: Vec<String>,
 }
 
 /// A packet for the MQTT observer: raw frame plus reception details (`tx` = we sent it).
+#[cfg(feature = "net")]
 #[derive(Clone, Debug)]
 pub struct UplinkPacket {
     pub raw: Vec<u8>,
@@ -243,10 +253,12 @@ pub struct UplinkPacket {
 /// How long `start ota ble` keeps BLE up.
 pub const BLE_OTA_WINDOW_MINS: u32 = 15;
 /// Frames waiting for the bridge's medium; more are dropped (the firmware drains it every pass).
+#[cfg(feature = "net")]
 const BRIDGE_QUEUE_MAX: usize = 16;
 
 // letsmesh-eu/us (bits 0x02/0x04) were wss-only and dropped when TLS was removed; the bit values
 // stay as in the C++ firmware so saved prefs keep their meaning.
+#[cfg(feature = "net")]
 pub const MQTT_BROKERS: [(&str, u8); 2] = [("meshcoretel", 0x01), ("ommesh", 0x08)];
 
 /// Live board values the firmware keeps up to date.
@@ -258,14 +270,17 @@ pub struct BoardInfo {
     pub fem_lna_controllable: bool,
     pub build_date: String,
     /// SSID of the Wi-Fi update access point, if the board supports `fw wifi`.
+    #[cfg(feature = "net")]
     pub wifi_ota_ssid: Option<String>,
     /// Advertised name of the BLE update window, if the board supports `fw ble`.
     pub ble_ota_name: Option<String>,
     /// LAN address while the Wi-Fi station is connected (`fw wifi` serves there instead of an AP).
+    #[cfg(feature = "net")]
     pub wifi_ip: Option<String>,
     /// The board can light-sleep between packets (`powersaving on`).
     pub powersaving_supported: bool,
     /// The bridge the board can run (`get bridge.type`): `espnow`; none = no bridge.
+    #[cfg(feature = "net")]
     pub bridge: Option<&'static str>,
     /// The board's own battery multiplier (millivolts per ADC step) if `set adc.multiplier`
     /// calibrates its reading; none = unsupported.
@@ -282,9 +297,12 @@ pub struct BoardInfo {
     /// How much the board slept, for `powersaving stats`, kept by the firmware.
     pub power_status: String,
     /// Network status lines for `get wifi.status` / `get mqtt.status`, kept by the firmware.
+    #[cfg(feature = "net")]
     pub wifi_status: String,
+    #[cfg(feature = "net")]
     pub mqtt_status: String,
     /// What the update store holds for the neighbours, the third line of `fw`, kept by the firmware.
+    #[cfg(feature = "net")]
     pub fw_store: String,
     /// While the firmware runs on trial after an update: when it is kept (uptime, ms).
     pub fw_trial_until: Option<u64>,
@@ -325,9 +343,11 @@ pub struct Repeater {
     discover_limiter: RateLimiter,
     anon_limiter: RateLimiter,
     /// FW requests: a companion fetching an update asks for a piece about every second.
+    #[cfg(feature = "net")]
     fw_limiter: RateLimiter,
     /// When (ms) a neighbour last loaded a piece of an update from this node: this node's own
     /// update waits for its restart meanwhile.
+    #[cfg(feature = "net")]
     fw_served_at: Option<u64>,
     pending_discover_tag: u32,
     pending_discover_until: u64,
@@ -345,24 +365,32 @@ pub struct Repeater {
     pub ota: OtaEndpoint,
     /// The updates this node hands on to its neighbours (`set fw.serve on`), and installs itself
     /// (`set fw.auto on`), if the platform can fetch them.
+    #[cfg(feature = "net")]
     pub fw_store: Option<Box<dyn FwStore>>,
     autoupdate: autoupdate::AutoUpdate,
     /// Network time (`time.sync`, see [`crate::timesync`]): what this node believes and asks.
     pub timesync: TimeSync,
     /// The time server over the node's link, if the platform has one: `time.serve` passes its
     /// time on. Set it before [`Self::start`] (the boot advert tells the neighbours).
+    #[cfg(feature = "net")]
     pub time_fetch: Option<Box<dyn TimeFetch>>,
+    #[cfg(feature = "net")]
     timeserve: timeserve::TimeServe,
     /// Packets heard/sent, waiting for the MQTT observer (drained by the firmware).
+    #[cfg(feature = "net")]
     pub uplink: Vec<UplinkPacket>,
     /// Collect packets into `uplink` (an observer is connected).
+    #[cfg(feature = "net")]
     pub uplink_enabled: bool,
     /// Room server state: `Some` when this node is a room server.
     room: Option<Box<room::Room>>,
+    #[cfg(feature = "net")]
     bridge: Bridge,
     /// Frames for the bridge's medium, taken by the firmware.
+    #[cfg(feature = "net")]
     bridge_out: Vec<Vec<u8>>,
     /// Passphrase of the Wi-Fi update access point, made at the first `start ota`.
+    #[cfg(feature = "net")]
     wifi_ota_key: String,
     /// Wrong passwords, whoever sent them (see [`Self::check_password`]).
     bad_logins: RateLimiter,
@@ -396,6 +424,7 @@ fn fmt_time(t: u32) -> String {
 impl Repeater {
     pub fn new(prefs: NodePrefs, board: BoardInfo) -> Self {
         let pending_radio = prefs.radio;
+        #[cfg(feature = "net")]
         let bridge = Bridge::new(&prefs.bridge_secret);
         let ota = OtaEndpoint::new(prefs.ota_roots.clone(), prefs.ota_owners.clone(), release::role::REPEATER);
         let mut timesync = TimeSync::new(timesync::Mode::from_code(prefs.time_sync), &prefs.time_keys);
@@ -415,7 +444,9 @@ impl Repeater {
             pending_radio,
             discover_limiter: RateLimiter::new(4, 120),
             anon_limiter: RateLimiter::new(4, 180),
+            #[cfg(feature = "net")]
             fw_limiter: RateLimiter::new(90, 60),
+            #[cfg(feature = "net")]
             fw_served_at: None,
             pending_discover_tag: 0,
             pending_discover_until: 0,
@@ -426,16 +457,24 @@ impl Repeater {
             logging: false,
             reply_path: None,
             ota,
+            #[cfg(feature = "net")]
             fw_store: None,
             autoupdate: autoupdate::AutoUpdate::new(),
             timesync,
+            #[cfg(feature = "net")]
             time_fetch: None,
+            #[cfg(feature = "net")]
             timeserve: timeserve::TimeServe::new(),
+            #[cfg(feature = "net")]
             uplink: Vec::new(),
+            #[cfg(feature = "net")]
             uplink_enabled: false,
             room: None,
+            #[cfg(feature = "net")]
             bridge,
+            #[cfg(feature = "net")]
             bridge_out: Vec::new(),
+            #[cfg(feature = "net")]
             wifi_ota_key: String::new(),
             bad_logins: RateLimiter::new(BAD_LOGINS_MAX, BAD_LOGINS_SECS),
             stamps_dirty: false,
@@ -443,11 +482,13 @@ impl Repeater {
     }
 
     /// The bridge is on and the board has one.
+    #[cfg(feature = "net")]
     pub fn bridge_active(&self) -> bool {
         self.prefs.bridge_enabled && self.board.bridge.is_some()
     }
 
     /// Frames to send over the bridge.
+    #[cfg(feature = "net")]
     pub fn take_bridge_out(&mut self) -> Vec<Vec<u8>> {
         core::mem::take(&mut self.bridge_out)
     }
@@ -456,6 +497,7 @@ impl Repeater {
     /// `bridge.delay` milliseconds, if the frame is ours and the packet new.
     ///
     /// [`Mesh::queue_bridged`]: crate::mesh::Mesh::queue_bridged
+    #[cfg(feature = "net")]
     pub fn bridge_receive(&mut self, frame: &[u8]) -> Option<(Packet, u64)> {
         if !self.bridge_active() {
             return None;
@@ -463,6 +505,7 @@ impl Repeater {
         self.bridge.decode(frame).map(|p| (p, self.prefs.bridge_delay as u64))
     }
 
+    #[cfg(feature = "net")]
     fn bridge_send(&mut self, pkt: &Packet) {
         if self.bridge_out.len() < BRIDGE_QUEUE_MAX
             && let Some(frame) = self.bridge.encode(pkt)
@@ -480,6 +523,7 @@ impl Repeater {
             self.timesync.mode = timesync::Mode::Off; // the room follows the repeater's clock
         }
         self.timesync.start(ctx);
+        #[cfg(feature = "net")]
         self.time_serve_start(ctx);
     }
 
@@ -487,9 +531,11 @@ impl Repeater {
         // before a restart the admins' last timestamps go to flash, or the packet that brought it
         // about (`reboot`, an update) could be played again after it, and again
         let fx = &self.effects;
-        if (fx.reboot || fx.network_changed || fx.bridge_changed || fx.power_off)
-            && (self.stamps_dirty || self.dirty_contacts_expiry != 0)
-        {
+        #[cfg(feature = "net")]
+        let restarting = fx.reboot || fx.network_changed || fx.bridge_changed || fx.power_off;
+        #[cfg(not(feature = "net"))]
+        let restarting = fx.reboot || fx.power_off;
+        if restarting && (self.stamps_dirty || self.dirty_contacts_expiry != 0) {
             self.dirty_contacts_expiry = 0;
             self.effects.save_acl = true;
         }
@@ -724,7 +770,9 @@ impl Repeater {
 
     fn build_advert_data(&self, out: &mut [u8; MAX_ADVERT_DATA_SIZE]) -> usize {
         let adv_type = if self.room.is_some() { ADV_TYPE_ROOM } else { ADV_TYPE_REPEATER };
+        #[cfg_attr(not(feature = "net"), allow(unused_mut))]
         let mut adv = AdvertData::new(adv_type, &self.prefs.node_name);
+        #[cfg(feature = "net")]
         if self.time_serving() {
             adv.feat1 |= timesync::FEAT1_TIME_SERVER;
         }
@@ -918,6 +966,7 @@ impl Repeater {
 
     /// A neighbour's FW request (see [`crate::fwshare`]): `{reply-path-len}{reply-path}` and the
     /// request. Only while this node hands updates on, and at about one a second.
+    #[cfg(feature = "net")]
     fn fw_request(&mut self, ctx: &MeshCtx, sender_timestamp: u32, kind: u8, data: &[u8], reply: &mut Vec<u8>) -> bool {
         if !self.prefs.fw_serve || !self.fw_limiter.allow(ctx.current_time()) {
             return false;
@@ -1155,7 +1204,7 @@ impl MeshApp for Repeater {
         if self.prefs.rx_delay_base <= 0.0 {
             return 0;
         }
-        ((libm::powf(self.prefs.rx_delay_base, 0.85 - score) - 1.0) * air_time as f32) as i32
+        ((crate::util::powf(self.prefs.rx_delay_base, 0.85 - score) - 1.0) * air_time as f32) as i32
     }
 
     fn search_peers_by_hash(&mut self, _ctx: &mut MeshCtx, hash: u8) -> usize {
@@ -1230,19 +1279,29 @@ impl MeshApp for Repeater {
                 reply.extend_from_slice(format!("{}\n{}", self.prefs.node_name, self.prefs.owner_info).as_bytes());
                 true
             }
-        } else if pkt.is_route_direct()
-            && matches!(kind, fwshare::ANON_REQ_TYPE_FW_QUERY | fwshare::ANON_REQ_TYPE_FW_GET)
-        {
-            self.fw_request(ctx, timestamp, kind, &data[5..], &mut reply)
-        } else if pkt.is_route_direct() && kind == timesync::ANON_REQ_TYPE_TIME {
-            self.time_request(ctx, timestamp, sender, secret, &data[5..], &mut reply)
         } else if pkt.is_route_direct() && kind == ANON_REQ_TYPE_BASIC {
             self.anon_prologue(ctx, timestamp, &data[5..], &mut reply) && {
+                #[cfg(feature = "net")]
                 let bridge = if self.bridge_active() { 0x03 } else { 0 }; // bridge, over ESP-NOW
+                #[cfg(not(feature = "net"))]
+                let bridge = 0;
                 reply.push(if self.prefs.disable_fwd { 0x80 } else { 0 } | bridge); // feature bits
                 true
             }
         } else {
+            #[cfg(feature = "net")]
+            {
+                if pkt.is_route_direct()
+                    && matches!(kind, fwshare::ANON_REQ_TYPE_FW_QUERY | fwshare::ANON_REQ_TYPE_FW_GET)
+                {
+                    self.fw_request(ctx, timestamp, kind, &data[5..], &mut reply)
+                } else if pkt.is_route_direct() && kind == timesync::ANON_REQ_TYPE_TIME {
+                    self.time_request(ctx, timestamp, sender, secret, &data[5..], &mut reply)
+                } else {
+                    false
+                }
+            }
+            #[cfg(not(feature = "net"))]
             false
         };
         if !ok || reply.is_empty() {
@@ -1489,6 +1548,7 @@ impl MeshApp for Repeater {
         self.room_loop(ctx);
         self.auto_update_loop(ctx);
         self.timesync.poll(ctx);
+        #[cfg(feature = "net")]
         self.time_serve_loop(ctx);
         if let Some(g) = self.timesync.take_remembered()
             && g != self.prefs.time_gateway
@@ -1499,12 +1559,14 @@ impl MeshApp for Repeater {
     }
 
     fn next_timer(&self) -> Option<u64> {
-        self.timers()
+        let t = self
+            .timers()
             .chain(self.room.as_ref().and_then(|r| r.next_timer()))
             .chain(self.auto_update_timer())
-            .chain(self.timesync.timer())
-            .chain(self.time_serve_timer())
-            .min()
+            .chain(self.timesync.timer());
+        #[cfg(feature = "net")]
+        let t = t.chain(self.time_serve_timer());
+        t.min()
     }
 
     fn search_channels_by_hash(&mut self, _ctx: &mut MeshCtx, hash: u8) -> Vec<crate::mesh::GroupChannel> {
@@ -1516,14 +1578,17 @@ impl MeshApp for Repeater {
         &mut self, ctx: &mut MeshCtx, pkt: &Packet, payload_type: u8, _channel: &crate::mesh::GroupChannel, data: &[u8],
     ) {
         if payload_type == PAYLOAD_TYPE_GRP_DATA && self.timesync.on_beacon(ctx, pkt, data) {
+            #[cfg(feature = "net")]
             self.time_beacon_heard(ctx);
         }
     }
 
     fn log_rx(&mut self, ctx: &MeshCtx, pkt: &Packet, len: usize, score: f32) {
+        #[cfg(feature = "net")]
         if self.bridge_active() && self.prefs.bridge_source_rx {
             self.bridge_send(pkt);
         }
+        #[cfg(feature = "net")]
         if self.uplink_enabled && self.prefs.mqtt_packets && self.uplink.len() < UPLINK_QUEUE_MAX {
             let mut raw = [0u8; crate::MAX_TRANS_UNIT];
             if let Some(n) = pkt.write_to(&mut raw) {
@@ -1559,9 +1624,11 @@ impl MeshApp for Repeater {
     }
 
     fn log_tx(&mut self, ctx: &MeshCtx, pkt: &Packet, len: usize, _airtime_ms: usize) {
+        #[cfg(feature = "net")]
         if self.bridge_active() && !self.prefs.bridge_source_rx {
             self.bridge_send(pkt);
         }
+        #[cfg(feature = "net")]
         if self.uplink_enabled && self.prefs.mqtt_packets && self.prefs.mqtt_tx && self.uplink.len() < UPLINK_QUEUE_MAX {
             let mut raw = [0u8; crate::MAX_TRANS_UNIT];
             if let Some(n) = pkt.write_to(&mut raw) {
@@ -1725,6 +1792,7 @@ impl Repeater {
                 None => "Error: no Bluetooth update window on this board".into(),
             };
         }
+        #[cfg(feature = "net")]
         if cmd == "fw wifi" || cmd.starts_with("start ota") {
             let Some(ssid) = self.board.wifi_ota_ssid.clone() else {
                 return "Error: no Wi-Fi update page on this board".into();
@@ -1801,6 +1869,7 @@ impl Repeater {
             ctx.reset_stats();
             return "(OK - stats reset)".into();
         }
+        #[cfg(feature = "net")]
         if cmd.trim() == "send mqtt.status" {
             self.effects.send_mqtt_status = true;
             return "OK".into();
@@ -1836,7 +1905,7 @@ impl Repeater {
                     self.effects.save_sensors = true;
                     "OK".into()
                 }
-                Err(e) => format!("err: {e:?}"),
+                Err(e) => format!("err: {}", e.as_str()),
             };
         }
         if let Some(name) = cmd.strip_prefix("sensor del ") {
@@ -1877,6 +1946,7 @@ impl Repeater {
             if !self.board.powersaving_supported {
                 return "Board not supported".into();
             }
+            #[cfg(feature = "net")]
             if self.bridge_active() {
                 return "Bridge not supported".into();
             }
@@ -1990,8 +2060,8 @@ impl Repeater {
             },
             "setloc" => match self.board.gps.filter(|g| g.valid) {
                 Some(g) => {
-                    self.prefs.node_lat = g.lat as f64 / 1e6;
-                    self.prefs.node_lon = g.lon as f64 / 1e6;
+                    self.prefs.node_lat = crate::util::i32_div_10n(g.lat, 6);
+                    self.prefs.node_lon = crate::util::i32_div_10n(g.lon, 6);
                     self.save_prefs();
                     "ok".into()
                 }
@@ -2187,6 +2257,7 @@ impl Repeater {
     fn handle_get(&mut self, ctx: &MeshCtx, serial: bool, cfg: &str) -> String {
         let p = &self.prefs;
         let onoff = |b: bool| if b { "on" } else { "off" };
+        #[cfg(feature = "net")]
         if let Some(r) = self.handle_get_network(cfg) {
             return r;
         }
@@ -2209,10 +2280,6 @@ impl Repeater {
             format!("> {}", release::channel_name(p.fw_channel))
         } else if cfg.starts_with("fw.source") {
             if p.fw_source.is_empty() { "> auto".into() } else { format!("> {}", self.fw_source_label()) }
-        } else if cfg.starts_with("fw.server") {
-            format!("> {}", p.fw_server)
-        } else if cfg.starts_with("fw.serve") {
-            format!("> {}", onoff(p.fw_serve))
         } else if cfg.starts_with("dyncr") {
             format!("> {}", onoff(p.dynamic_cr))
         } else if cfg.starts_with("room") && self.room.is_none() {
@@ -2255,18 +2322,6 @@ impl Repeater {
             format!("> {}", to_hex(ctx.self_id.pub_key()))
         } else if cfg.starts_with("role") {
             format!("> {FIRMWARE_ROLE}")
-        } else if cfg.starts_with("bridge.type") {
-            format!("> {}", self.board.bridge.unwrap_or("none"))
-        } else if self.board.bridge.is_some() && cfg.starts_with("bridge.enabled") {
-            format!("> {}", onoff(p.bridge_enabled))
-        } else if self.board.bridge.is_some() && cfg.starts_with("bridge.delay") {
-            format!("> {}", p.bridge_delay)
-        } else if self.board.bridge.is_some() && cfg.starts_with("bridge.source") {
-            format!("> {}", if p.bridge_source_rx { "logRx" } else { "logTx" })
-        } else if self.board.bridge.is_some() && cfg.starts_with("bridge.channel") {
-            format!("> {}", p.bridge_channel)
-        } else if self.board.bridge.is_some() && cfg.starts_with("bridge.secret") {
-            format!("> {}", p.bridge_secret)
         } else if cfg.starts_with("bootloader.ver") {
             match self.board.bootloader_version.as_deref() {
                 Some("") => "> unknown".into(),
@@ -2375,6 +2430,7 @@ impl Repeater {
     }
 
     fn handle_set(&mut self, ctx: &mut MeshCtx, serial: bool, cfg: &str) -> String {
+        #[cfg(feature = "net")]
         if let Some(r) = self.handle_set_network(cfg) {
             return r;
         }
@@ -2387,6 +2443,7 @@ impl Repeater {
         if let Some(v) = cfg.strip_prefix("fw.owner ") {
             return self.set_ota_owner(serial, v);
         }
+        #[cfg(feature = "net")]
         if let Some(v) = cfg.strip_prefix("fw.serve ") {
             let on = match v.trim() {
                 "on" => true,
@@ -2424,7 +2481,10 @@ impl Repeater {
                 (fwstate::mode::OFF, _) => "OK - no updates by itself".into(),
                 (_, Some(s @ (FwState::NoRoot | FwState::NoSlot))) => format!("OK - but {}", s.line()),
                 (fwstate::mode::DOWNLOAD, _) => format!("OK - downloads {ch} releases by itself; fw install installs them"),
+                #[cfg(feature = "net")]
                 _ => format!("OK - installs {ch} releases by itself, from {} or a neighbour", self.prefs.fw_server),
+                #[cfg(not(feature = "net"))]
+                _ => format!("OK - installs {ch} releases by itself, from a neighbour"),
             };
         }
         if let Some(v) = cfg.strip_prefix("fw.channel ") {
@@ -2458,9 +2518,10 @@ impl Repeater {
                 format!("OK - updates from {} over LoRa", self.fw_source_label())
             };
         }
+        #[cfg(feature = "net")]
         if let Some(v) = cfg.strip_prefix("fw.server ") {
             let v = v.trim();
-            if v.is_empty() || v.len() > 63 || v.contains(char::is_whitespace) {
+            if v.is_empty() || v.len() > 63 || v.bytes().any(|b| b.is_ascii_whitespace()) {
                 return "Error: a host name, or host:port".into();
             }
             self.prefs.fw_server = v.into();
@@ -2789,6 +2850,7 @@ impl Repeater {
     }
 
     /// `set bridge.*` (upstream's), on boards with a bridge.
+    #[cfg(feature = "net")]
     fn handle_set_bridge(&mut self, cfg: &str) -> Option<String> {
         self.board.bridge?;
         let (key, value) = cfg.split_once(' ')?;
@@ -2833,10 +2895,38 @@ impl Repeater {
         Some(reply)
     }
 
-    /// `get wifi.*` / `get mqtt.*` (MeshCoreTel command set).
+    /// `get wifi.*` / `get mqtt.*` (MeshCoreTel command set), plus `fw.server`/`fw.serve` and `bridge.*`.
+    #[cfg(feature = "net")]
     fn handle_get_network(&self, cfg: &str) -> Option<String> {
         let p = &self.prefs;
         let onoff = |b: bool| if b { "on" } else { "off" };
+        if cfg.starts_with("fw.server") {
+            return Some(format!("> {}", p.fw_server));
+        }
+        if cfg.starts_with("fw.serve") {
+            return Some(format!("> {}", onoff(p.fw_serve)));
+        }
+        if cfg.starts_with("bridge.type") {
+            return Some(format!("> {}", self.board.bridge.unwrap_or("none")));
+        }
+        if self.board.bridge.is_some() {
+            let b = if cfg.starts_with("bridge.enabled") {
+                Some(format!("> {}", onoff(p.bridge_enabled)))
+            } else if cfg.starts_with("bridge.delay") {
+                Some(format!("> {}", p.bridge_delay))
+            } else if cfg.starts_with("bridge.source") {
+                Some(format!("> {}", if p.bridge_source_rx { "logRx" } else { "logTx" }))
+            } else if cfg.starts_with("bridge.channel") {
+                Some(format!("> {}", p.bridge_channel))
+            } else if cfg.starts_with("bridge.secret") {
+                Some(format!("> {}", p.bridge_secret))
+            } else {
+                None
+            };
+            if b.is_some() {
+                return b;
+            }
+        }
         let r = match cfg.trim() {
             "wifi.ssid" => format!("> {}", p.wifi_ssid),
             "wifi.enabled" => format!("> {}", onoff(p.wifi_enabled)),
@@ -2859,6 +2949,12 @@ impl Repeater {
         Some(r)
     }
 
+    #[cfg(not(feature = "net"))]
+    fn handle_set_bridge(&mut self, _cfg: &str) -> Option<String> {
+        None
+    }
+
+    #[cfg(feature = "net")]
     fn handle_set_network(&mut self, cfg: &str) -> Option<String> {
         const RESTART: &str = "OK - rebooting to apply";
         let (key, value) = cfg.split_once(' ').unwrap_or((cfg, ""));

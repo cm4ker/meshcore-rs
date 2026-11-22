@@ -423,7 +423,7 @@ fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64
         Page::Neighbours => {
             let clock = ctx.current_time();
             let mut list: Vec<_> = app.neighbours().iter().collect();
-            list.sort_by_key(|n| core::cmp::Reverse(n.heard_timestamp));
+            meshcore::repeater::sort_neighbours(&mut list, |n| -(n.heard_timestamp as i64));
             Body::Neighbours(
                 list.iter()
                     .map(|n| meshcore_ui::Neighbour {

@@ -11,7 +11,9 @@ use alloc::string::ToString;
 
 use super::*;
 use crate::FIRMWARE_VERSION;
-use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, Offer, status};
+#[cfg(feature = "net")]
+use crate::fwshare::Offer;
+use crate::fwshare::{self, FW_PIECE, FwQuery, Loader, status};
 use crate::fwstate::{self, FwState, mode};
 use crate::ota::{OtaOutcome, REQ_TYPE_OTA_ABORT, REQ_TYPE_OTA_COMMIT};
 
@@ -31,13 +33,17 @@ const PIECE_GAP_MS: u64 = 1_200;
 const HEARD_RECENTLY_SECS: u32 = 2 * 86_400;
 /// Pieces fed from the store per pass of the main loop: it keeps serving the radio and the app
 /// meanwhile.
+#[cfg(feature = "net")]
 const PIECES_PER_PASS: usize = 8;
 /// The store came to hold another file while this one loaded: asked again after this long.
+#[cfg(feature = "net")]
 const STORE_CHANGED_MS: u64 = 60_000;
 /// The next bytes of the file are still on their way from the server: looked for again after this.
+#[cfg(feature = "net")]
 const BYTES_WAIT_MS: u64 = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(feature = "net"), allow(dead_code))]
 enum Step {
     Sleep,
     /// From the store, the piece at `offset` of its file `id` next.
@@ -148,7 +154,10 @@ impl Companion {
         }
         match self.fwpull.step {
             Step::Sleep => self.fw_check(ctx),
+            #[cfg(feature = "net")]
             Step::Load { id, offset } => self.fw_load(ctx, id, offset),
+            #[cfg(not(feature = "net"))]
+            Step::Load { .. } => {}
             Step::Query | Step::Get { .. } if self.fwpull.tries >= TRIES => {
                 let name = self.fw_repeater_name();
                 self.fw_pull_fail(ctx, alloc::format!("no answer from {name}"));
@@ -180,11 +189,13 @@ impl Companion {
     /// `fw`: the release that runs, the channel and mode, and where its update stands; on Wi-Fi,
     /// what the release server last said.
     pub fn fw_reply(&self, now: u64) -> String {
+        #[cfg_attr(not(feature = "net"), allow(unused_mut))]
         let mut s = alloc::format!(
             "{}\n{}",
             fwstate::head(&self.board.build_date, self.prefs.fw_channel, self.prefs.fw_mode),
             self.fw_line(now)
         );
+        #[cfg(feature = "net")]
         if self.fw_store.is_some() && !self.board.fw_store.is_empty() {
             s.push('\n');
             s.push_str(&self.board.fw_store);
@@ -212,6 +223,7 @@ impl Companion {
         self.fwpull.by_hand = Some(if update { Hand::Update } else { Hand::Check });
         self.fwpull.at = ctx.now;
         self.fwpull.fresh = true; // asked by hand
+        #[cfg(feature = "net")]
         let whom = if self.fw_from_store() {
             // not what the store last heard from the server
             if let Some(q) = self.fw_own_query()
@@ -225,6 +237,11 @@ impl Companion {
                 Some(idx) => self.contacts[idx].name_lossy(),
                 None => "the repeaters heard".into(),
             }
+        };
+        #[cfg(not(feature = "net"))]
+        let whom = match self.fw_repeater(ctx) {
+            Some(idx) => self.contacts[idx].name_lossy(),
+            None => "the repeaters heard".into(),
         };
         Ok(match update {
             true => alloc::format!("asking {whom}; if there is an update the device installs it and restarts"),
@@ -333,6 +350,7 @@ impl Companion {
     }
 
     /// The release server is asked first: the node has a store, and `fw.source` names no repeater.
+    #[cfg(feature = "net")]
     fn fw_from_store(&self) -> bool {
         self.prefs.fw_source.is_empty() && self.fw_store.is_some()
     }
@@ -368,6 +386,7 @@ impl Companion {
         }
         self.fwpull.tries = 0;
         self.fwpull.server_down = false;
+        #[cfg(feature = "net")]
         if self.fw_from_store() {
             let Some(q) = self.fw_own_query() else {
                 return self.fw_pull_fail(ctx, "can't read this firmware's image".into());
@@ -408,6 +427,7 @@ impl Companion {
 
     /// Pieces of the store's file `id` from `offset`, fed to the update session a few per pass, as
     /// they come from the server.
+    #[cfg(feature = "net")]
     fn fw_load(&mut self, ctx: &mut MeshCtx, id: u32, mut offset: u32) {
         let mut buf = [0u8; FW_PIECE];
         let mut wait = 0;
@@ -487,10 +507,13 @@ impl Companion {
     fn fw_query(&mut self, ctx: &mut MeshCtx) {
         if self.fwpull.tries == 0 {
             let Some(idx) = self.fw_repeater(ctx) else {
+                #[cfg(feature = "net")]
                 let server = match self.fwpull.server_down {
                     true => alloc::format!("{} not reachable, ", self.prefs.fw_server),
                     false => String::new(),
                 };
+                #[cfg(not(feature = "net"))]
+                let server = "";
                 let why = match self.prefs.fw_source.is_empty() {
                     true => alloc::format!("{server}no repeater heard directly; one with fw.serve on is needed"),
                     false => alloc::format!("{} is not a contact", crate::util::to_hex(&self.prefs.fw_source)),

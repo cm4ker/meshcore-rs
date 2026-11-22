@@ -12,6 +12,7 @@
 extern crate alloc;
 
 pub mod advert;
+#[cfg(feature = "net")]
 pub mod bridge;
 pub mod companion;
 pub mod crypto;
@@ -34,6 +35,7 @@ pub mod rtc;
 pub mod sensor;
 pub mod tables;
 pub mod timesync;
+#[cfg(feature = "net")]
 pub mod uplink;
 pub mod util;
 

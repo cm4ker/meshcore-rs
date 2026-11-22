@@ -19,7 +19,7 @@ pub const fn spec(build_epoch: &'static str, build_date: &'static str) -> Spec {
         usb: (0x239A, 0x8029, "HT-n5262G"),
         batt_mv_per_lsb: BATT_MV_PER_LSB,
         system_off,
-        updates: Some(&promicro::ota::IN_PLACE),
+        updates: Some(promicro::ota::IN_PLACE),
         companion_regions: [TRIAL_REGION, COMPANION_REGION],
         // SX1262 output before the KCT8103L amplifier, as on stock MeshCore.
         companion_tx_dbm: 9,

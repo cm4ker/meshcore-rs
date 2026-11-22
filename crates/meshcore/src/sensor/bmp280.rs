@@ -73,7 +73,7 @@ impl Calib {
         let t_fine = self.t_fine(adc_t);
         let temp_c = ((t_fine * 5 + 128) >> 8) as f32 / 100.0;
         let pressure_hpa = self.pressure_q24_8(adc_p, t_fine) as f32 / 256.0 / 100.0;
-        let altitude_m = 44330.0 * (1.0 - libm::powf(pressure_hpa / SEALEVEL_HPA, 0.1903));
+        let altitude_m = 44330.0 * (1.0 - crate::util::powf(pressure_hpa / SEALEVEL_HPA, 0.1903));
         Reading { temp_c, pressure_hpa, altitude_m }
     }
 
