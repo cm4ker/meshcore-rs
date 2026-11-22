@@ -1,0 +1,31 @@
+name: Scan released Windows file with Defender
+on:
+  push:
+    branches: [audit/defender-ota-1.1]
+permissions: {}
+jobs:
+  check:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          Get-MpComputerStatus | Format-List AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,AntivirusSignatureVersion,AntivirusSignatureLastUpdated
+          $prefs=Get-MpPreference
+          if ($prefs.ThreatIDDefaultAction_Ids -contains 2147731250) { throw 'Unexpected local rule' }
+          $path=Join-Path $env:RUNNER_TEMP 'ota-app-1.1-Windows-x86-x64.exe'
+          $scan=Join-Path $env:ProgramFiles 'Windows Defender/MpCmdRun.exe'
+          & $scan -CheckExclusion -path $path
+          $start=Get-Date
+          try {
+            Invoke-WebRequest -UseBasicParsing 'https://github.com/AVA55LV/meshcore-rs/releases/download/desktop-v1.1/ota-app-1.1-Windows-x86-x64.exe' -OutFile $path
+            $hash=(Get-FileHash $path).Hash
+            Write-Host "Release file SHA256 $hash"
+            if($hash -ne '560317A019F40C6D226CA0530353F904C7257BB1C70EA91FCA48583DD6314388'){throw 'Hash mismatch'}
+            & $scan -Scan -ScanType 3 -File $path -DisableRemediation
+            Write-Host "Scanner returned $LASTEXITCODE"
+            if($LASTEXITCODE -ne 0){throw 'Inspect scan result'}
+          } finally {
+            Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational';StartTime=$start;Id=1116,1117} -ErrorAction SilentlyContinue | ForEach-Object Message
+          }
