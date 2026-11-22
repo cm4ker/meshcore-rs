@@ -1,0 +1,9 @@
+# Name,   Type, SubType,   Offset,   Size,     Flags
+# Two app slots for OTA. `meshcore` (identity, prefs, ACL) keeps its address across layouts.
+# `companion` holds the companion role's data (contacts, channels), apart from the repeater's.
+nvs,      data, nvs,       0x9000,   0x5000,
+otadata,  data, ota,       0xe000,   0x2000,
+ota_0,    app,  ota_0,     0x10000,  0x3F0000,
+meshcore, data, undefined, 0x400000, 0x10000,
+ota_1,    app,  ota_1,     0x410000, 0x3F0000,
+companion, data, undefined, 0x800000, 0x100000,

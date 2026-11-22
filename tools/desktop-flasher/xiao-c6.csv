@@ -1,0 +1,9 @@
+# Name,   Type, SubType,   Offset,   Size,     Flags
+# XIAO ESP32-C6 (4 MB flash): two app slots for OTA, the repeater's settings (`meshcore`) and the
+# companion's data (`companion`: identity, contacts, channels, paired phones).
+nvs,       data, nvs,       0x9000,   0x5000,
+otadata,   data, ota,       0xe000,   0x2000,
+ota_0,     app,  ota_0,     0x10000,  0x1C0000,
+ota_1,     app,  ota_1,     0x1D0000, 0x1C0000,
+meshcore,  data, undefined, 0x390000, 0x10000,
+companion, data, undefined, 0x3A0000, 0x60000,
