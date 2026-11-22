@@ -5,7 +5,9 @@ rust-version = "1.88"
 version      = "0.1.0"
 description  = "Swaps a staged firmware update in the T-Echo's QSPI flash with its app flash; resumes after a power loss"
 
-# the swap itself, tested on the host: cargo test --lib --target <host triple>
+# the swap itself, tested on the host from the repository root (so t-echo/.cargo/config.toml's
+# build-std does not apply):
+#   cargo test --manifest-path firmware/models/t-echo/installer/Cargo.toml --lib --target <host triple>
 [lib]
 bench = false
 

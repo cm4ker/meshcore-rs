@@ -14,8 +14,10 @@ t114 = []
 t096 = []
 mesh-pocket = []
 
-# the swap itself, tested on the host: cargo test --lib --target <host triple> (the plans with the
-# protocol core's: cargo test -p meshcore-inplace)
+# the swap itself, tested on the host from the repository root (so promicro/.cargo/config.toml's
+# build-std does not apply):
+#   cargo test --manifest-path firmware/models/promicro/installer/Cargo.toml --lib --target <host triple>
+# (the plans with the protocol core's: cargo test -p meshcore-inplace)
 [lib]
 bench = false
 

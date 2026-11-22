@@ -1,6 +1,7 @@
-# A release of Rust, not "stable": a newer compiler changes every image, and every node then takes
-# an update with nothing in it (Rust 1.100.0 did so). Raised by hand, in step with the T-Echo's and
-# the XIAO C6's. The installer, in installer/, is built with it too.
+# Pinned nightly for `-Z build-std=core,alloc` (`optimize_for_size`), `-Z location-detail=none`,
+# `-Z fmt-debug=none`, and `-C panic=immediate-abort` (~55 KiB smaller nRF52840 images). Pinned to
+# a date so compiler changes never cause spurious OTA deltas. Kept in step across all nRF52840 boards.
 [toolchain]
-channel = "1.99.1"
+channel = "nightly-2026-10-01"
+components = ["rust-src"]
 targets = ["thumbv7em-none-eabihf"]

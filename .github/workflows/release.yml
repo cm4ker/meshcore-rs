@@ -80,12 +80,17 @@ jobs:
       # deltas taken as plans to apply in place (Pro Micro, T114 and T096)
       - run: cargo test --locked -p meshcore --features inplace --lib ota
       # the Pro Micro's update installer: the swap it took updates by before (the way back to
-      # them), with the power going at any step
-      - run: cargo test --lib --locked --target x86_64-unknown-linux-gnu
-        working-directory: firmware/models/promicro/installer
+      # them), with the power going at any step (via --manifest-path so promicro/.cargo/config.toml's
+      # build-std does not apply to host tests)
+      - run: cargo test --manifest-path firmware/models/promicro/installer/Cargo.toml --lib --locked --target x86_64-unknown-linux-gnu
       # the T-Echo's: the same swap between its app flash and its QSPI flash
-      - run: cargo test --lib --locked --target x86_64-unknown-linux-gnu
-        working-directory: firmware/models/t-echo/installer
+      - run: cargo test --manifest-path firmware/models/t-echo/installer/Cargo.toml --lib --locked --target x86_64-unknown-linux-gnu
+      # compact BLE host (P-256 ECDH, AES-CMAC, SMP, ATT)
+      - run: cargo test --locked
+        working-directory: firmware/ble
+      # platform-independent firmware core (storage, GPS, noise floor, crash codes)
+      - run: cargo test --locked
+        working-directory: firmware/fw-core
       # the on-device interface: every page on every screen class, the QR encoder against qrcodegen
       - run: cargo test --locked
         working-directory: firmware/ui
@@ -317,7 +322,7 @@ jobs:
             firmware/models/promicro/target
             firmware/models/t114/target
             firmware/models/t096/target
-          key: nrf52840-rust${{ steps.rust.outputs.version }}-${{ hashFiles('firmware/models/t-echo/Cargo.lock', 'firmware/models/promicro/Cargo.lock', 'firmware/models/t114/Cargo.lock', 'firmware/models/t096/Cargo.lock', 'firmware/.cargo/config.toml', 'firmware/models/t-echo/.cargo/config.toml', 'firmware/models/promicro/.cargo/config.toml', 'firmware/models/t114/.cargo/config.toml', 'firmware/models/t096/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
+          key: nrf52840-rust${{ steps.rust.outputs.version }}-${{ hashFiles('firmware/models/t-echo/rust-toolchain.toml', 'firmware/models/t-echo/Cargo.lock', 'firmware/models/promicro/Cargo.lock', 'firmware/models/t114/Cargo.lock', 'firmware/models/t096/Cargo.lock', 'firmware/.cargo/config.toml', 'firmware/models/t-echo/.cargo/config.toml', 'firmware/models/promicro/.cargo/config.toml', 'firmware/models/t114/.cargo/config.toml', 'firmware/models/t096/.cargo/config.toml', 'firmware/**/Cargo.toml', 'crates/**/Cargo.toml') }}
       - name: T-Echo
         working-directory: firmware/models/t-echo
         run: |

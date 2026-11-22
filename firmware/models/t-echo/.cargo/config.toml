@@ -1,9 +1,20 @@
 [build]
 target = "thumbv7em-none-eabihf"
 
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["optimize_for_size"]
+
 [target.thumbv7em-none-eabihf]
-# with those of every board, in ../../../.cargo/config.toml
-rustflags = ["-C", "link-arg=--nmagic"]
+# merged with ../../../.cargo/config.toml (`sha2_backend_soft="compact"`).
+# Panics trap to HardFault (recorded with pc/lr in `.uninit.crash` and resolved via debuginfo).
+rustflags = [
+    "-C", "link-arg=--nmagic",
+    "-Z", "location-detail=none",
+    "-Z", "fmt-debug=none",
+    "-C", "panic=immediate-abort",
+    "-Z", "unstable-options",
+]
 
 [env]
 # nrf-sdc/nrf-mpsl generate bindings with clang for a bare-metal target: its own stdint.h, not a

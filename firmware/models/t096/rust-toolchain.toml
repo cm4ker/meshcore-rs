@@ -1,4 +1,7 @@
-# Use the same pinned compiler as the other nRF52840 models.
+# Pinned nightly for `-Z build-std=core,alloc` (`optimize_for_size`), `-Z location-detail=none`,
+# `-Z fmt-debug=none`, and `-C panic=immediate-abort` (~55 KiB smaller nRF52840 images). Pinned to
+# a date so compiler changes never cause spurious OTA deltas. Kept in step across all nRF52840 boards.
 [toolchain]
-channel = "1.99.1"
+channel = "nightly-2026-10-01"
+components = ["rust-src"]
 targets = ["thumbv7em-none-eabihf"]
