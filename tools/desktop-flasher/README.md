@@ -3,7 +3,7 @@
 
 | Система | Файл релиза |
 | --- | --- |
-| Windows x86 / x64 | MeshCore-Windows-x86.exe |
+| Windows x86 / x64 | MeshCore-Windows-x86-x64.exe |
 | macOS на Apple Silicon | MeshCore-macOS-Apple-Silicon.zip |
 | Linux на ПК x86-64 | MeshCore-Linux-PC-x86_64.tar.gz |
 | Linux на Raspberry Pi и других ARM64 | MeshCore-Linux-Raspberry-Pi-ARM64.tar.gz |

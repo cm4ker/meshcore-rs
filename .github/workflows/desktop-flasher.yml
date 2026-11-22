@@ -35,7 +35,7 @@ jobs:
         run: |
           ./windows/build.ps1
           mkdir out
-          Move-Item MeshCore-Windows-x86.exe out/
+          Move-Item MeshCore-Windows-x86-x64.exe out/
       - if: runner.os == 'Linux' && matrix.arch != 'armv7l'
         run: sudo apt-get update -qq && sudo apt-get install -y xvfb xauth python3-tk libtk8.6
       - if: runner.os != 'Windows' && matrix.arch != 'armv7l'
