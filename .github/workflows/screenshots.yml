@@ -23,12 +23,14 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y xvfb xauth xdotool imagemagick openbox
+          sudo apt-get install -y xvfb xauth xdotool imagemagick openbox wmctrl
           curl -fsSL "$RELEASE-$PLATFORM.tar.gz" | tar xz
           xvfb-run -a bash -ec '
             openbox >/dev/null 2>&1 &
             ./MeshCore &
-            id=$(timeout 90 xdotool search --sync --onlyvisible --name "Обновление MeshCore" | head -1)
+            for i in {1..30}; do id=$(wmctrl -l | grep -i meshcore | cut -d" " -f1 | head -1); test -n "$id" && break; sleep 1; done
+            wmctrl -lpG
+            xwininfo -root -tree
             test -n "$id"
             sleep 2
             import -window "$id" "$PLATFORM.png"'
@@ -57,7 +59,7 @@ jobs:
         shell: pwsh
         run: |
           Invoke-WebRequest "$env:RELEASE-$env:PLATFORM.exe" -OutFile app.exe
-          Start-Process ./app.exe
+          $app=Start-Process ./app.exe -PassThru
           Add-Type -AssemblyName System.Drawing
           Add-Type @'
           using System;
@@ -68,8 +70,9 @@ jobs:
             [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h,IntPtr dc,uint flags);
           }
           '@ -ReferencedAssemblies System.Drawing.Primitives
-          for($i=0;$i -lt 90;$i++){ $h=[WindowCapture]::FindWindow($null,'Обновление MeshCore'); if($h -ne 0){break}; Start-Sleep 1 }
+          for($i=0;$i -lt 90;$i++){ $app.Refresh(); $h=$app.MainWindowHandle; if($h -ne 0){break}; Start-Sleep 1 }
           if($h -eq 0){throw 'Application window missing'}
+          Write-Output $app.MainWindowTitle
           Start-Sleep 2
           $r=New-Object Drawing.Rectangle
           [void][WindowCapture]::GetWindowRect($h,[ref]$r)
