@@ -5,9 +5,9 @@
 | --- | --- |
 | Windows x86 / x64 | MeshCore-Windows-x86.exe |
 | macOS на Apple Silicon | MeshCore-macOS-Apple-Silicon.zip |
-| Linux на ПК x86-64 | MeshCore-Linux-x86_64.tar.gz |
-| Linux на Raspberry Pi и других ARM64 | MeshCore-Linux-aarch64.tar.gz |
-| Raspberry Pi OS 32-bit (ARMv7/ARMv8) | MeshCore-Linux-armv7l.tar.gz |
+| Linux на ПК x86-64 | MeshCore-Linux-PC-x86_64.tar.gz |
+| Linux на Raspberry Pi и других ARM64 | MeshCore-Linux-Raspberry-Pi-ARM64.tar.gz |
+| Raspberry Pi OS 32-bit (ARMv7/ARMv8) | MeshCore-Linux-Raspberry-Pi-ARMv7-32bit.tar.gz |
 
 На macOS распакуйте приложение. На Linux распакуйте архив и запустите ./MeshCore в графическом сеансе. Для USB нужны права пользователя на последовательный порт, для Bluetooth — работающий адаптер и системная служба Bluetooth.
 

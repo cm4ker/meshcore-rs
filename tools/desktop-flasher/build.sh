@@ -8,5 +8,11 @@ if [[ "$(uname -s)" == Darwin ]]; then
   ditto -c -k --sequesterRsrc --keepParent dist/MeshCore.app out/MeshCore-macOS-Apple-Silicon.zip
 else
   xvfb-run -a dist/MeshCore --smoke-test
-  tar -czf "out/MeshCore-Linux-$1.tar.gz" -C dist MeshCore
+  case "$1" in
+    x86_64) platform="PC-x86_64" ;;
+    aarch64) platform="Raspberry-Pi-ARM64" ;;
+    armv7l) platform="Raspberry-Pi-ARMv7-32bit" ;;
+    *) echo "Unsupported Linux architecture: $1" >&2; exit 1 ;;
+  esac
+  tar -czf "out/MeshCore-Linux-$platform.tar.gz" -C dist MeshCore
 fi
