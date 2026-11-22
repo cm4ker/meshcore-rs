@@ -19,7 +19,6 @@ pub mod input;
 pub mod layout;
 pub mod model;
 pub mod nav;
-mod qr;
 pub mod refresh;
 #[cfg(any(test, feature = "samples"))]
 pub mod samples;

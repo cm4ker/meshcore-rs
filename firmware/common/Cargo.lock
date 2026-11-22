@@ -15,19 +15,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
 dependencies = [
  "cfg-if",
- "cipher 0.4.4",
+ "cipher",
  "cpufeatures 0.2.17",
-]
-
-[[package]]
-name = "aes"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35f0f96ce78e38c3dc6d8948aa8163d06385be74000f3c7a95bf1eef35d3ea32"
-dependencies = [
- "cipher 0.5.2",
- "cpubits",
- "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -208,17 +197,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common 0.1.7",
- "inout 0.1.4",
-]
-
-[[package]]
-name = "cipher"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
-dependencies = [
- "crypto-common 0.2.2",
- "inout 0.2.5",
+ "inout",
 ]
 
 [[package]]
@@ -227,16 +206,10 @@ version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8543454e3c3f5126effff9cd44d562af4e31fb8ce1cc0d3dcd8f084515dbc1aa"
 dependencies = [
- "cipher 0.4.4",
+ "cipher",
  "dbl",
  "digest 0.10.7",
 ]
-
-[[package]]
-name = "cmov"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "const-default"
@@ -268,12 +241,6 @@ dependencies = [
  "loom",
  "tracing",
 ]
-
-[[package]]
-name = "cpubits"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15b85f9c39137c3a891689859392b1bd49812121d0d61c9caf00d46ed5ce06ae"
 
 [[package]]
 name = "cpufeatures"
@@ -328,15 +295,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
-]
-
-[[package]]
-name = "ctutils"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
-dependencies = [
- "cmov",
 ]
 
 [[package]]
@@ -546,7 +504,6 @@ checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.1",
  "crypto-common 0.2.2",
- "ctutils",
 ]
 
 [[package]]
@@ -1660,7 +1617,7 @@ version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
 dependencies = [
- "hmac 0.12.1",
+ "hmac",
 ]
 
 [[package]]
@@ -1670,15 +1627,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest 0.10.7",
-]
-
-[[package]]
-name = "hmac"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
-dependencies = [
- "digest 0.11.3",
 ]
 
 [[package]]
@@ -1722,15 +1670,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
-]
-
-[[package]]
-name = "inout"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b5cf4372d022092674a83b8febf5865f7a573cc0c5baec5e49c879b6a20978f"
-dependencies = [
- "hybrid-array",
 ]
 
 [[package]]
@@ -1883,11 +1822,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "meshcore"
 version = "0.9.0"
 dependencies = [
- "aes 0.9.3",
  "curve25519-dalek",
  "ed25519-dalek",
- "hmac 0.13.0",
- "libm",
  "miniz_oxide",
  "sha2",
 ]
@@ -1895,10 +1831,6 @@ dependencies = [
 [[package]]
 name = "meshcore-ble"
 version = "0.1.0"
-dependencies = [
- "aes 0.9.3",
- "p256",
-]
 
 [[package]]
 name = "meshcore-fw"
@@ -1944,7 +1876,6 @@ dependencies = [
  "embedded-hal-async",
  "embedded-io-async 0.7.0",
  "embedded-storage",
- "libm",
  "log",
  "meshcore",
  "meshcore-ui",
@@ -1955,7 +1886,6 @@ name = "meshcore-ui"
 version = "0.1.0"
 dependencies = [
  "embedded-graphics",
- "qrcodegen-no-heap",
  "u8g2-fonts",
 ]
 
@@ -2147,12 +2077,6 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
-
-[[package]]
-name = "qrcodegen-no-heap"
-version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0e2c0bf8be8a1c4a4f48973dabf26943f05da2bfc2d3180aae62409dbba6f0c"
 
 [[package]]
 name = "quote"
@@ -2681,7 +2605,7 @@ dependencies = [
 name = "trouble-host"
 version = "0.7.0"
 dependencies = [
- "aes 0.8.4",
+ "aes",
  "bt-hci",
  "cmac",
  "embassy-futures",

@@ -47,8 +47,6 @@ pub mod wide {
     pub static TEXT_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox3hb_tf>(), 16);
     pub static BIG: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4hb_tf>(), 20);
     pub static BIG_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4hb_tf>(), 20);
-    /// "Выключено" on a node left off.
-    pub static HUGE_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox5hb_tf>(), 25);
     /// Digits only: the PINs, the frequency.
     pub static DIGITS: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_logisoso32_tn>(), 36);
     /// Digits only: the unread count.
@@ -65,8 +63,6 @@ pub mod tft {
     pub static TEXT_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox3hb_tf>(), 16);
     pub static BIG: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4hb_tf>(), 20);
     pub static BIG_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4hb_tf>(), 20);
-    /// "Выключено" on a node left off.
-    pub static HUGE_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox4hb_tf>(), 20);
     /// Digits only: the update PIN, the frequency.
     pub static DIGITS: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_logisoso32_tn>(), 36);
     /// Digits only: the unread count, the clock, the pairing PIN.
@@ -81,7 +77,6 @@ pub mod mono {
     pub static SMALL_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox1hb_tf>(), 11);
     pub static TEXT: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox2h_tf>(), 13);
     pub static TEXT_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox2hb_tf>(), 13);
-    pub static BIG_BOLD: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_crox3hb_tf>(), 16);
     /// Digits only: the unread count, the pairing PIN.
     pub static DIGITS: Font = Font::new(FontRenderer::new::<fonts::u8g2_font_logisoso24_tn>(), 28);
     /// Digits only: the frequency, the update PIN.

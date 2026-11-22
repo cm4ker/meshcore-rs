@@ -82,7 +82,6 @@ const GPS_FIX_SETTLE_MS: u64 = 3000;
 /// The screen's pages; the update page only with two firmware slots.
 const PAGES: &[Page] = &[
     Page::Home,
-    Page::Contact,
     Page::Neighbours,
     Page::Traffic,
     Page::Radio,
@@ -92,7 +91,7 @@ const PAGES: &[Page] = &[
     Page::Advert,
 ];
 const PAGES_SINGLE_SLOT: &[Page] =
-    &[Page::Home, Page::Contact, Page::Neighbours, Page::Traffic, Page::Radio, Page::Power, Page::Network, Page::Advert];
+    &[Page::Home, Page::Neighbours, Page::Traffic, Page::Radio, Page::Power, Page::Network, Page::Advert];
 
 /// CLI lines from the board's console task to the main loop.
 pub static CLI_LINES: Channel<CriticalSectionRawMutex, Vec<u8>, 4> = Channel::new();
@@ -485,12 +484,6 @@ fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, info: &ScreenInfo, now: u64
             })
         }
         Page::Advert => Body::Advert { flood: true },
-        Page::Contact => Body::Contact(meshcore::util::contact_link_within(
-            &p.node_name,
-            key,
-            meshcore::advert::ADV_TYPE_REPEATER,
-            meshcore_ui::layout::mono_128x64::CONTACT_LINK_MAX,
-        )),
         _ => Body::Repeater(passport(), Health { neighbours: app.neighbours().len() as u16, uptime_min }),
     };
     let (page_idx, pages, alert) = ui.view_frame();

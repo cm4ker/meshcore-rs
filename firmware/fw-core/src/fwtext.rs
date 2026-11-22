@@ -1,5 +1,5 @@
-//! Where a node's firmware update stands, in the screens' words: the same [`FwState`] that `fw`
-//! tells in English (see `meshcore::fwstate`), as a few words and a line under them.
+//! Where a node's firmware update stands, in the screens' compact words: the same [`FwState`]
+//! that `fw` tells in English (see `meshcore::fwstate`), shortened to fit small displays cleanly.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -8,9 +8,9 @@ use meshcore::fwstate::{FwState, hm};
 
 /// What the update page shows.
 pub struct FwText {
-    /// Where it stands, a few words ("Обновлений нет", "0.8.4 #47 готова").
+    /// Short status ("Актуально", "0.5.2 готова", "Ошибка").
     pub state: String,
-    /// Why, or what comes next.
+    /// Concise detail line under it.
     pub detail: String,
     /// Bytes downloaded of the update, while it comes.
     pub progress: Option<(u32, u32)>,
@@ -22,108 +22,99 @@ pub fn fw_text(state: &FwState, trial: Option<(u64, &str)>, app: bool) -> FwText
     let text = |state: String, detail: String| FwText { state, detail, progress: None };
     if let Some((secs, prev)) = trial {
         let mins = secs.div_ceil(60).max(1);
-        let back = if prev.is_empty() { String::new() } else { format!(", откат: {prev}") };
-        return text("Пробный запуск".into(), format!("Оставлю через {mins} мин{back}"));
+        let detail = if prev.is_empty() { String::new() } else { format!("откат {prev}") };
+        return text(format!("Пробный · {mins}м"), detail);
     }
     match state {
-        FwState::Off => text("Выключено".into(), if app { "Включите fw_auto в настройках приложения" } else { "Включить: set fw.auto install" }.into()),
-        FwState::NoRoot => {
-            text("Нет ключа выпусков".into(), if app { "Задайте fw_root в настройках приложения" } else { "Задать: set fw.root" }.into())
+        FwState::Off => text("Авто выкл".into(), if app { "fw_auto = off" } else { "set fw.auto install" }.into()),
+        FwState::NoRoot => text("Нет ключа".into(), if app { "нужен fw_root" } else { "set fw.root" }.into()),
+        FwState::NoSlot => text("Нет слота".into(), "только USB".into()),
+        FwState::Waiting { at: 0 } => text("Ожидание".into(), "через 10м".into()),
+        FwState::Waiting { at } => text("Ожидание".into(), format!("в {}", hm(*at))),
+        FwState::Asking { whom } => text("Проверка".into(), format!("{whom}...")),
+        FwState::UpToDate { whom, at } => {
+            let host = whom.strip_prefix("nw.").and_then(|s| s.split('.').next()).unwrap_or(whom);
+            text("Актуально".into(), format!("{host} · {}", hm(*at)))
         }
-        FwState::NoSlot => text("Нет места для обновления".into(), "Обновить можно только по USB".into()),
-        FwState::Waiting { at: 0 } => text("Ждёт проверки".into(), "Первая через 10 минут после включения".into()),
-        FwState::Waiting { at } => text("Ждёт проверки".into(), format!("Проверю в {}", hm(*at))),
-        FwState::Asking { whom } => text("Проверяю".into(), format!("Спрашиваю {whom}")),
-        FwState::UpToDate { whom, at } => text("Обновлений нет".into(), format!("{whom}, {}", hm(*at))),
-        FwState::Fetching { whom } => text(format!("{whom} загружает"), "Спрошу снова через минуту".into()),
+        FwState::Fetching { whom } => text(format!("{whom} качает"), "повтор через 1м".into()),
         FwState::Downloading { release, from, done, total } => {
-            FwText { state: format!("Загружается {release}"), detail: format!("от {from}"), progress: Some((*done, *total)) }
+            FwText { state: release.to_string(), detail: format!("от {from}"), progress: Some((*done, *total)) }
         }
-        FwState::Ready { release, .. } => text(format!("{release} готова"), "Установка займёт около 10 секунд".into()),
-        FwState::Held { release } => text(format!("{release} готова"), "Установлю, когда сосед докачает свою".into()),
-        FwState::Skipped { release } => text("Обновлений нет".into(), format!("{release} откатили, жду следующую")),
-        FwState::Installing { release } => text(format!("Устанавливаю {release}"), "Перезапуск, 1–2 минуты".into()),
+        FwState::Ready { release, .. } => text(format!("{release} готова"), String::new()),
+        FwState::Held { release } => text(format!("{release} готова"), "ждет соседа".into()),
+        FwState::Skipped { release } => text("Актуально".into(), format!("{release} откатили")),
+        FwState::Installing { release } => text(format!("Установка {release}"), "перезапуск...".into()),
         FwState::Failed { why, retry } => {
-            let again = if *retry == 0 { String::new() } else { format!(". Попробую в {}", hm(*retry)) };
-            text("Не удалось".into(), format!("{}{again}", reason(why)))
+            let again = if *retry == 0 { String::new() } else { format!(" · {}", hm(*retry)) };
+            text("Ошибка".into(), format!("{}{again}", reason(why)))
         }
     }
 }
 
-/// Why an update failed, as the core says it in English, in the screen's words.
+/// Why an update failed, as the core says it in English, in compact screen words.
 pub fn reason(why: &str) -> String {
-    // "<server> not reachable, <the rest>" on a repeater without a link to its server
     if let Some((server, rest)) = why.split_once(" not reachable, ") {
-        return format!("{server} недоступен, {}", lower_first(&reason(rest)));
+        let host = server.strip_prefix("nw.").and_then(|s| s.split('.').next()).unwrap_or(server);
+        return format!("{host} недоступен: {}", reason(rest));
     }
     let fixed = match why {
-        "not signed by the pinned root key" => "Подписано не тем ключом, что закреплён здесь",
-        "not signed by the owner key" => "Не подписано ключом владельца",
-        "made for another board" => "Сделано для другой платы",
-        "older than this firmware" => "Старше этой прошивки",
-        "made for another firmware than this one" => "Сделано не для этой прошивки",
+        "not signed by the pinned root key" => "Чужой ключ",
+        "not signed by the owner key" => "Нет ключа влад.",
+        "made for another board" => "Другая плата",
+        "older than this firmware" => "Старше текущей",
+        "made for another firmware than this one" => "Другая прошивка",
         "unreadable" => "Не читается",
-        "the update file is corrupted" => "Файл обновления повреждён",
-        "the update slot can't be written" => "Не пишется память для обновления",
-        "larger than this device's update slot" => "Обновление не помещается в слот",
-        "an update is already waiting for restart" => "Обновление уже ждёт перезагрузки",
+        "the update file is corrupted" => "Битый файл",
+        "the update slot can't be written" => "Ошибка flash",
+        "larger than this device's update slot" => "Нет слота",
+        "an update is already waiting for restart" => "Ждет рестарта",
         "refused" => "Отклонено",
-        "a piece came short" => "Кусок пришёл неполным",
-        "not an update file" => "Это не файл обновления",
-        "a piece out of order" => "Куски пришли не по порядку",
-        "pieces of the update are missing" => "Обновление пришло не целиком",
-        "the update file can't be read" => "Файл обновления не читается",
-        "the update file is cut short" => "Файл обновления оборван",
-        "can't read this firmware's image" => "Не читается своя прошивка",
-        "a dev release, and this device follows stable" => "Тестовый выпуск, а здесь стабильный канал",
-        "the repeater is not a contact" => "Репитера нет в контактах",
-        "no repeater heard directly; one with fw.serve on is needed" => "Рядом нет репитера с fw.serve on",
-        "no repeater heard directly to ask" => "Рядом не слышно репитеров",
-        "no neighbour hands updates on (fw.serve)" => "Никто из соседей не раздаёт обновления",
+        "a piece came short" => "Короткий блок",
+        "not an update file" => "Не файл OTA",
+        "a piece out of order" => "Сбой порядка",
+        "pieces of the update are missing" => "Нет части блоков",
+        "the update file can't be read" => "Ошибка чтения",
+        "the update file is cut short" => "Файл оборван",
+        "can't read this firmware's image" => "Ошибка образа",
+        "a dev release, and this device follows stable" => "Нужен канал dev",
+        "the repeater is not a contact" => "Нет в контактах",
+        "no repeater heard directly; one with fw.serve on is needed" => "Нет репит. fw.serve",
+        "no repeater heard directly to ask" => "Нет репитеров",
+        "no neighbour hands updates on (fw.serve)" => "Нет соседей OTA",
         "can't reach the neighbour" => "Сосед недоступен",
         _ => "",
     };
     if !fixed.is_empty() {
         return fixed.into();
     }
-    // the ones that name a neighbour
     let named: [(&str, fn(&str) -> String); 5] = [
-        (" stopped answering", |n| format!("{n} перестал отвечать")),
-        (" not heard lately", |n| format!("{n} давно не слышно")),
-        (" has no updates now", |n| format!("У {n} сейчас нет обновлений")),
-        (" could not send the update", |n| format!("{n} не смог отдать обновление")),
-        (" is not a contact", |n| format!("{n} нет в контактах")),
+        (" stopped answering", |n| format!("{n}: нет ответа")),
+        (" not heard lately", |n| format!("{n}: не слышно")),
+        (" has no updates now", |n| format!("{n}: нет OTA")),
+        (" could not send the update", |n| format!("{n}: сбой TX")),
+        (" is not a contact", |n| format!("{n}: не контакт")),
     ];
     if let Some(n) = why.strip_prefix("no answer from ") {
-        return format!("{n} не ответил");
+        return format!("{n}: нет ответа");
     }
     if let Some(rest) = why.strip_prefix("the update is ")
         && let Some((kb, rest)) = rest.split_once(" KB, ")
     {
         let between = |r: &'_ str, from: &str, to: &str| r.strip_prefix(from)?.split_once(to).map(|(s, _)| s.to_string());
         if let Some(max) = between(rest, "more than this node takes over LoRa (", " KB)") {
-            return format!("Обновление {kb} КБ, по LoRa не больше {max} КБ: только USB или Bluetooth");
+            return format!("{kb} КБ > {max} (USB/BLE)");
         }
         if let Some(max) = between(rest, "over the ", " KB a node takes over LoRa by itself") {
-            return format!("Обновление {kb} КБ, сам по LoRa беру до {max} КБ: обновите вручную");
+            return format!("{kb} КБ > {max} (вручную)");
         }
         if let Some(name) = between(rest, "more than ", " hands on over LoRa") {
-            return format!("Обновление {kb} КБ, {name} по LoRa столько не отдаёт: только USB или Bluetooth");
+            return format!("{kb} КБ > лимит {name}");
         }
     }
     named
         .iter()
         .find_map(|(suffix, say)| why.strip_suffix(suffix).map(say))
-        // a commit failure and the like: as the core says it
         .unwrap_or_else(|| why.to_string())
-}
-
-fn lower_first(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(first) => first.to_lowercase().chain(c).collect(),
-        None => String::new(),
-    }
 }
 
 #[cfg(test)]
@@ -132,23 +123,23 @@ mod tests {
 
     #[test]
     fn reasons_in_the_screens_words() {
-        assert_eq!(reason("PKIO stopped answering"), "PKIO перестал отвечать");
-        assert_eq!(reason("no answer from PKIO"), "PKIO не ответил");
+        assert_eq!(reason("PKIO stopped answering"), "PKIO: нет ответа");
+        assert_eq!(reason("no answer from PKIO"), "PKIO: нет ответа");
         assert_eq!(
             reason("nw.ommesh.ru not reachable, no neighbour hands updates on (fw.serve)"),
-            "nw.ommesh.ru недоступен, никто из соседей не раздаёт обновления"
+            "ommesh недоступен: Нет соседей OTA"
         );
         assert_eq!(
             reason("the update is 180 KB, more than this node takes over LoRa (160 KB): install it over USB or BLE"),
-            "Обновление 180 КБ, по LoRa не больше 160 КБ: только USB или Bluetooth"
+            "180 КБ > 160 (USB/BLE)"
         );
         assert_eq!(
             reason("the update is 180 KB, over the 160 KB a node takes over LoRa by itself: fw update takes it"),
-            "Обновление 180 КБ, сам по LoRa беру до 160 КБ: обновите вручную"
+            "180 КБ > 160 (вручную)"
         );
         assert_eq!(
             reason("the update is 180 KB, more than PKIO hands on over LoRa: install it with fw ble or USB"),
-            "Обновление 180 КБ, PKIO по LoRa столько не отдаёт: только USB или Bluetooth"
+            "180 КБ > лимит PKIO"
         );
         assert_eq!(reason("OTA: commit failed: Flash"), "OTA: commit failed: Flash");
     }

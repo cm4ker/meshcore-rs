@@ -62,17 +62,15 @@ pub(crate) fn title(v: &View) -> &str {
         (Page::Messages, _) => "Сообщения",
         (Page::Nearby, _) => "Рядом",
         (Page::Radio, _) => "Радио",
-        (Page::Bluetooth, _) => "Bluetooth",
+        (Page::Bluetooth, _) => "BLE",
         (Page::Gps, _) => "GPS",
-        (Page::Advert, _) => "Объявить",
-        (Page::PowerOff, _) => "Выключить",
+        (Page::Advert, _) => "Анонс",
+        (Page::PowerOff, _) => "Питание",
         (Page::Neighbours, _) => "Соседи",
         (Page::Traffic, _) => "Трафик",
         (Page::Power, _) => "Питание",
         (Page::Network, _) => "Сеть",
-        (Page::Update, _) => "Прошивка",
-        (Page::Contact, _) => "Контакт",
-        (Page::Pull, _) => "Обновление",
+        (Page::Update | Page::Pull, _) => "OTA",
         (Page::Home, _) => "",
     }
 }
@@ -80,18 +78,53 @@ pub(crate) fn title(v: &View) -> &str {
 pub(crate) fn alert_text(a: crate::model::Alert) -> &'static str {
     use crate::model::Alert;
     match a {
-        Alert::AdvertSent => "Объявление отправлено",
-        Alert::AdvertFailed => "Не удалось отправить",
-        Alert::BleOn => "Bluetooth включен",
-        Alert::BleOff => "Bluetooth выключен",
-        Alert::GpsOn => "GPS включен",
-        Alert::GpsOff => "GPS выключен",
+        Alert::AdvertSent => "Анонс OK",
+        Alert::AdvertFailed => "Ошибка TX",
+        Alert::BleOn => "BLE вкл",
+        Alert::BleOff => "BLE выкл",
+        Alert::GpsOn => "GPS вкл",
+        Alert::GpsOff => "GPS выкл",
     }
 }
 
-pub(crate) const ADVERT_ZERO_HOP: &str = "Узлы рядом узнают, что вы в сети, и смогут добавить вас в контакты.";
-pub(crate) const ADVERT_FLOOD: &str = "Объявление о репитере разойдется по всей сети: узлы добавят его в свои списки.";
-pub(crate) const POWER_OFF: &str = "Экран сохранит надпись \"Выключено\". Включить снова - кнопкой.";
+pub(crate) fn sleep_label(pw: &crate::model::PowerInfo) -> alloc::string::String {
+    match pw.powersaving {
+        None => "нет".into(),
+        Some(false) => "выкл".into(),
+        Some(true) => alloc::format!("{}%", pw.asleep_pct),
+    }
+}
+
+pub(crate) fn net_rows(n: &crate::model::NetInfo) -> alloc::vec::Vec<(&'static str, alloc::string::String)> {
+    use crate::model::Wifi;
+    use crate::text::clean;
+    let mut out = alloc::vec::Vec::new();
+    match &n.wifi {
+        Wifi::Off => out.push(("Wi-Fi", "нет".into())),
+        Wifi::Disabled { ssid } => {
+            out.push(("Wi-Fi", "выкл".into()));
+            if !ssid.is_empty() {
+                out.push(("Сеть", clean(ssid)));
+            }
+        }
+        Wifi::Connecting { ssid } => {
+            out.push(("Wi-Fi", "поиск...".into()));
+            if !ssid.is_empty() {
+                out.push(("Сеть", clean(ssid)));
+            }
+        }
+        Wifi::Up { ssid, ip } => {
+            out.push(("Wi-Fi", clean(ssid)));
+            if !ip.is_empty() {
+                out.push(("IP", ip.clone()));
+            }
+        }
+    }
+    let mqtt = if n.mqtt_on == 0 { "выкл".into() } else { alloc::format!("{}/{}", n.mqtt_up, n.mqtt_on) };
+    out.push(("MQTT", mqtt));
+    out.push(("NTP", if n.time_synced { "OK".into() } else { "нет".into() }));
+    out
+}
 
 /// A screen of `size` that takes pixels anywhere and keeps the ink that fell off it.
 pub struct Probe {

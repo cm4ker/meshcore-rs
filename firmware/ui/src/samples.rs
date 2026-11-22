@@ -21,7 +21,6 @@ pub const COMPANION_PAGES: &[Page] = &[
 ];
 pub const REPEATER_PAGES: &[Page] = &[
     Page::Home,
-    Page::Contact,
     Page::Neighbours,
     Page::Traffic,
     Page::Radio,
@@ -105,7 +104,7 @@ pub fn companion_view(page: Page) -> View {
         Page::Gps => Body::Gps(GpsInfo { on: true, receiving: true, fix: Some((54_987_650, 73_368_800)), satellites: 7, in_view: 12 }),
         Page::Advert => Body::Advert { flood: false },
         Page::PowerOff => Body::PowerOff,
-        Page::Pull => Body::Pull(pull("0.5.2 готова", "Установка займёт около 10 секунд", None, Some("установить"))),
+        Page::Pull => Body::Pull(pull("0.5.2 готова", "", None, Some("Установить"))),
         _ => Body::Home { name: "PKIO🎃".into(), unread: 3, clock: None },
     };
     frame(COMPANION_PAGES, page, companion_bar(), body)
@@ -132,12 +131,8 @@ pub fn repeater_view(page: Page) -> View {
             mqtt_up: 2,
             time_synced: true,
         }),
-        Page::Update => Body::Update(UpdateInfo { window: None, state: "Обновлений нет".into(), detail: "nw.ommesh.ru, 16:13".into(), progress: None, version: "0.8.3-dev.1 #45".into() }),
+        Page::Update => Body::Update(UpdateInfo { window: None, state: "Актуально".into(), detail: "nw.ommesh.ru · 16:13".into(), progress: None, version: "0.8.3-dev.1 #45".into() }),
         Page::Advert => Body::Advert { flood: true },
-        Page::Contact => Body::Contact(alloc::format!(
-            "meshcore://contact/add?name=Omsk-RPT&public_key={}&type=2",
-            "3fa2910c57e1d4b8a6f0c3e29b1d7a4c5e8f20b6d9c3a1e7f4b2c8d0e6a9f1b3"
-        )),
         _ => Body::Repeater(passport(), Health { neighbours: 5, uptime_min: 4400 }),
     };
     frame(REPEATER_PAGES, page, repeater_bar(), body)
@@ -247,29 +242,6 @@ pub fn all() -> Vec<(String, View)> {
     let mut v = r(Page::Neighbours);
     v.bar.batt_mv = None;
     add("bar-no-battery", v);
-    add(
-        "contact-fitted",
-        with(
-            r(Page::Contact),
-            Body::Contact(alloc::format!(
-                "meshcore://contact/add?name={}&public_key={}&type=2",
-                "Wan3-SVOBODA-%F0%9F%8F%A2%F0%9F%94%8B%D0%9E",
-                "3fa2910c57e1d4b8a6f0c3e29b1d7a4c5e8f20b6d9c3a1e7f4b2c8d0e6a9f1b3"
-            )),
-        ),
-    );
-    // a name of emoji and Cyrillic makes the link long (each byte as %XX)
-    add(
-        "contact-long-name",
-        with(
-            r(Page::Contact),
-            Body::Contact(alloc::format!(
-                "meshcore://contact/add?name={}&public_key={}&type=2",
-                "Wan3-SVOBODA-%F0%9F%8F%A2%F0%9F%94%8B%D0%9E%D1%87%D0%B5%D0%BD%D1%8C",
-                "3fa2910c57e1d4b8a6f0c3e29b1d7a4c5e8f20b6d9c3a1e7f4b2c8d0e6a9f1b3"
-            )),
-        ),
-    );
     add("neighbours-empty", with(r(Page::Neighbours), Body::Neighbours(vec![])));
     let many: Vec<Neighbour> = (0..12).map(|i| neighbour("3FA291", -80 + i * 13, i as u32 * 300)).collect();
     add("neighbours-many", with(r(Page::Neighbours), Body::Neighbours(many)));
@@ -307,25 +279,25 @@ pub fn all() -> Vec<(String, View)> {
     let window = |connected| OtaWindow { name: "MeshCore-OTA-Wan3-SVOBODA-".into(), pin: 482_913, connected, mins_left: 14 };
     add(
         "update-open",
-        with(r(Page::Update), Body::Update(UpdateInfo { window: Some(window(false)), state: "Обновлений нет".into(), detail: "".into(), progress: None, version: "0.8.3-dev.1 #45".into() })),
+        with(r(Page::Update), Body::Update(UpdateInfo { window: Some(window(false)), state: "Актуально".into(), detail: "".into(), progress: None, version: "0.8.3-dev.1 #45".into() })),
     );
     add(
         "update-connected",
-        with(r(Page::Update), Body::Update(UpdateInfo { window: Some(window(true)), state: "Обновлений нет".into(), detail: "".into(), progress: None, version: "0.8.3-dev.1 #45".into() })),
+        with(r(Page::Update), Body::Update(UpdateInfo { window: Some(window(true)), state: "Актуально".into(), detail: "".into(), progress: None, version: "0.8.3-dev.1 #45".into() })),
     );
     let c = |p: Page| companion_view(p);
-    add("pull-loading", with(c(Page::Pull), Body::Pull(pull("Загружается 0.5.2", "", Some((40_000, 48_017)), None))));
+    add("pull-loading", with(c(Page::Pull), Body::Pull(pull("0.5.2", "", Some((40_000, 48_017)), None))));
     add(
         "pull-failed",
-        with(c(Page::Pull), Body::Pull(pull("Не удалось", "Подписано не тем ключом, что закреплён здесь", None, Some("проверить")))),
+        with(c(Page::Pull), Body::Pull(pull("Ошибка", "Чужой ключ", None, Some("Проверить")))),
     );
     add(
         "pull-off",
-        with(c(Page::Pull), Body::Pull(pull("Выключено", "Включите fw_auto в настройках приложения", None, None))),
+        with(c(Page::Pull), Body::Pull(pull("Авто выкл", "fw_auto = off", None, None))),
     );
     add(
         "update-trial",
-        with(r(Page::Update), Body::Update(UpdateInfo { window: None, state: "Пробный запуск".into(), detail: "Оставлю через 2 мин, откат: 0.8.2 #42".into(), progress: None, version: "0.8.3-dev.1 #45".into() })),
+        with(r(Page::Update), Body::Update(UpdateInfo { window: None, state: "Пробный · 2м".into(), detail: "откат 0.8.2 #42".into(), progress: None, version: "0.8.3-dev.1 #45".into() })),
     );
     out
 }

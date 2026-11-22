@@ -22,7 +22,7 @@ use meshcore_ui::{
 
 /// The pages, turned with the button.
 pub const PAGES: &[Page] =
-    &[Page::Home, Page::Contact, Page::Neighbours, Page::Traffic, Page::Radio, Page::Power, Page::Update, Page::Advert];
+    &[Page::Home, Page::Neighbours, Page::Traffic, Page::Radio, Page::Power, Page::Update, Page::Advert];
 
 /// The screen stays lit this long after boot or a press, as on the Heltec repeaters.
 const SCREEN_ON_MS: u64 = 60_000;
@@ -185,12 +185,6 @@ pub fn repeater_view(ui: &mut Ui, mesh: &Mesh<Repeater>, ble_window: Option<(u32
             })
         }
         Page::Advert => Body::Advert { flood: true },
-        Page::Contact => Body::Contact(meshcore::util::contact_link_within(
-            &p.node_name,
-            key,
-            meshcore::advert::ADV_TYPE_REPEATER,
-            meshcore_ui::layout::mono_128x64::CONTACT_LINK_MAX,
-        )),
         _ => Body::Repeater(passport(), Health { neighbours: app.neighbours().len() as u16, uptime_min }),
     };
     let (page_idx, pages, alert) = ui.view_frame();

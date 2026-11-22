@@ -314,9 +314,9 @@ fn pull_info(app: &Companion, now: u64) -> PullInfo {
     let trial = app.board.fw_trial_until.filter(|&t| t > now).map(|t| ((t - now) / 1000, app.board.fw_prev.as_str()));
     let text = crate::fwtext::fw_text(&state, trial, true);
     let hold = match state {
-        FwState::Ready { .. } => Some("установить"),
+        FwState::Ready { .. } => Some("Установить"),
         FwState::NoRoot | FwState::NoSlot | FwState::Asking { .. } | FwState::Downloading { .. } | FwState::Installing { .. } => None,
-        _ => Some("проверить"),
+        _ => Some("Проверить"),
     };
     PullInfo { state: text.state, detail: text.detail, progress: text.progress, hold, version }
 }

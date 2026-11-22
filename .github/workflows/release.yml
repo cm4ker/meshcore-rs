@@ -91,7 +91,7 @@ jobs:
       # platform-independent firmware core (storage, GPS, noise floor, crash codes)
       - run: cargo test --locked
         working-directory: firmware/fw-core
-      # the on-device interface: every page on every screen class, the QR encoder against qrcodegen
+      # the on-device interface: every page on every screen class
       - run: cargo test --locked
         working-directory: firmware/ui
 

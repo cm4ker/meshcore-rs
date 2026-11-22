@@ -4,8 +4,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// What the fonts can draw (ASCII and Cyrillic; Ё as Е, the fonts lack it); the rest (emoji,
-/// accented Latin) is dropped.
+/// What the fonts can draw (ASCII, middle dot and Cyrillic; Ё as Е, the fonts lack it); the rest
+/// (emoji, accented Latin) is dropped.
 pub fn clean(s: &str) -> String {
     let kept: String = s
         .chars()
@@ -15,7 +15,7 @@ pub fn clean(s: &str) -> String {
             c if c.is_whitespace() => ' ',
             c => c,
         })
-        .filter(|&c| matches!(c, ' '..='~' | 'А'..='я'))
+        .filter(|&c| matches!(c, ' '..='~' | '·' | 'А'..='я'))
         .collect();
     kept.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -49,33 +49,33 @@ pub fn clock(at: Option<(u8, u8)>) -> String {
     }
 }
 
-/// The unread count beside the home page's clock, in two lines.
-pub fn unread_lines(n: u32) -> (String, &'static str) {
-    match n {
-        0 => ("Нет новых".into(), "сообщений"),
-        n => {
-            let n = n.min(999);
-            (format!("{n} {}", plural(n, "новое", "новых", "новых")), plural(n, "сообщение", "сообщения", "сообщений"))
-        }
-    }
+/// Compact firmware version for the update screen (drops any parenthesised build date).
+pub fn short_version(ver: &str) -> String {
+    let v = ver.split(" (").next().unwrap_or(ver).trim();
+    if v.is_empty() || v.starts_with('v') { clean(v) } else { format!("v{}", clean(v)) }
 }
 
 /// How long ago, from [`coarse_minutes`].
 pub fn ago(min: u32) -> String {
     match min {
-        0 => "сейчас".into(),
-        1..60 => format!("{min} мин"),
-        60..1440 => format!("{} ч", min / 60),
-        _ => format!("{} д", min / 1440),
+        0 => "0м".into(),
+        1..60 => format!("{min}м"),
+        60..1440 => format!("{}ч", min / 60),
+        _ => format!("{}д", min / 1440),
     }
 }
 
 pub fn duration(min: u32) -> String {
     match min {
-        0..60 => format!("{min} мин"),
-        60..1440 => format!("{} ч {} мин", min / 60, min % 60),
-        _ => format!("{} д {} ч", min / 1440, min % 1440 / 60),
+        0..60 => format!("{min}м"),
+        60..1440 => format!("{}ч {}м", min / 60, min % 60),
+        _ => format!("{}д {}ч", min / 1440, min % 1440 / 60),
     }
+}
+
+/// Progress percentage, clamped to 0..=100.
+pub fn percent(done: u32, total: u32) -> u32 {
+    if total == 0 { 0 } else { (done.min(total) as u64 * 100 / total as u64) as u32 }
 }
 
 /// x.y from a value multiplied by 4 (SNR).

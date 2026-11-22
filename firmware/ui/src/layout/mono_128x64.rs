@@ -1,6 +1,6 @@
-//! Monochrome 128 x 64 (Heltec OLED): a bar on top (page title, the battery's voltage, Bluetooth)
-//! whose rule thickens under the current page's share of the width (page dots would
-//! take a row), then four short rows. A long-press hint takes the last row.
+//! Monochrome 128 x 64 (Heltec OLED, Pro Micro, T096, T3-S3): a compact top bar whose rule
+//! thickens under the current page's share of the width, then quiet instrument-style content and
+//! a compact `[◉ Action]` hold pill on the bottom row.
 
 use alloc::format;
 use alloc::string::String;
@@ -9,27 +9,26 @@ use alloc::vec::Vec;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 
-use super::{alert_text, title};
-use crate::model::{BleState, Body, View, Wifi};
-use crate::text::{ago, clean, clock, duration, micro_deg, permille, plural, quarter, quarter_signed, trim_float, unread_lines, volts};
+use super::{alert_text, net_rows, sleep_label, title};
+use crate::model::{BleState, Body, View};
+use crate::text::{ago, clean, clock, duration, micro_deg, percent, permille, plural, quarter, quarter_signed, short_version, trim_float, volts};
 use crate::theme::Font;
-use crate::theme::mono::{BIG_BOLD, DIGITS, MID_DIGITS, SMALL, SMALL_BOLD, TEXT, TEXT_BOLD};
-use crate::widgets::{Canvas, fit, width, wrap};
+use crate::theme::mono::{DIGITS, MID_DIGITS, SMALL, SMALL_BOLD, TEXT, TEXT_BOLD};
+use crate::widgets::{Canvas, PAPER, fit, width, wrap};
 
-/// The rows under the bar: a heading row in [`TEXT`] or [`TEXT_BOLD`] (13 px), then rows in
-/// [`SMALL`] (11 px).
+/// The rows under the bar: a heading row in [`TEXT`] or [`TEXT_BOLD`] (13 px), then [`SMALL`] (11 px).
 const ROWS: [i32; 4] = [16, 29, 40, 51];
-/// The longest contact link the class shows as a QR code (version 7 with low error correction:
-/// 49 px with its margin, the height under the bar).
-pub const CONTACT_LINK_MAX: usize = 154;
-
 /// Four rows of [`SMALL`].
 const SMALL_ROWS: [i32; 4] = [17, 28, 39, 50];
+/// Bottom hold-action pill geometry.
+const PILL_Y: i32 = 50;
+const PILL_H: i32 = 13;
 
 type C<'a, 'b, D> = &'a mut Canvas<'b, D>;
 
 fn hint<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, action: &str) {
-    c.text(&SMALL, &format!("Держите: {action}"), 0, ROWS[3]);
+    let w = c.w;
+    c.hold_pill(&SMALL_BOLD, action, 0, PILL_Y, PILL_H, 4, w);
 }
 
 fn bar<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View) {
@@ -63,50 +62,80 @@ fn rows<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, rows: &[(&str, Stri
     }
 }
 
-/// Lines in [`SMALL`], each cut to the width, from row `first` on.
-fn small_lines<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, lines: &[String], first: usize) {
+/// Shared OTA status body for companion [`Body::Pull`] and closed repeater [`Body::Update`].
+fn ota_body<D: DrawTarget<Color = BinaryColor>>(
+    c: C<'_, '_, D>, state: &str, detail: &str, progress: Option<(u32, u32)>, version: &str, hold: Option<&str>,
+) {
     let w = c.w;
-    for (l, y) in lines.iter().zip(&ROWS[first..]) {
-        c.text(&SMALL, &fit(&SMALL, l, w), 0, *y);
+    let ver = short_version(version);
+    if let Some((done, total)) = progress {
+        let pct = format!("{}%", percent(done, total));
+        c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, &clean(state), w - width(&SMALL_BOLD, &pct) - 6), 0, 16);
+        c.right(&SMALL_BOLD, &pct, w - 1, 18);
+        c.progress_bar(0, 33, w, 11, done, total);
+        let kb = format!("{}/{} КБ", done / 1024, total.div_ceil(1024));
+        let ver_room = w - width(&SMALL, &kb) - 6;
+        c.text(&SMALL, &kb, 0, 50);
+        if ver_room > 16 {
+            c.right(&SMALL, &fit(&SMALL, &ver, ver_room), w - 1, 50);
+        }
+        return;
+    }
+    let st = clean(state);
+    let show_ver_top = width(&TEXT_BOLD, &st) + width(&SMALL, &ver) + 6 <= w;
+    if show_ver_top {
+        c.text(&TEXT_BOLD, &st, 0, 16);
+        c.right(&SMALL, &ver, w - 1, 18);
+    } else {
+        c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, &st, w), 0, 16);
+    }
+    let det = clean(detail);
+    if !det.is_empty() {
+        c.text(&SMALL, &fit(&SMALL, &det, w), 0, 31);
+        if !show_ver_top && hold.is_none() {
+            c.text(&SMALL, &fit(&SMALL, &ver, w), 0, 44);
+        }
+    } else if !show_ver_top {
+        c.text(&SMALL, &fit(&SMALL, &ver, w), 0, 31);
+    }
+    if let Some(action) = hold {
+        hint(c, action);
     }
 }
 
 pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View) {
     let w = c.w;
     if let Body::Off { name } = &v.body {
-        c.centered(&BIG_BOLD, "Выключено", 6);
-        c.centered(&TEXT, &fit(&TEXT, &clean(name), w), 27);
-        c.centered(&SMALL, "Включить - кнопкой", 47);
+        c.power_icon(w / 2, 22, 11);
+        c.centered(&TEXT_BOLD, &fit(&TEXT_BOLD, &clean(name), w - 4), 43);
         return;
     }
     bar(c, v);
     match &v.body {
         Body::Home { unread, clock: Some(at), .. } => {
-            // the time, and the unread count in a line under it: beside it there is no room
-            c.centered(&DIGITS, &clock(*at), 16);
-            let (a, b) = unread_lines(*unread);
-            c.centered(&SMALL, &format!("{a} {b}"), 49);
+            c.centered(&DIGITS, &clock(*at), 17);
+            let count = format!("{}", (*unread).min(999));
+            let cw = width(&TEXT_BOLD, &count);
+            let total_w = 13 + 5 + cw;
+            let x = (w - total_w) / 2;
+            c.envelope(x, 49, 13, 9, *unread > 0);
+            c.text(&TEXT_BOLD, &count, x + 18, 47);
         }
         Body::Home { unread, .. } => {
             if *unread > 0 {
-                let n = (*unread).min(999);
-                let digits = format!("{n}");
-                c.text(&DIGITS, &digits, 0, 18);
-                let x = width(&DIGITS, &digits) + 6;
-                let (a, b) = match plural(n, "one", "few", "many") {
-                    "one" => ("новое", "сообщение"),
-                    "few" => ("новых", "сообщения"),
-                    _ => ("новых", "сообщений"),
-                };
-                c.text(&TEXT, a, x, 19);
-                c.text(&TEXT, b, x, 32);
+                let digits = format!("{}", (*unread).min(999));
+                let dw = width(&DIGITS, &digits);
+                let total_w = 24 + 8 + dw;
+                let x = (w - total_w) / 2;
+                c.envelope(x, 31, 24, 17, true);
+                c.text(&DIGITS, &digits, x + 32, 26);
             } else {
-                c.centered(&BIG_BOLD, "Нет новых", 20);
-                c.centered(&BIG_BOLD, "сообщений", 38);
+                c.envelope((w - 26) / 2, 22, 26, 18, false);
+                c.centered(&TEXT_BOLD, "0", 45);
             }
         }
         Body::Messages(list) => match list.first() {
-            None => c.centered(&TEXT, "Сообщений нет", 27),
+            None => c.centered(&TEXT, "Пусто", 30),
             Some(m) => {
                 let age = ago(m.age_min);
                 c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, &clean(&m.from), w - width(&SMALL, &age) - 6), 0, ROWS[0]);
@@ -117,10 +146,10 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
         },
         Body::Nearby(list) => {
             if list.is_empty() {
-                c.centered(&TEXT, "Пока никого", 27);
+                c.centered(&TEXT, "Пусто", 30);
             }
             for (n, y) in list.iter().zip([ROWS[0], ROWS[0] + 14, ROWS[0] + 28]) {
-                let hops = if n.hops == 0 { "прямо".into() } else { format!("{} хоп", n.hops) };
+                let hops = format!("{}х", n.hops);
                 c.text(&TEXT, &fit(&TEXT, &clean(&n.name), w - width(&SMALL, &hops) - 6), 0, y);
                 c.right(&SMALL, &hops, w - 1, y + 1);
             }
@@ -130,54 +159,62 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
                 format!("{} МГц  {} дБм", trim_float(r.freq_mhz, 3), r.tx_dbm),
                 format!("SF{}  BW {}  CR{}", r.sf, trim_float(r.bw_khz, 1), r.cr),
                 format!("RSSI {}  SNR {}", r.last_rssi, quarter(r.last_snr)),
-                format!("Батарея {}", volts(r.batt_mv)),
+                format!("RX/TX {}/{}", r.rx, r.tx),
             ];
             for (l, y) in lines.iter().zip(SMALL_ROWS) {
                 c.text(&SMALL, &fit(&SMALL, l, w), 0, y);
             }
         }
         Body::Bluetooth { state, name, pin } => {
-            let (head, link, action) = match state {
-                BleState::Off => ("Выключен", "", "включить"),
-                BleState::Waiting => ("Включен", "Ждет телефона", "выключить"),
-                BleState::Connected => ("Включен", "Телефон подключен", "выключить"),
+            let (head, action) = match state {
+                BleState::Off => ("Выкл", "Вкл BLE"),
+                BleState::Waiting => ("Ожидание", "Выкл BLE"),
+                BleState::Connected => ("Подключен", "Выкл BLE"),
             };
-            c.text(&TEXT_BOLD, head, 0, ROWS[0]);
-            let second = match pin {
-                Some(pin) => format!("PIN {pin:06}"),
-                None => clean(name),
-            };
-            small_lines(c, &[link.into(), second], 1);
+            if let Some(pin) = pin {
+                let p = format!("{pin:06}");
+                c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, head, w - width(&SMALL, &p) - 4), 0, 17);
+                c.right(&SMALL, &p, w - 1, 19);
+            } else {
+                c.text(&TEXT_BOLD, head, 0, 17);
+            }
+            c.text(&SMALL, &fit(&SMALL, &clean(name), w), 0, 33);
             hint(c, action);
         }
         Body::Gps(g) => {
-            let (head, lines): (&str, Vec<String>) = match (g.on, g.fix) {
-                (false, _) => ("Выключен", Vec::new()),
-                (true, None) if !g.receiving => ("Нет связи", alloc::vec!["Приемник молчит".into()]),
-                (true, None) => ("Ищет", alloc::vec![format!("Видно спутников: {}", g.in_view)]),
-                (true, Some((lat, lon))) => (
-                    "Координаты",
-                    alloc::vec![format!("{}, {}", micro_deg(lat), micro_deg(lon)), format!("Спутников: {}", g.satellites)],
-                ),
-            };
-            c.text(&TEXT_BOLD, head, 0, ROWS[0]);
-            small_lines(c, &lines, 1);
-            hint(c, if g.on { "выключить" } else { "включить" });
+            match (g.on, g.fix) {
+                (false, _) => {
+                    c.text(&TEXT_BOLD, "Выкл", 0, 17);
+                }
+                (true, None) if !g.receiving => {
+                    c.text(&TEXT_BOLD, "Нет связи", 0, 17);
+                    c.text(&SMALL, "Приемник молчит", 0, 33);
+                }
+                (true, None) => {
+                    c.text(&TEXT_BOLD, "Поиск", 0, 17);
+                    c.sat_icon(0, 32, 10);
+                    c.text(&SMALL_BOLD, &format!("{}", g.in_view), 14, 33);
+                }
+                (true, Some((lat, lon))) => {
+                    let coords = format!("{}, {}", micro_deg(lat), micro_deg(lon));
+                    c.text(&SMALL_BOLD, &fit(&SMALL_BOLD, &coords, w), 0, 18);
+                    c.sat_icon(0, 32, 10);
+                    c.text(&SMALL_BOLD, &format!("{}", g.satellites), 14, 33);
+                }
+            }
+            hint(c, if g.on { "Выкл GPS" } else { "Вкл GPS" });
         }
         Body::Advert { flood } => {
-            let text = if *flood { "Репитер объявит себя по всей сети." } else { "Узлы рядом узнают, что вы в сети." };
-            let lines = wrap(&SMALL, text, w, 3);
-            for (l, y) in lines.iter().zip(SMALL_ROWS) {
-                c.text(&SMALL, l, 0, y);
-            }
-            hint(c, "отправить");
+            c.beacon(17, 28, 10, *flood);
+            let (title, sub) = if *flood { ("Вся сеть", "flood") } else { ("Рядом", "0 хопов") };
+            c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, title, w - 35), 35, 19);
+            c.text(&SMALL, sub, 35, 34);
+            hint(c, "Отправить");
         }
         Body::PowerOff => {
-            let lines = wrap(&SMALL, "Узел выключится. Включить снова - кнопкой.", w, 3);
-            for (l, y) in lines.iter().zip(SMALL_ROWS) {
-                c.text(&SMALL, l, 0, y);
-            }
-            hint(c, "выключить");
+            c.power_icon(18, 31, 10);
+            c.text(&TEXT_BOLD, "Выключить", 38, 25);
+            hint(c, "Выкл");
         }
         Body::Off { .. } => {}
         Body::Repeater(p, health) => {
@@ -186,7 +223,6 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
             c.right(&SMALL, &tx, w - 1, ROWS[0] + 1);
             c.text(&SMALL, &format!("BW {}  SF{}  CR{}", trim_float(p.bw_khz, 1), p.sf, p.cr), 0, ROWS[1]);
             let n = health.neighbours as u32;
-            // the uptime is on the power page
             let rest = format!("ID {}", clean(&p.id));
             let neighbours = format!("{n} {}", plural(n, "сосед", "соседа", "соседей"));
             let room = w - width(&SMALL, &rest) - 6;
@@ -196,7 +232,7 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
         }
         Body::Neighbours(list) => {
             if list.is_empty() {
-                c.centered(&TEXT, "Пока никого", 27);
+                c.centered(&TEXT, "Пусто", 30);
             }
             let shown = if list.len() > 4 { 3 } else { list.len() };
             for (n, y) in list[..shown].iter().zip(SMALL_ROWS) {
@@ -205,15 +241,15 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
                 c.right(&SMALL, &right, w - 1, y);
             }
             if list.len() > shown {
-                c.text(&SMALL, &format!("и еще {}", list.len() - shown), 0, SMALL_ROWS[3]);
+                c.text(&SMALL, &format!("+{}", list.len() - shown), 0, SMALL_ROWS[3]);
             }
         }
         Body::Traffic(t) => rows(
             c,
             &[
-                ("Принято", format!("{}", t.rx)),
-                ("Передано", format!("{}", t.tx)),
-                ("Ошибки CRC", format!("{}", t.rx_errors)),
+                ("RX", format!("{}", t.rx)),
+                ("TX", format!("{}", t.tx)),
+                ("CRC", format!("{}", t.rx_errors)),
                 ("Эфир", format!("{} / {}", permille(t.tx_air_permille), permille(t.rx_air_permille))),
             ],
         ),
@@ -224,83 +260,35 @@ pub(super) fn draw<D: DrawTarget<Color = BinaryColor>>(c: C<'_, '_, D>, v: &View
             c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, &format!("SF{} CR{} BW {}", p.sf, p.cr, trim_float(p.bw_khz, 1)), w), 0, 35);
             c.text(&SMALL, &format!("{} дБм", p.tx_dbm), 0, ROWS[3]);
         }
-        Body::Power(pw) => {
-            c.text(&TEXT_BOLD, &format!("Батарея {}", volts(pw.batt_mv)), 0, ROWS[0]);
-            let sleep = match pw.powersaving {
-                None => String::from("недоступен"),
-                Some(false) => String::from("выключен"),
-                Some(true) => format!("включен, {}%", pw.asleep_pct),
-            };
-            small_lines(c, &[String::from("Сон между пакетами:"), sleep, format!("В сети {}", duration(pw.uptime_min))], 1);
-        }
-        Body::Network(n) => {
-            let (state, ssid, ip) = match &n.wifi {
-                Wifi::Off => ("не настроен", "", ""),
-                Wifi::Disabled { ssid } => ("выключен", ssid.as_str(), ""),
-                Wifi::Connecting { ssid } => ("подключается", ssid.as_str(), ""),
-                Wifi::Up { ssid, ip } => ("подключен", ssid.as_str(), ip.as_str()),
-            };
-            c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, &format!("Wi-Fi {state}"), w), 0, ROWS[0]);
-            let mqtt = match n.mqtt_on {
-                0 => String::from("MQTT выключен"),
-                on => format!("MQTT {} из {on}", n.mqtt_up),
-            };
-            // without an address, the clock's state takes its row
-            let second = match ip {
-                "" if n.time_synced => String::from("Часы по сети"),
-                "" => String::from("Часы ждут сети"),
-                ip => format!("IP {ip}"),
-            };
-            small_lines(c, &[clean(ssid), second, mqtt], 1);
-        }
-        Body::Contact(link) => match c.qr(link, 0, 15, c.h - 15, true) {
-            Some(side) => {
-                for (l, y) in ["Добавить", "в контакты", "камерой", "телефона"].iter().zip(SMALL_ROWS) {
-                    c.text(&SMALL, l, side + 3, y);
-                }
-            }
-            None => c.text(&SMALL, "Ссылка не помещается", 0, ROWS[1]),
-        },
-        Body::Pull(p) => {
-            c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, &clean(&p.state), w), 0, ROWS[0]);
-            let first = match p.progress {
-                Some((done, total)) => format!("{} из {} КБ", done / 1024, total.div_ceil(1024)),
-                None => clean(&p.detail),
-            };
-            small_lines(c, &[first, clean(&p.version)], 1);
-            if let Some(hold) = p.hold {
-                hint(c, hold);
-            }
-        }
+        Body::Power(pw) => rows(
+            c,
+            &[
+                ("Батарея", volts(pw.batt_mv)),
+                ("Сон", sleep_label(pw)),
+                ("Аптайм", duration(pw.uptime_min)),
+            ],
+        ),
+        Body::Network(n) => rows(c, &net_rows(n)),
+        Body::Pull(p) => ota_body(c, &p.state, &p.detail, p.progress, &p.version, p.hold),
         Body::Update(u) => match &u.window {
-            None => {
-                c.text(&TEXT_BOLD, &fit(&TEXT_BOLD, &clean(&u.state), w), 0, ROWS[0]);
-                let first = match u.progress {
-                    Some((done, total)) => format!("{} из {} КБ", done / 1024, total.div_ceil(1024)),
-                    None => clean(&u.detail),
-                };
-                small_lines(c, &[first, clean(&u.version)], 1);
-                hint(c, "окно BLE");
-            }
+            None => ota_body(c, &u.state, &u.detail, u.progress, &u.version, Some("Окно BLE")),
             Some(o) => {
                 c.text(&SMALL, "PIN", 0, ROWS[0] + 6);
                 c.text(&MID_DIGITS, &format!("{:06}", o.pin), 24, ROWS[0] + 1);
-                let state = if o.connected { String::from("Подключено") } else { format!("Ждет: еще {} мин", o.mins_left) };
+                let state = format!("{} · {}м", if o.connected { "Подкл" } else { "Ждет" }, o.mins_left);
                 c.text(&SMALL, &state, 0, 36);
-                if o.connected {
-                    c.text(&SMALL, &format!("Закроется через {} мин", o.mins_left), 0, ROWS[3]);
-                } else {
-                    hint(c, "закрыть");
+                if !o.connected {
+                    hint(c, "Закрыть");
                 }
             }
         },
     }
     if v.pin.is_some() || v.alert.is_some() {
         // a box over the page would leave bits of its text showing around it on so small a screen
-        c.rect(0, 15, w as u32, (c.h - 15) as u32, Some(crate::widgets::PAPER));
+        c.rect(0, 15, w as u32, (c.h - 15) as u32, Some(PAPER));
     }
     if let Some(pin) = v.pin {
-        c.overlay(&[("PIN для телефона".into(), &SMALL), (format!("{pin:06}"), &DIGITS)], 2, 1, 3);
+        c.overlay(&[("BLE PIN".into(), &SMALL), (format!("{pin:06}"), &DIGITS)], 2, 1, 3);
     } else if let Some(a) = v.alert {
         let lines: Vec<(String, &Font)> = wrap(&TEXT_BOLD, alert_text(a), w - 12, 2).into_iter().map(|l| (l, &TEXT_BOLD)).collect();
         c.overlay(&lines, 2, 1, 4);

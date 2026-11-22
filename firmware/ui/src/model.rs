@@ -21,8 +21,6 @@ pub enum Page {
     Power,
     Network,
     Update,
-    /// The node's contact as a QR code.
-    Contact,
     /// A companion's firmware update, pulled from the release server or a neighbouring repeater (`fw.auto`).
     Pull,
 }
@@ -276,8 +274,6 @@ pub enum Body {
     Power(PowerInfo),
     Network(NetInfo),
     Update(UpdateInfo),
-    /// A QR code of the node's contact link (`meshcore://contact/add?...`), for the app's camera.
-    Contact(String),
     Pull(PullInfo),
 }
 
