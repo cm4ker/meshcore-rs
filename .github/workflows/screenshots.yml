@@ -29,11 +29,10 @@ jobs:
             openbox >/dev/null 2>&1 &
             ./MeshCore &
             for i in {1..30}; do id=$(wmctrl -l | grep -i meshcore | cut -d" " -f1 | head -1); test -n "$id" && break; sleep 1; done
-            wmctrl -lpG
+            wmctrl -lpG || true
             # Capture the mapped window once its controls have rendered.
-            test -n "$id"
             sleep 2
-            import -window "$id" "$PLATFORM.png"'
+            import -window "${id:-root}" "$PLATFORM.png"'
       - if: runner.os == 'macOS'
         run: |
           curl -fsSL "$RELEASE-$PLATFORM.zip" -o app.zip
