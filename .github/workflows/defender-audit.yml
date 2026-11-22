@@ -12,6 +12,12 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           Set-MpPreference -DisableRealtimeMonitoring $false
+          $initial=Get-MpPreference
+          foreach($kind in @("ExclusionPath","ExclusionExtension","ExclusionProcess")){
+            $values=$initial.$kind
+            if($values){$remove=@{};$remove[$kind]=$values;Remove-MpPreference @remove}
+          }
+          Update-MpSignature
           Start-Sleep 5
           Get-MpComputerStatus | Format-List AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,AntivirusSignatureVersion,AntivirusSignatureLastUpdated
           $prefs=Get-MpPreference
@@ -25,7 +31,7 @@ jobs:
           try {
             Invoke-WebRequest -UseBasicParsing 'https://github.com/AVA55LV/meshcore-rs/releases/download/desktop-v1.1/ota-app-1.1-Windows-x86-x64.exe' -OutFile $path
             & $scan -CheckExclusion -path $path
-            Write-Host "Exclusion check returned $LASTEXITCODE"
+            if($LASTEXITCODE -ne 1){throw "Path exclusion check did not confirm a scannable file: $LASTEXITCODE"}
             $hash=(Get-FileHash $path).Hash
             Write-Host "Release file SHA256 $hash"
             if($hash -ne '560317A019F40C6D226CA0530353F904C7257BB1C70EA91FCA48583DD6314388'){throw 'Hash mismatch'}
