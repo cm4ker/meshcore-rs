@@ -65,7 +65,7 @@ def sector_align(n):
     return (n + 4095) // 4096 * 4096
 
 
-def prepare_delta(path, running, capacity):
+def prepare_delta(path, running):
     data = pathlib.Path(path).read_bytes()
     if len(data) < 54 or data[:5] != b"MCFW\x01" or data[52] > 31:
         raise ValueError("Повреждён заголовок MCFD.")
@@ -83,8 +83,8 @@ def prepare_delta(path, running, capacity):
     if not base_size or running[:12] != data[end:end+12]:
         raise ValueError("MCFD рассчитан на другую исходную прошивку. Выберите подходящую дельту или полный .mcfw.")
     patch = data[end+36:]
-    if not size or sector_align(size) + sector_align(len(patch)) > capacity:
-        raise ValueError("Недостаточно места для дельты в слоте обновления.")
+    if not size or len(patch) > 65535 * CHUNK:
+        raise ValueError("Недопустимый размер дельты.")
     sha = data[16:48]
     begin = struct.pack("<I32sHBII32s", len(patch), sha, CHUNK,
                         FLAG_ZLIB | FLAG_DELTA | FLAG_CRC, size, base_size, base_hash)
@@ -322,7 +322,7 @@ async def list_devices():
 
 async def main():
     ap = argparse.ArgumentParser(description=" ".join(__doc__.split("\n\n")[0].split()))
-    ap.add_argument("image", nargs="?", help="the release's .mcfw (or an image .bin)")
+    ap.add_argument("image", nargs="?", help="release .mcfw, delta .mcfd, or image .bin")
     link_args = ap.add_mutually_exclusive_group()
     link_args.add_argument("--port", help="USB serial port")
     link_args.add_argument("--ble", help="BLE address (pair it first)")
@@ -376,7 +376,7 @@ async def main():
 
         is_delta = pathlib.Path(args.image).suffix.lower() == ".mcfd"
         if is_delta:
-            envelope, payload, sha, begin = prepare_delta(args.image, running, capacity)
+            envelope, payload, sha, begin = prepare_delta(args.image, running)
             how = f"MCFD: {len(payload)} байт"
         else:
             image, envelope = load_firmware(args.image)
