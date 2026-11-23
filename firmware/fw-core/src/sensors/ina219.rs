@@ -20,9 +20,9 @@ const REG_BUS_VOLTAGE: u8 = 0x02;
 const REG_POWER: u8 = 0x03;
 const REG_CURRENT: u8 = 0x04;
 const REG_CALIBRATION: u8 = 0x05;
-/// 32 V bus range, ±320 mV across the shunt, 12-bit bus (532 µs), 128-sample averaged shunt
-/// (68.1 ms), continuous: averages across sleep instead of sampling the active I2C read burst.
-const CONFIG_32V_2A: u16 = 0x39FF;
+/// 32 V bus range, ±320 mV across the shunt, 12-bit samples of both, continuous (upstream default;
+/// 128-sample averaging `0x39FF` breaks some INA219 clones).
+const CONFIG_32V_2A: u16 = 0x399F;
 /// 0.1 mA per current step and 2 mW per power step with a 0.1 Ω shunt.
 const CALIBRATION_32V_2A: u16 = 4096;
 const CURRENT_STEPS_PER_MA: f32 = 10.0;
@@ -58,13 +58,13 @@ impl Ina219 {
     }
 
     pub async fn read<I: I2c>(&self, i2c: &mut I) -> Option<Reading> {
-        let bus = register(i2c, REG_BUS_VOLTAGE).await?;
-        // a sharp load can reset the chip and its calibration with it: Adafruit's driver writes
-        // the calibration again before reading current or power
-        write(i2c, REG_CALIBRATION, CALIBRATION_32V_2A).await;
+        // Read current first, before other I2C traffic wakes the board for >1 ms, so the 532 µs
+        // continuous conversion still reflects idle sleep current. Refresh calibration afterwards
+        // in case a sharp load reset the chip (as Adafruit's driver does).
         let current = register(i2c, REG_CURRENT).await? as i16;
-        write(i2c, REG_CALIBRATION, CALIBRATION_32V_2A).await;
+        let bus = register(i2c, REG_BUS_VOLTAGE).await?;
         let power = register(i2c, REG_POWER).await? as i16;
+        write(i2c, REG_CALIBRATION, CALIBRATION_32V_2A).await;
         Some(Reading {
             bus_v: (bus >> 3) as f32 * 0.004,
             current_ma: current as f32 / CURRENT_STEPS_PER_MA,

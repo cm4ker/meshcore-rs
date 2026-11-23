@@ -167,6 +167,12 @@ impl<I: I2c> Sensors<I> {
     /// not answer this time keeps its channel, so the others' do not move.
     pub async fn read_lpp(&mut self, lpp: &mut Vec<u8>) -> u8 {
         let i2c = &mut self.i2c;
+        // Sample INA219 first (before BMP/BME/AHT I2C traffic keeps the MCU awake past its 532 µs
+        // conversion window), while keeping the upstream channel order below.
+        let ina_reading = match self.ina.as_ref() {
+            Some(s) => s.read(i2c).await,
+            None => None,
+        };
         let mut channel = meshcore::lpp::CHANNEL_SELF + 1;
         if let Some(a) = self.aht.as_ref() {
             if let Some(r) = a.read(i2c).await {
@@ -200,8 +206,8 @@ impl<I: I2c> Sensors<I> {
             }
             channel += 1;
         }
-        if let Some(s) = self.ina.as_ref() {
-            if let Some(r) = s.read(i2c).await {
+        if self.ina.is_some() {
+            if let Some(r) = ina_reading {
                 r.lpp(channel, lpp);
             }
             channel += 1;
