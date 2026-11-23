@@ -1,0 +1,8 @@
+<resources>
+  <style name="AppTheme" parent="@android:style/Theme.Material.Light">
+    <item name="android:dropDownListViewStyle">@style/SquareDropDown</item>
+  </style>
+  <style name="SquareDropDown" parent="@android:style/Widget.Material.ListView.DropDown">
+    <item name="android:listSelector">@drawable/menu_row</item>
+  </style>
+</resources>

@@ -1,0 +1,4 @@
+<CheckedTextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@android:id/text1" android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:minHeight="48dp" android:gravity="center_vertical" android:paddingStart="12dp" android:paddingEnd="12dp"
+    android:background="@drawable/menu_row" android:textAppearance="?android:attr/textAppearanceMedium" android:textColor="#202124" />
