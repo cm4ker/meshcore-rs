@@ -56,7 +56,7 @@ $tips.AutoPopDelay = 15000
 $tips.SetToolTip($address, 'USB: выберите COM-порт из списка. Bluetooth: выберите найденное устройство. Wi-Fi: введите адрес и порт.')
 $tips.SetToolTip($find, 'В режиме USB показывает COM-порты Windows. Для поиска устройств Bluetooth выберите Bluetooth. Для репитера сначала откройте окно обновления на устройстве.')
 $tips.SetToolTip($pin, 'Введите шестизначный PIN, который показывает устройство при открытии окна Bluetooth-обновления.')
-$tips.SetToolTip($browse, 'Выберите файл .mcfw или .bin для вашей модели.')
+$tips.SetToolTip($browse, 'Выберите файл .mcfw, .mcfd или .bin для вашей модели.')
 $tips.SetToolTip($newNode, 'Прошивка ESP по USB с удалением ключа, настроек, контактов и каналов обеих ролей.')
 $tips.SetToolTip($usbFlash, 'Установить выбранный образ приложения через загрузчик ESP. Подходит для установки более раннего билда.')
 $tips.SetToolTip($info, 'Читает сведения о подключённом устройстве и его текущей прошивке.')
@@ -128,7 +128,7 @@ $browse.Add_Click({
     $dialog = New-Object Windows.Forms.OpenFileDialog
     try {
         $dialog.Title = 'Выберите прошивку для вашей модели MeshCore'
-        $dialog.Filter = 'Файлы прошивки (*.mcfw;*.bin)|*.mcfw;*.bin'
+        $dialog.Filter = 'Файлы прошивки (*.mcfw;*.mcfd;*.bin)|*.mcfw;*.mcfd;*.bin'
         if ($dialog.ShowDialog($form) -eq 'OK') { $firmware.Text = $dialog.FileName }
     } finally { $dialog.Dispose() }
 })
@@ -158,7 +158,7 @@ Wi-Fi. Выберите Wi-Fi / TCP и введите адрес устройс�
 
 Для установки другого билда на ESP выберите USB, COM-порт и файл. Нажмите «Прошить через USB» и подтвердите запись. Для .bin нужен образ приложения для этой платы.
 
-Нажмите «Версия устройства», чтобы проверить подключение. Затем выберите подходящий вашей модели файл .mcfw или .bin и нажмите «Обновить прошивку». Результат появится в журнале.
+Нажмите «Версия устройства», чтобы проверить подключение. Затем выберите подходящий вашей модели файл .mcfw, .mcfd или .bin и нажмите «Обновить прошивку». Результат появится в журнале.
 '@
 })
 
@@ -198,6 +198,10 @@ function Start-Ota($mode) {
             if ($method.SelectedIndex -ne 0) { return }
             if (-not $firmware.Text -or -not (Test-Path -LiteralPath $firmware.Text -PathType Leaf)) {
                 Show-Notice 'Выберите файл выпуска .mcfw или образ приложения .bin для вашей модели ESP.'
+                return
+            }
+            if ([IO.Path]::GetExtension($firmware.Text) -ieq '.mcfd') {
+                Show-Notice 'Для дельты нажмите «Обновить прошивку».'
                 return
             }
             $fileName = [IO.Path]::GetFileName($firmware.Text)

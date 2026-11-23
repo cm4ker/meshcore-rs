@@ -65,6 +65,33 @@ def sector_align(n):
     return (n + 4095) // 4096 * 4096
 
 
+def prepare_delta(path, running, capacity):
+    data = pathlib.Path(path).read_bytes()
+    if len(data) < 54 or data[:5] != b"MCFW\x01" or data[52] > 31:
+        raise ValueError("Повреждён заголовок MCFD.")
+    index = 53 + data[52]
+    if index >= len(data) or data[index] > 8:
+        raise ValueError("Повреждён конверт выпуска MCFD.")
+    end = index + 1 + 96 * data[index]
+    if len(data) < end + 38:
+        raise ValueError("Файл MCFD обрезан.")
+    if len(running) < 19 or running[12:14] != data[5:7]:
+        raise ValueError("Плата или роль не подходит для этого MCFD.")
+    size = struct.unpack_from("<I", data, 12)[0]
+    base_size = struct.unpack_from("<I", data, end)[0]
+    base_hash = data[end+4:end+36]
+    if not base_size or running[:12] != data[end:end+12]:
+        raise ValueError("MCFD рассчитан на другую исходную прошивку. Выберите подходящую дельту или полный .mcfw.")
+    patch = data[end+36:]
+    if not size or sector_align(size) + sector_align(len(patch)) > capacity:
+        raise ValueError("Недостаточно места для дельты в слоте обновления.")
+    sha = data[16:48]
+    begin = struct.pack("<I32sHBII32s", len(patch), sha, CHUNK,
+                        FLAG_ZLIB | FLAG_DELTA | FLAG_CRC, size, base_size, base_hash)
+    return data[:end], patch, sha, begin
+
+
+
 class Link:
     """Frames to and from the device; replies are matched by their first byte."""
 
@@ -347,8 +374,13 @@ async def main():
         if args.info:
             return
 
-        image, envelope = load_firmware(args.image)
-        sha = hashlib.sha256(image).digest()
+        is_delta = pathlib.Path(args.image).suffix.lower() == ".mcfd"
+        if is_delta:
+            envelope, payload, sha, begin = prepare_delta(args.image, running, capacity)
+            how = f"MCFD: {len(payload)} байт"
+        else:
+            image, envelope = load_firmware(args.image)
+            sha = hashlib.sha256(image).digest()
         if len(running) >= 12 and running[4:12] == sha[:8]:
             sys.exit("the device already runs this image")
         if envelope:
@@ -361,31 +393,32 @@ async def main():
         elif envelope:
             for piece in envelope_pieces(envelope, ENVELOPE_PIECE):
                 reply = await link.request(bytes([OTA_MANIFEST]) + piece)
-            if reply[0]:
-                sys.exit(f"release refused: {ERRORS.get(reply[0], reply[0])}")
+                if reply[0]:
+                    sys.exit(f"release refused: {ERRORS.get(reply[0], reply[0])}")
             log("release accepted" if roots else "release envelope sent (not needed: no root key pinned)")
 
-        payload = zlib.compress(image, 9)
-        how = f"zlib {len(image)} -> {len(payload)} bytes"
-        begin = struct.pack("<I", len(payload)) + sha + struct.pack("<HBI", CHUNK, FLAG_ZLIB | FLAG_CRC, len(image))
-        # the device stages a compressed stream at the end of the slot and inflates it to the start
-        if args.raw or sector_align(len(payload)) + sector_align(len(image)) > capacity:
-            payload = image
-            how = f"raw {len(image)} bytes" + ("" if args.raw else " (image and its zlib stream do not both fit the slot)")
-            begin = struct.pack("<I", len(payload)) + sha + struct.pack("<HBI", CHUNK, FLAG_CRC, 0)
-        if images is not None and len(running) >= 12 and not args.no_delta and not args.raw:
-            run_len, run_sha8 = struct.unpack_from("<I", running)[0], running[4:12]
-            base = find_base(images, run_len, run_sha8)
-            if base is None:
-                log(f"running image ({run_len} bytes, sha256 {run_sha8.hex()}...) is not in {images}: whole image")
-            else:
-                delta = zlib.compress(make_delta(args.delta_tool, base, image), 9)
-                if len(delta) < len(payload):
-                    payload = delta
-                    how = f"delta {len(base)} -> {len(image)} bytes as {len(delta)} bytes"
-                    begin = struct.pack("<I", len(payload)) + sha + struct.pack("<H", CHUNK)
-                    begin += struct.pack("<BII", FLAG_ZLIB | FLAG_DELTA | FLAG_CRC, len(image), len(base))
-                    begin += hashlib.sha256(base).digest()
+        if not is_delta:
+            payload = zlib.compress(image, 9)
+            how = f"zlib {len(image)} -> {len(payload)} bytes"
+            begin = struct.pack("<I", len(payload)) + sha + struct.pack("<HBI", CHUNK, FLAG_ZLIB | FLAG_CRC, len(image))
+            # the device stages a compressed stream at the end of the slot and inflates it to the start
+            if args.raw or sector_align(len(payload)) + sector_align(len(image)) > capacity:
+                payload = image
+                how = f"raw {len(image)} bytes" + ("" if args.raw else " (image and its zlib stream do not both fit the slot)")
+                begin = struct.pack("<I", len(payload)) + sha + struct.pack("<HBI", CHUNK, FLAG_CRC, 0)
+            if images is not None and len(running) >= 12 and not args.no_delta and not args.raw:
+                run_len, run_sha8 = struct.unpack_from("<I", running)[0], running[4:12]
+                base = find_base(images, run_len, run_sha8)
+                if base is None:
+                    log(f"running image ({run_len} bytes, sha256 {run_sha8.hex()}...) is not in {images}: whole image")
+                else:
+                    delta = zlib.compress(make_delta(args.delta_tool, base, image), 9)
+                    if len(delta) < len(payload):
+                        payload = delta
+                        how = f"delta {len(base)} -> {len(image)} bytes as {len(delta)} bytes"
+                        begin = struct.pack("<I", len(payload)) + sha + struct.pack("<H", CHUNK)
+                        begin += struct.pack("<BII", FLAG_ZLIB | FLAG_DELTA | FLAG_CRC, len(image), len(base))
+                        begin += hashlib.sha256(base).digest()
 
         total = math.ceil(len(payload) / CHUNK)
         reply = await link.request(bytes([OTA_BEGIN]) + begin, timeout=30)
@@ -441,12 +474,14 @@ async def main():
                          "reboots): check `ver` and `fw` on its console or over LoRa")
             if got != sha[:8]:
                 sys.exit(f"the device runs {got.hex()}..., not the new image: the update did not take")
-            store_image(images, image)
+            if not is_delta:
+                store_image(images, image)
             log(f"the device runs the new image ({after})")
             return
         if reply[0]:
             sys.exit(f"commit failed: {ERRORS.get(reply[0], reply[0])}")
-        store_image(images, image)
+        if not is_delta:
+            store_image(images, image)
         log(f"image verified; the device reboots into it ({after})")
     finally:
         if link:

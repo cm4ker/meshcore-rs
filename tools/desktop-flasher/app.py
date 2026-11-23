@@ -73,10 +73,10 @@ class Flasher:
         root.after(1200, self.refresh)
 
     def help(self):
-        messagebox.showinfo("Как начать", "Выберите подключение и устройство. Для TCP укажите адрес:порт. Для Bluetooth откройте окно обновления на устройстве и нажмите «Найти устройства». При запросе системы подтвердите сопряжение.\n\nПроверьте связь кнопкой «Версия устройства». Для обновления выберите .mcfw или .bin вашей модели. USB-загрузчик и сброс доступны для поддерживаемых ESP с работающей meshcore-rs.")
+        messagebox.showinfo("Как начать", "Выберите подключение и устройство. Для TCP укажите адрес:порт. Для Bluetooth откройте окно обновления на устройстве и нажмите «Найти устройства». При запросе системы подтвердите сопряжение.\n\nПроверьте связь кнопкой «Версия устройства». Для обновления выберите .mcfw, .mcfd или .bin вашей модели. USB-загрузчик и сброс доступны для поддерживаемых ESP с работающей meshcore-rs.")
 
     def choose(self):
-        path = filedialog.askopenfilename(filetypes=[("Прошивка", "*.mcfw *.bin"), ("Все файлы", "*")])
+        path = filedialog.askopenfilename(filetypes=[("Прошивка", "*.mcfw *.mcfd *.bin"), ("Все файлы", "*")])
         if path:
             self.file.set(path)
         return path
@@ -139,6 +139,9 @@ class Flasher:
         if op in ("update","usb","new"):
             path = path or self.choose()
             if not path:
+                return
+            if op in ("usb", "new") and pathlib.Path(path).suffix.lower() == ".mcfd":
+                messagebox.showinfo("MCFD", "Для дельты нажмите «Обновить прошивку».")
                 return
             msg = f"Установить {pathlib.Path(path).name} на {target}?"
             if op=="new":

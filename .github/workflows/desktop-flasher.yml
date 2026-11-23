@@ -1,7 +1,7 @@
 name: Desktop flasher
 on:
   push:
-    branches: [desktop-flasher]
+    branches: [desktop-flasher, ota-app]
     paths:
       - "tools/desktop-flasher/**"
       - ".github/workflows/desktop-flasher.yml"
@@ -59,6 +59,7 @@ jobs:
           path: tools/desktop-flasher/out/*
           if-no-files-found: error
   publish:
+    if: github.ref_name == 'desktop-flasher'
     needs: build
     runs-on: ubuntu-latest
     permissions:
