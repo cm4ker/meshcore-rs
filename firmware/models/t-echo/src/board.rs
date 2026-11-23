@@ -158,6 +158,35 @@ pub fn system_off() -> ! {
     }
 }
 
+/// Run the Embassy thread-mode executor, clearing the nRF52840 FPU exception flags before each
+/// `wfe` (Errata 87: an uncleared FPSCR exception bit keeps `FPU_IRQn` pending and stops `wfe`
+/// from entering System ON idle).
+pub fn run_executor(init: impl FnOnce(embassy_executor::Spawner)) -> ! {
+    use core::arch::asm;
+
+    use embassy_nrf::interrupt::{Interrupt, InterruptExt};
+
+    static EXECUTOR: static_cell::StaticCell<embassy_executor::raw::Executor> = static_cell::StaticCell::new();
+    let executor = EXECUTOR.init(embassy_executor::raw::Executor::new(usize::MAX as *mut ()));
+    init(executor.spawner());
+    loop {
+        // SAFETY: single-core thread mode; clears cumulative FPU exception flags before `wfe`.
+        unsafe {
+            executor.poll();
+            asm!(
+                "vmrs {0}, fpscr",
+                "bic {0}, {0}, #0x9F",
+                "vmsr fpscr, {0}",
+                "vmrs {0}, fpscr",
+                out(reg) _,
+                options(nomem, nostack),
+            );
+            Interrupt::FPU.unpend();
+            asm!("dsb", "wfe", options(nomem, nostack));
+        }
+    }
+}
+
 const CLOCK_MAGIC: u32 = 0x434C_4B21; // "CLK!"
 
 /// The wall clock in RAM a reset does not clear (the nRF52840 keeps its RAM through a soft reset

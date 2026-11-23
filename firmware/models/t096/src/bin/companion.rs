@@ -50,17 +50,21 @@ unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
     console::record_hard_fault(frame)
 }
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    promicro::board::run_executor(|spawner| spawner.spawn(app(spawner).unwrap()))
+}
+
+#[embassy_executor::task]
+async fn app(spawner: Spawner) {
     {
         static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
         // SAFETY: called once, before anything allocates
         unsafe { HEAP.init(&raw mut HEAP_MEM as usize, HEAP_SIZE) }
     }
     // the internal RC for the low-frequency clock, as on the Pro Micro (the SoftDevice is set up
-    // for it); USB needs the HF crystal
+    // for it); the 32 MHz crystal stays off until USB VBUS arrives (`sd::HfclkVbusDetect`)
     let mut ncfg = config::Config::default();
-    ncfg.hfclk_source = config::HfclkSource::ExternalXtal;
     ncfg.lfclk_source = config::LfclkSource::InternalRC;
     // priorities the SoftDevice leaves to the app (2, 3, 5..7); the critical sections mask them
     // all (`promicro::sd`)

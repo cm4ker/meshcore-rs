@@ -45,7 +45,11 @@ pub static SOUND: Signal<CriticalSectionRawMutex, Sound> = Signal::new();
 pub fn new(pwm: Peri<'static, peripherals::PWM0>, pin: Peri<'static, peripherals::P1_06>) -> SimplePwm<'static> {
     let mut config = SimpleConfig::default();
     config.prescaler = Prescaler::Div1;
-    SimplePwm::new_1ch(pwm, pin, &config)
+    let pwm = SimplePwm::new_1ch(pwm, pin, &config);
+    // `SimplePwm::new_1ch` enables PWM0 on creation; keep it off until a tone actually plays
+    // (boards with `buzzer_quiet = true` never signal `SOUND`).
+    pwm.disable();
+    pwm
 }
 
 #[embassy_executor::task]
@@ -57,9 +61,9 @@ pub async fn task(mut pwm: SimplePwm<'static>) {
                 0 => pwm.disable(),
                 freq => {
                     pwm.set_period(freq);
+                    pwm.enable();
                     // half the period high: the loudest a square wave gets
                     pwm.set_duty(0, DutyCycle::normal(pwm.max_duty() / 2));
-                    pwm.enable();
                 }
             }
             Timer::after_millis(ms as u64).await;

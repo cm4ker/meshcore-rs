@@ -101,8 +101,13 @@ unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
     diag::record_hard_fault(frame)
 }
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    board::run_executor(|spawner| spawner.spawn(app(spawner).unwrap()))
+}
+
+#[embassy_executor::task]
+async fn app(spawner: Spawner) {
     {
         static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
         // SAFETY: called once, before anything allocates

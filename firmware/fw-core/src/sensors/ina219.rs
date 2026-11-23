@@ -20,8 +20,9 @@ const REG_BUS_VOLTAGE: u8 = 0x02;
 const REG_POWER: u8 = 0x03;
 const REG_CURRENT: u8 = 0x04;
 const REG_CALIBRATION: u8 = 0x05;
-/// 32 V bus range, ±320 mV across the shunt, 12-bit samples of both, continuous.
-const CONFIG_32V_2A: u16 = 0x399F;
+/// 32 V bus range, ±320 mV across the shunt, 12-bit bus (532 µs), 128-sample averaged shunt
+/// (68.1 ms), continuous: averages across sleep instead of sampling the active I2C read burst.
+const CONFIG_32V_2A: u16 = 0x39FF;
 /// 0.1 mA per current step and 2 mW per power step with a 0.1 Ω shunt.
 const CALIBRATION_32V_2A: u16 = 4096;
 const CURRENT_STEPS_PER_MA: f32 = 10.0;

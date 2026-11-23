@@ -243,6 +243,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
     static STATE: StaticCell<State> = StaticCell::new();
+    static USB_HFCLK: StaticCell<sd::UsbHfclkHandler> = StaticCell::new();
     let mut builder = Builder::new(
         driver,
         usb_cfg,
@@ -251,6 +252,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
         &mut [],
         CONTROL_BUF.init([0; 64]),
     );
+    builder.handler(USB_HFCLK.init(sd::UsbHfclkHandler));
     let class = CdcAcmClass::new(&mut builder, STATE.init(State::new()), 64);
     let (tx, rx, control) = class.split_with_control();
     spawner.spawn(console::device_task(builder.build()).unwrap());
@@ -483,8 +485,28 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
             continue;
         }
 
-        // sleep until a frame arrives, a CLI line or a BLE frame comes in, or a timer is due
-        let wake = room.as_ref().map_or(u64::MAX, |r| r.next_wakeup()).min(mesh.next_wakeup()).min(now + 50).max(now + 1);
+        // sleep until a frame arrives, a CLI line or a BLE frame comes in, or a timer is due.
+        // Without a screen or GPS there is no button/NMEA polling to service at 20 Hz, so wake
+        // only for the next scheduled event (capped by the noise-floor cadence, well under WDT).
+        let idle_step = if extras.has_screen() || extras.has_gps() { 50 } else { NoiseFloor::INTERVAL_MS };
+        let mut wake = room
+            .as_ref()
+            .map_or(u64::MAX, |r| r.next_wakeup())
+            .min(mesh.next_wakeup())
+            .min(next_noise)
+            .min(next_batt)
+            .min(next_sensors)
+            .min(now + idle_step);
+        if let Some(t) = ble_until {
+            wake = wake.min(t);
+        }
+        if let Some(t) = reboot_at {
+            wake = wake.min(t);
+        }
+        if in_trial {
+            wake = wake.min(confirm_at);
+        }
+        let wake = wake.max(now + 1);
         let woke = select4(radio.wait_irq(), console::LINES.receive(), Timer::at(Instant::from_millis(wake)), ble::FRAMES_IN.receive());
         match woke.await {
             Either4::First(()) => match radio.read_rx() {

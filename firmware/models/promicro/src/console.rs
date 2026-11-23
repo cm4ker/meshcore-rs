@@ -21,7 +21,7 @@ use embassy_time::Timer;
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{ControlChanged, Receiver, Sender};
 
-pub type UsbDriver = Driver<'static, HardwareVbusDetect>;
+pub type UsbDriver = Driver<'static, crate::sd::HfclkVbusDetect<HardwareVbusDetect>>;
 
 /// Text for the USB host. Held until a host opens the port (the boot log waits for it), dropped
 /// when full.

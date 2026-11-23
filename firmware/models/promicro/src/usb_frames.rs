@@ -21,7 +21,7 @@ use meshcore_fw_core::frames::{FRAMES_IN, FrameParser, Link, encode};
 
 use crate::console::enter_bootloader;
 
-pub type UsbDriver = Driver<'static, &'static SoftwareVbusDetect>;
+pub type UsbDriver = Driver<'static, crate::sd::HfclkVbusDetect<&'static SoftwareVbusDetect>>;
 
 /// Frames for the USB host.
 pub static USB_OUT: Channel<CriticalSectionRawMutex, Vec<u8>, 16> = Channel::new();

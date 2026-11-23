@@ -44,14 +44,19 @@ unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
     console::record_hard_fault(frame)
 }
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    promicro::board::run_executor(|spawner| spawner.spawn(app(spawner).unwrap()))
+}
+
+#[embassy_executor::task]
+async fn app(spawner: Spawner) {
     static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
     // SAFETY: this is called once, before allocating.
     unsafe { HEAP.init(&raw mut HEAP_MEM as usize, HEAP_SIZE) }
 
+    // the 32 MHz crystal stays off until USB VBUS arrives (`sd::HfclkVbusDetect`)
     let mut config = config::Config::default();
-    config.hfclk_source = config::HfclkSource::ExternalXtal;
     config.lfclk_source = config::LfclkSource::ExternalXtal;
     config.dcdc.reg1 = true;
     config.debug = config::Debug::NotConfigured;

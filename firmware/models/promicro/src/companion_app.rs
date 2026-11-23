@@ -94,7 +94,7 @@ where
     }
 
     // ---- USB: the boot log, then the app's frames
-    let driver = Driver::new(chip.usbd, chip.irqs, &*vbus);
+    let driver = Driver::new(chip.usbd, chip.irqs, sd::HfclkVbusDetect(&*vbus));
     // the IDs and serial number of upstream's firmware for the board: the host keeps its COM port
     let mut usb_cfg = embassy_usb::Config::new(spec.usb.0, spec.usb.1);
     usb_cfg.manufacturer = Some("MeshCore-rs");
@@ -106,6 +106,7 @@ where
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
     static STATE: StaticCell<State> = StaticCell::new();
+    static USB_HFCLK: StaticCell<sd::UsbHfclkHandler> = StaticCell::new();
     let mut builder = Builder::new(
         driver,
         usb_cfg,
@@ -114,6 +115,7 @@ where
         &mut [],
         CONTROL_BUF.init([0; 64]),
     );
+    builder.handler(USB_HFCLK.init(sd::UsbHfclkHandler));
     let class = CdcAcmClass::new(&mut builder, STATE.init(State::new()), 64);
     let (tx, rx, control) = class.split_with_control();
     spawner.spawn(usb_frames::device_task(builder.build()).unwrap());

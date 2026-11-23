@@ -55,6 +55,8 @@ const SD_FLASH_WRITE: u8 = 0x29;
 const SD_RAND_APPLICATION_VECTOR_GET: u8 = 0x31;
 const SD_POWER_SYSTEM_OFF: u8 = 0x33;
 const SD_CLOCK_HFCLK_REQUEST: u8 = 0x42;
+const SD_CLOCK_HFCLK_RELEASE: u8 = 0x43;
+const SD_CLOCK_HFCLK_IS_RUNNING: u8 = 0x44;
 const SD_EVT_GET: u8 = 0x4B;
 const SD_TEMP_GET: u8 = 0x4C;
 const SD_POWER_USBPWRRDY_ENABLE: u8 = 0x4D;
@@ -63,6 +65,8 @@ const SD_POWER_USBREMOVED_ENABLE: u8 = 0x4F;
 const SD_POWER_USBREGSTATUS_GET: u8 = 0x50;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+/// USB currently holds a request for the 32 MHz crystal (VBUS present).
+static USB_HFCLK: AtomicBool = AtomicBool::new(false);
 /// The SoftDevice has events (BLE or SoC) to take: its event interrupt, SWI2.
 pub static EVENTS: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
@@ -146,9 +150,11 @@ pub fn enable() -> Result<(), u32> {
         return Err(err);
     }
     ENABLED.store(true, Ordering::Relaxed);
-    // USB runs on the crystal, which the SoftDevice would otherwise start for its radio only
-    // SAFETY: no arguments
-    unsafe { svc::<SD_CLOCK_HFCLK_REQUEST>(0, 0, 0, 0) };
+    // Keep the HF crystal running only while USB is plugged in; otherwise the SoftDevice starts
+    // it for its own radio events and releases it in between.
+    if USB_HFCLK.load(Ordering::Relaxed) {
+        request_hfclk_sd();
+    }
     let swi = interrupt::Interrupt::EGU2_SWI2;
     swi.set_priority(Priority::P6);
     swi.unpend();
@@ -168,15 +174,80 @@ pub fn disable() {
     after_softdevice();
 }
 
-/// Back to the app's own setup: its vector table, the crystal, and the interrupts the SoftDevice
-/// had (VBUS events that came meanwhile are taken now).
-fn after_softdevice() {
-    set_vtor(APP_VECTORS);
+fn start_hfclk_raw() {
     let clock = pac::CLOCK;
     clock.events_hfclkstarted().write_value(0);
     clock.tasks_hfclkstart().write_value(1);
     let since = Instant::now();
     while clock.events_hfclkstarted().read() == 0 && since.elapsed() < Duration::from_millis(10) {}
+}
+
+fn request_hfclk_sd() {
+    // SAFETY: no arguments
+    unsafe { svc::<SD_CLOCK_HFCLK_REQUEST>(0, 0, 0, 0) };
+    let since = Instant::now();
+    let mut running = 0u32;
+    while running == 0 && since.elapsed() < Duration::from_millis(10) {
+        // SAFETY: a word to write the status to
+        unsafe { svc::<SD_CLOCK_HFCLK_IS_RUNNING>(&raw mut running as u32, 0, 0, 0) };
+    }
+}
+
+/// Start or stop the 32 MHz HF crystal for USB. Stopping it while VBUS is absent avoids keeping
+/// HFXO running through System ON sleep (~0.4 mA); routes through the SoftDevice while active.
+pub fn set_usb_hfclk(on: bool) {
+    if USB_HFCLK.swap(on, Ordering::Relaxed) == on {
+        return;
+    }
+    if enabled() {
+        if on {
+            request_hfclk_sd();
+        } else {
+            // SAFETY: no arguments
+            unsafe { svc::<SD_CLOCK_HFCLK_RELEASE>(0, 0, 0, 0) };
+        }
+    } else if on {
+        start_hfclk_raw();
+    } else {
+        pac::CLOCK.tasks_hfclkstop().write_value(1);
+    }
+}
+
+/// Wraps a [`VbusDetect`](embassy_nrf::usb::vbus_detect::VbusDetect) so the 32 MHz crystal starts
+/// as soon as VBUS is seen — before `embassy-nrf` enables `USBD`. Paired with [`UsbHfclkHandler`],
+/// which stops it again once `USBD` has been disabled on VBUS removal.
+pub struct HfclkVbusDetect<V>(pub V);
+
+impl<V: embassy_nrf::usb::vbus_detect::VbusDetect> embassy_nrf::usb::vbus_detect::VbusDetect for HfclkVbusDetect<V> {
+    fn is_usb_detected(&self) -> bool {
+        let on = self.0.is_usb_detected();
+        if on {
+            set_usb_hfclk(true);
+        }
+        on
+    }
+
+    async fn wait_power_ready(&mut self) -> Result<(), ()> {
+        self.0.wait_power_ready().await
+    }
+}
+
+/// Releases the 32 MHz crystal once `embassy-usb` has disabled `USBD` on VBUS removal.
+pub struct UsbHfclkHandler;
+
+impl embassy_usb::Handler for UsbHfclkHandler {
+    fn enabled(&mut self, enabled: bool) {
+        set_usb_hfclk(enabled);
+    }
+}
+
+/// Back to the app's own setup: its vector table, the crystal (if USB needs it), and the
+/// interrupts the SoftDevice had (VBUS events that came meanwhile are taken now).
+fn after_softdevice() {
+    set_vtor(APP_VECTORS);
+    if USB_HFCLK.load(Ordering::Relaxed) {
+        start_hfclk_raw();
+    }
     pac::POWER.intenset().write(|w| {
         w.set_usbdetected(true);
         w.set_usbremoved(true);

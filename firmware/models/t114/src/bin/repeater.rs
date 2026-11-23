@@ -51,17 +51,21 @@ unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
     console::record_hard_fault(frame)
 }
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    promicro::board::run_executor(|spawner| spawner.spawn(app(spawner).unwrap()))
+}
+
+#[embassy_executor::task]
+async fn app(spawner: Spawner) {
     {
         static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
         // SAFETY: called once, before anything allocates
         unsafe { HEAP.init(&raw mut HEAP_MEM as usize, HEAP_SIZE) }
     }
     // the internal RC for the low-frequency clock, as on the Pro Micro (the SoftDevice is set up
-    // for it); USB needs the HF crystal
+    // for it); the 32 MHz crystal stays off until USB VBUS arrives (`sd::HfclkVbusDetect`)
     let mut ncfg = config::Config::default();
-    ncfg.hfclk_source = config::HfclkSource::ExternalXtal;
     ncfg.lfclk_source = config::LfclkSource::InternalRC;
     // priorities the SoftDevice leaves to the app (2, 3, 5..7), so it can run beside them in the
     // BLE window; the critical sections mask them all (`promicro::sd`)
@@ -84,7 +88,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(tft::task(screen).unwrap());
     spawner.spawn(gps::task(gps).unwrap());
     let chip = Chip {
-        usb: Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs)),
+        usb: Driver::new(p.USBD, Irqs, promicro::sd::HfclkVbusDetect(HardwareVbusDetect::new(Irqs))),
         wdt: p.WDT,
         nvmc: p.NVMC,
         rng: p.RNG,
