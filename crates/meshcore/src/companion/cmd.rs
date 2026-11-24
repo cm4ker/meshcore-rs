@@ -59,6 +59,23 @@ impl Companion {
                     self.effects.reboot = true;
                 }
             }
+            // `meshcore-rs` extension protocol (`[0x70, subcmd, ...args]`)
+            CMD_MCRS => {
+                if len < 2 {
+                    self.write_err(ERR_CODE_ILLEGAL_ARG);
+                } else {
+                    match frame[1] {
+                        crate::mcrs::SUB_INFO => {
+                            let body = self.mcrs_info().encode();
+                            let mut f = Vec::with_capacity(1 + body.len());
+                            f.push(RESP_CODE_MCRS);
+                            f.extend_from_slice(&body);
+                            self.write_frame(&f);
+                        }
+                        _ => self.write_err(ERR_CODE_UNSUPPORTED_CMD),
+                    }
+                }
+            }
             CMD_DEVICE_QUERY if len >= 2 => {
                 self.app_target_ver = frame[1];
                 let mut f = alloc::vec![RESP_CODE_DEVICE_INFO, FIRMWARE_VER_CODE, (MAX_CONTACTS / 2) as u8, MAX_GROUP_CHANNELS as u8];
@@ -1513,6 +1530,8 @@ impl Companion {
             self.board.manufacturer.clone()
         } else if cmd == "ver" {
             format!("{} ({})", FIRMWARE_VERSION, release::ver_label(&self.board.build_date))
+        } else if cmd == "mcrs" {
+            self.mcrs_info().cli_summary()
         } else if cmd == "get tz.offset" {
             // as upstream: one decimal, two for a quarter-hour zone
             let q = p.tz_offset * 4.0;
@@ -1574,6 +1593,51 @@ impl Companion {
             }
         };
         Some(r)
+    }
+
+    /// `meshcore-rs` protocol version, build identity and hardware capabilities (`CMD_MCRS` `SUB_INFO`).
+    pub fn mcrs_info(&self) -> crate::mcrs::McrsInfo {
+        use crate::mcrs::cap;
+        let mut caps = cap::TIMESYNC;
+        if self.board.has_screen {
+            caps |= cap::SCREEN;
+        }
+        if self.board.has_led {
+            caps |= cap::LED;
+        }
+        if self.board.has_buzzer {
+            caps |= cap::BUZZER;
+        }
+        if self.board.has_gps {
+            caps |= cap::GPS;
+        }
+        #[cfg(feature = "net")]
+        {
+            caps |= cap::WIFI;
+        }
+        if self.board.fem_lna_controllable {
+            caps |= cap::FEM_LNA;
+        }
+        if self.board.adc_multiplier.is_some() {
+            caps |= cap::ADC_MULT;
+        }
+        if self.ota.target.is_some() {
+            caps |= cap::OTA;
+        }
+        if self.board.fw_rollback {
+            caps |= cap::ROLLBACK;
+        }
+        if !self.board.sensor_scan.is_empty() {
+            caps |= cap::SENSORS;
+        }
+        crate::mcrs::McrsInfo {
+            version: crate::mcrs::MCRS_VERSION,
+            board: self.ota.build.board,
+            role: self.ota.build.role,
+            counter: self.ota.build.counter,
+            caps,
+            product_version: String::from(release::PRODUCT_VERSION),
+        }
     }
 
     /// `CommonRadioPrefs::handleCommand`.

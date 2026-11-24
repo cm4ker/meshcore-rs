@@ -146,6 +146,8 @@ pub const CMD_SET_DEFAULT_FLOOD_SCOPE: u8 = 63;
 pub const CMD_GET_DEFAULT_FLOOD_SCOPE: u8 = 64;
 pub const CMD_SEND_RAW_PACKET: u8 = 65;
 pub const CMD_RUN_CLI_COMMAND: u8 = 66;
+/// `meshcore-rs` extension frame (`[0x70, subcmd, ...args]`), answered with [`RESP_CODE_MCRS`].
+pub const CMD_MCRS: u8 = crate::mcrs::OPCODE;
 
 pub const STATS_TYPE_CORE: u8 = 0;
 pub const STATS_TYPE_RADIO: u8 = 1;
@@ -182,6 +184,8 @@ pub const RESP_ALLOWED_REPEAT_FREQ: u8 = 26;
 pub const RESP_CODE_CHANNEL_DATA_RECV: u8 = 27;
 pub const RESP_CODE_DEFAULT_FLOOD_SCOPE: u8 = 28;
 pub const RESP_CODE_CLI_REPLY: u8 = 29;
+/// Reply to [`CMD_MCRS`] (`[0x70, subcmd, ...body]`).
+pub const RESP_CODE_MCRS: u8 = crate::mcrs::OPCODE;
 
 // Push frames (radio -> app, at any time).
 pub const PUSH_CODE_ADVERT: u8 = 0x80;

@@ -2360,3 +2360,97 @@ fn screen_and_led_settings_on_a_companion() {
     assert_eq!(saved.screen_mode, ScreenMode::Off.code());
     assert!(!saved.led_enabled);
 }
+
+#[test]
+fn mcrs_info_on_companion_and_repeater() {
+    use meshcore::mcrs::{self, MCRS_VERSION, McrsInfo, SUB_INFO, cap};
+    use meshcore::release;
+    use meshcore::repeater::REQ_TYPE_MCRS;
+
+    let mut air = Air::new();
+    air.link(0, 1);
+    let mut a = companion(1, "Alice");
+    a.app.ota.build = release::Build { board: release::board::HELTEC_V4, role: release::role::COMPANION, counter: 168 };
+    a.app.board.has_screen = true;
+    a.app.board.has_led = true;
+    a.app.board.fem_lna_controllable = true;
+
+    // Companion CMD_MCRS SUB_INFO
+    let reply = cmd(&mut a, &[CMD_MCRS, SUB_INFO]);
+    assert_eq!(reply.len(), 1);
+    assert_eq!(reply[0][0], RESP_CODE_MCRS);
+    let info = McrsInfo::decode(&reply[0][1..]).expect("valid MCRS info");
+    assert_eq!(info.version, MCRS_VERSION);
+    assert_eq!(info.board, release::board::HELTEC_V4);
+    assert_eq!(info.role, release::role::COMPANION);
+    assert_eq!(info.counter, 168);
+    assert_eq!(info.product_version, release::PRODUCT_VERSION);
+    assert_ne!(info.caps & cap::SCREEN, 0);
+    assert_ne!(info.caps & cap::LED, 0);
+    assert_ne!(info.caps & cap::FEM_LNA, 0);
+    assert_ne!(info.caps & cap::TIMESYNC, 0);
+    assert_eq!(info.caps & cap::GPS, 0);
+
+    // Unknown subcommand & truncated frame
+    assert_eq!(cmd(&mut a, &[CMD_MCRS, 0xFF])[0], vec![RESP_CODE_ERR, ERR_CODE_UNSUPPORTED_CMD]);
+    assert_eq!(cmd(&mut a, &[CMD_MCRS])[0], vec![RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG]);
+
+    // CLI summary
+    let cli_out = a.app.handle_command(&mut a.ctx, false, "mcrs");
+    assert!(cli_out.starts_with(&format!("> MCRS v{MCRS_VERSION} ({} #168, heltec-v4/companion", release::PRODUCT_VERSION)));
+
+    // Repeater over LoRa via CMD_SEND_BINARY_REQ
+    let mut r = repeater(2);
+    r.app.ota.build = release::Build { board: release::board::PROMICRO, role: release::role::REPEATER, counter: 170 };
+    r.app.board.powersaving_supported = true;
+    r.app.board.has_gps = true;
+    r.app.board.ble_ota_name = Some("MeshCore-R".into());
+
+    // Repeater local BLE link frame
+    let link_reply = r.app.handle_link_frame(&[CMD_MCRS, SUB_INFO]).expect("BLE link MCRS info");
+    assert_eq!(link_reply[0], RESP_CODE_MCRS);
+    let r_link_info = McrsInfo::decode(&link_reply[1..]).expect("valid repeater MCRS info");
+    assert_eq!(r_link_info.board, release::board::PROMICRO);
+    assert_eq!(r_link_info.role, release::role::REPEATER);
+    assert_eq!(r_link_info.counter, 170);
+    assert_ne!(r_link_info.caps & cap::POWERSAVING, 0);
+    assert_ne!(r_link_info.caps & cap::GPS, 0);
+    assert_ne!(r_link_info.caps & cap::BLE_OTA, 0);
+
+    // Repeater advert + login + binary REQ_TYPE_MCRS SUB_INFO
+    r.app.start(&mut r.ctx);
+    air.run(&mut [&mut a, &mut r], 20_000);
+    frames(&mut a);
+    let rk = pub_key(&r);
+
+    let mut login = vec![CMD_SEND_LOGIN];
+    login.extend_from_slice(&rk);
+    login.extend_from_slice(b"password");
+    cmd(&mut a, &login);
+    air.run(&mut [&mut a, &mut r], 10_000);
+    assert!(!only(&frames(&mut a), PUSH_CODE_LOGIN_SUCCESS).is_empty());
+
+    let mut req = vec![CMD_SEND_BINARY_REQ];
+    req.extend_from_slice(&rk);
+    req.extend_from_slice(&[REQ_TYPE_MCRS, SUB_INFO]);
+    let sent = cmd(&mut a, &req);
+    let tag = sent[0][2..6].to_vec();
+    air.run(&mut [&mut a, &mut r], 10_000);
+    let resp = only(&frames(&mut a), PUSH_CODE_BINARY_RESPONSE);
+    assert_eq!(resp.len(), 1);
+    assert_eq!(resp[0][2..6], tag[..]);
+    let lora_info = McrsInfo::decode(&resp[0][6..]).expect("valid LoRa MCRS info");
+    assert_eq!(lora_info, r_link_info);
+
+    // Unknown subcommand over LoRa stays silent
+    let mut bad_req = vec![CMD_SEND_BINARY_REQ];
+    bad_req.extend_from_slice(&rk);
+    bad_req.extend_from_slice(&[mcrs::OPCODE, 0xFE]);
+    cmd(&mut a, &bad_req);
+    air.run(&mut [&mut a, &mut r], 5_000);
+    assert!(only(&frames(&mut a), PUSH_CODE_BINARY_RESPONSE).is_empty());
+
+    // Repeater CLI
+    let r_cli = r.app.handle_command(&mut r.ctx, 0, "mcrs");
+    assert!(r_cli.starts_with(&format!("> MCRS v{MCRS_VERSION} ({} #170, promicro/repeater", release::PRODUCT_VERSION)));
+}

@@ -21,6 +21,7 @@ pub mod fwstate;
 pub mod gps;
 pub mod identity;
 pub mod lpp;
+pub mod mcrs;
 pub mod mesh;
 pub mod ota;
 pub mod packet;

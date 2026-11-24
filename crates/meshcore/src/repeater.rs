@@ -67,6 +67,8 @@ const REQ_TYPE_GET_TELEMETRY_DATA: u8 = 0x03;
 const REQ_TYPE_GET_ACCESS_LIST: u8 = 0x05;
 const REQ_TYPE_GET_NEIGHBOURS: u8 = 0x06;
 const REQ_TYPE_GET_OWNER_INFO: u8 = 0x07;
+/// `meshcore-rs` extension request (`[0x70, subcmd, ...args]`), answered with `[tag 4][subcmd, ...body]`.
+pub const REQ_TYPE_MCRS: u8 = crate::mcrs::OPCODE;
 
 // Firmware update over LoRa (this firmware's extension; admins only), see `crate::ota`.
 pub use crate::ota::{
@@ -623,6 +625,13 @@ impl Repeater {
             }
             return Some(f);
         }
+        if code == crate::companion::CMD_MCRS && frame.get(1) == Some(&crate::mcrs::SUB_INFO) {
+            let body = self.mcrs_info().encode();
+            let mut f = Vec::with_capacity(1 + body.len());
+            f.push(crate::companion::RESP_CODE_MCRS);
+            f.extend_from_slice(&body);
+            return Some(f);
+        }
         if !OtaEndpoint::is_request(code) {
             return None;
         }
@@ -1107,6 +1116,10 @@ impl Repeater {
                     format!("{}\n{}\n{}", FIRMWARE_VERSION, self.prefs.node_name, self.prefs.owner_info).as_bytes(),
                 );
             }
+            REQ_TYPE_MCRS => match payload.get(1).copied() {
+                Some(crate::mcrs::SUB_INFO) => r.extend_from_slice(&self.mcrs_info().encode()),
+                _ => r.clear(),
+            },
             _ => r.clear(), // unknown command
         }
         r
@@ -1886,6 +1899,9 @@ impl Repeater {
         }
         if cmd.starts_with("ver") {
             return format!("{} ({})", FIRMWARE_VERSION, release::ver_label(&self.board.build_date));
+        }
+        if cmd == "mcrs" {
+            return self.mcrs_info().cli_summary();
         }
         if cmd.starts_with("board") {
             return self.board.manufacturer.clone();
@@ -3027,6 +3043,63 @@ impl Repeater {
         self.save_prefs();
         self.effects.network_changed = true;
         Some(reply)
+    }
+
+    /// `meshcore-rs` protocol version, build identity and hardware capabilities (`REQ_TYPE_MCRS` `SUB_INFO`).
+    pub fn mcrs_info(&self) -> crate::mcrs::McrsInfo {
+        use crate::mcrs::cap;
+        let mut caps = cap::TIMESYNC;
+        if self.board.has_screen {
+            caps |= cap::SCREEN;
+        }
+        if self.board.has_led {
+            caps |= cap::LED;
+        }
+        if self.board.has_buzzer {
+            caps |= cap::BUZZER;
+        }
+        if self.board.has_gps {
+            caps |= cap::GPS;
+        }
+        #[cfg(feature = "net")]
+        {
+            caps |= cap::WIFI | cap::MQTT;
+            if self.board.wifi_ota_ssid.is_some() {
+                caps |= cap::WIFI_OTA;
+            }
+        }
+        if self.board.fem_lna_controllable {
+            caps |= cap::FEM_LNA;
+        }
+        if self.board.adc_multiplier.is_some() {
+            caps |= cap::ADC_MULT;
+        }
+        if self.ota.target.is_some() {
+            caps |= cap::OTA;
+        }
+        if self.board.fw_rollback {
+            caps |= cap::ROLLBACK;
+        }
+        if !self.board.sensor_scan.is_empty() {
+            caps |= cap::SENSORS;
+        }
+        if self.room.is_some() {
+            caps |= cap::ROOM;
+        }
+        if self.board.ble_ota_name.is_some() {
+            caps |= cap::BLE_OTA;
+        }
+        if self.board.powersaving_supported {
+            caps |= cap::POWERSAVING;
+        }
+        crate::mcrs::McrsInfo {
+            version: crate::mcrs::MCRS_VERSION,
+            board: self.ota.build.board,
+            role: self.ota.build.role,
+            counter: self.ota.build.counter,
+            caps,
+            product_version: String::from(release::PRODUCT_VERSION),
+        }
     }
 
     fn set_flood_limit(&mut self, v: &str, apply: impl FnOnce(&mut NodePrefs, u8)) -> String {
