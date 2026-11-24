@@ -1,0 +1,7 @@
+bleak==2.1.1
+pyserial==3.5
+pyserial-asyncio-fast==0.16
+esptool==4.8.1
+bitstring==4.2.3
+bitarray==2.9.3
+cryptography==43.0.3

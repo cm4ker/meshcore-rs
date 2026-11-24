@@ -1,0 +1,62 @@
+name: Rebuild ota-app 1.1 and scan Windows artifact
+on:
+  push:
+    branches: [audit/defender-ota-1.1]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 1bad8ec9e65e0b4d92e0e063218f6e813a1be40d
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+          architecture: x86
+      - name: Build from release source and run CLI smoke checks
+        shell: pwsh
+        working-directory: tools/desktop-flasher
+        run: ./windows/build.ps1
+      - shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          Set-MpPreference -DisableRealtimeMonitoring $false
+          $initial=Get-MpPreference
+          foreach($kind in @("ExclusionPath","ExclusionExtension","ExclusionProcess")){
+            $values=$initial.$kind
+            if($values){$remove=@{};$remove[$kind]=$values;Remove-MpPreference @remove}
+          }
+          Update-MpSignature
+          Start-Sleep 5
+          Get-MpComputerStatus | Format-List AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,AntivirusSignatureVersion,AntivirusSignatureLastUpdated
+          $prefs=Get-MpPreference
+          if ($prefs.ThreatIDDefaultAction_Ids -contains 2147731250) { throw 'Unexpected local rule' }
+          $dir=New-Item -ItemType Directory C:/ota-release-audit
+          $path=Join-Path $dir.FullName 'ota-app-1.1-Windows-x86-x64.exe'
+          $scan=Join-Path $env:ProgramFiles 'Windows Defender/MpCmdRun.exe'
+          $platform=Get-ChildItem 'C:/ProgramData/Microsoft/Windows Defender/Platform' -Directory | Where-Object Name -match '^[0-9]' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if($platform){$scan=Join-Path $platform.FullName 'MpCmdRun.exe'}
+          $start=Get-Date
+          try {
+            Copy-Item tools/desktop-flasher/MeshCore-Windows-x86.exe $path
+            & $scan -CheckExclusion -path $path
+            if($LASTEXITCODE -ne 1){throw "Path exclusion check did not confirm a scannable file: $LASTEXITCODE"}
+            $hash=(Get-FileHash $path).Hash
+            Write-Host "Release file SHA256 $hash"
+            if(!(Get-MpComputerStatus).RealTimeProtectionEnabled){throw 'Realtime protection unavailable'}
+            & $scan -Scan -ScanType 3 -File $path -DisableRemediation
+            Write-Host "Scanner returned $LASTEXITCODE"
+            if($LASTEXITCODE -ne 0){throw 'Inspect scan result'}
+          } finally {
+            Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational';StartTime=$start;Id=1116,1117} -ErrorAction SilentlyContinue | ForEach-Object Message
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-windows-1.1
+          path: C:/ota-release-audit/ota-app-1.1-Windows-x86-x64.exe
+          if-no-files-found: error

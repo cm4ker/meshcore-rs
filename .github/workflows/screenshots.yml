@@ -1,0 +1,109 @@
+name: Capture ota-app 1.1 windows
+on:
+  push:
+    branches: [ota-app]
+permissions:
+  contents: read
+env:
+  RELEASE: https://github.com/AVA55LV/meshcore-rs/releases/download/desktop-v1.1/ota-app-1.1
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-22.04, platform: Linux-PC-x86_64}
+          - {os: ubuntu-22.04-arm, platform: Linux-Raspberry-Pi-ARM64}
+          - {os: macos-15, platform: macOS-Apple-Silicon}
+          - {os: windows-2025, platform: Windows-x86-x64}
+    runs-on: ${{ matrix.os }}
+    env:
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb xauth xdotool imagemagick openbox wmctrl
+          curl -fsSL "$RELEASE-$PLATFORM.tar.gz" | tar xz
+          xvfb-run -a bash -ec '
+            openbox >/dev/null 2>&1 &
+            ./MeshCore &
+            for i in {1..30}; do id=$(wmctrl -l | grep -i meshcore | cut -d" " -f1 | head -1); test -n "$id" && break; sleep 1; done
+            wmctrl -lpG || true
+            # Capture the mapped window once its controls have rendered.
+            sleep 2
+            import -window "${id:-root}" "$PLATFORM.png"'
+      - if: runner.os == 'macOS'
+        run: |
+          curl -fsSL "$RELEASE-$PLATFORM.zip" -o app.zip
+          ditto -x -k app.zip .
+          open MeshCore.app
+          cat > window.swift <<'SWIFT'
+          import CoreGraphics
+          import Foundation
+          for _ in 0..<60 {
+              let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+              if let w = windows.first(where: { ($0[kCGWindowOwnerName as String] as? String ?? "").lowercased().contains("meshcore") && ($0[kCGWindowLayer as String] as? Int) == 0 }), let id = w[kCGWindowNumber as String] {
+                  print(id)
+                  exit(0)
+              }
+              Thread.sleep(forTimeInterval: 1)
+          }
+          exit(1)
+          SWIFT
+          id=$(swift window.swift)
+          sleep 2
+          screencapture -x -o -l "$id" "$PLATFORM.png"
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "$env:RELEASE-$env:PLATFORM.exe" -OutFile app.exe
+          $app=Start-Process ./app.exe -PassThru
+          Add-Type -AssemblyName System.Drawing
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public class WindowCapture {
+            [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string c,string title);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out System.Drawing.Rectangle r);
+            [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h,IntPtr dc,uint flags);
+          }
+          '@ -ReferencedAssemblies System.Drawing.Primitives
+          for($i=0;$i -lt 90;$i++){ $app.Refresh(); $h=$app.MainWindowHandle; if($h -ne 0){break}; Start-Sleep 1 }
+          if($h -eq 0){throw 'Application window missing'}
+          Write-Output $app.MainWindowTitle
+          Start-Sleep 2
+          $r=New-Object Drawing.Rectangle
+          [void][WindowCapture]::GetWindowRect($h,[ref]$r)
+          $b=[Drawing.Bitmap]::new($r.Width-$r.X,$r.Height-$r.Y)
+          $g=[Drawing.Graphics]::FromImage($b)
+          $dc=$g.GetHdc()
+          if(![WindowCapture]::PrintWindow($h,$dc,2)){throw 'Capture failed'}
+          $g.ReleaseHdc($dc)
+          $b.Save("$pwd/$env:PLATFORM.png",[Drawing.Imaging.ImageFormat]::Png)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: '*.png'
+          if-no-files-found: error
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          curl -fsSL "$RELEASE-Android.apk" -o app.apk
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 31
+          arch: x86_64
+          script: |
+            adb install app.apk
+            adb shell am start -W -n ru.ommesh.otg/.MainActivity
+            sleep 3
+            adb exec-out screencap -p > Android.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Android
+          path: Android.png
