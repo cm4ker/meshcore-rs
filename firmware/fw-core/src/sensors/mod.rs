@@ -134,9 +134,17 @@ impl<I: I2c> Sensors<I> {
         for addr in 0x08..=0x77u8 {
             match with_timeout(Duration::from_millis(50), self.i2c.write(addr, &[0])).await {
                 Ok(Err(e)) if e.kind() == ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address) => {}
-                Ok(_) if taken.iter().any(|t| t.1 == addr) => {}
-                Ok(_) => other.push(addr),
-                Err(_) => {
+                Ok(Ok(())) => {
+                    if !taken.iter().any(|t| t.1 == addr) {
+                        other.push(addr);
+                    }
+                }
+                Ok(Err(e)) if e.kind() == ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data) => {
+                    if !taken.iter().any(|t| t.1 == addr) {
+                        other.push(addr);
+                    }
+                }
+                Ok(Err(_)) | Err(_) => {
                     stuck = true;
                     break;
                 }

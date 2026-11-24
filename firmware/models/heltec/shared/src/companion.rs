@@ -3,6 +3,8 @@
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use embassy_executor::Spawner;
@@ -20,11 +22,12 @@ use esp_storage::FlashStorage;
 use log::warn;
 use meshcore::radio::RadioParams;
 use meshcore_fw::companion_app::{self, Board, Config, Hardware};
+use meshcore_fw_core::sensors::Sensors;
 use meshcore_ui::refresh::oled::Oled as Policy;
 use meshcore_ui::{Page, View};
 
 use crate::battery::{self, Battery};
-use crate::display::Oled;
+use crate::display::{Oled, SharedI2c};
 use crate::power::Sleeper;
 use crate::radio::EspIrq;
 use crate::sx1262::Sx1262;
@@ -44,6 +47,8 @@ struct Heltec<'d, V: Variant> {
     button: Input<'d>,
     sleeper: Sleeper<'d>,
     oled: Option<Oled<'d>>,
+    /// The environment sensors on the display's I2C bus (BME280 and the rest).
+    sensors: Option<Sensors<SharedI2c<'d>>>,
     oled_failures: u8,
     next_oled_try: u64,
     screen: Policy,
@@ -103,6 +108,19 @@ impl<V: Variant> Board for Heltec<'_, V> {
 
     fn adc_multiplier(&self) -> Option<f32> {
         battery::ADC_MULTIPLIER
+    }
+
+    fn sensor_scan(&self) -> String {
+        self.sensors.as_ref().map(|s| s.scan.clone()).unwrap_or_default()
+    }
+
+    async fn sensor_lpp(&mut self) -> Vec<u8> {
+        let Some(sensors) = self.sensors.as_mut() else {
+            return Vec::new();
+        };
+        let mut lpp = Vec::new();
+        sensors.read_lpp(&mut lpp).await;
+        lpp
     }
 
     fn has_gps(&self) -> bool {
@@ -204,7 +222,8 @@ pub async fn run<V: Variant>(spawner: Spawner, build_epoch: &str, build_date: &'
     let active = V::divider_active(p.GPIO37.reborrow());
     let battery = Battery::new(Adc::new(p.ADC1, adc_cfg), bat_pin, p.GPIO37, active);
 
-    // OLED: Vext on with GPIO36 LOW (see the repeater firmware); bounded I2C transfers
+    // OLED: Vext on with GPIO36 LOW (see the repeater firmware); bounded I2C transfers, shared
+    // with the environment sensors on the same pins (GPIO17/18)
     let _vext = Output::new(p.GPIO36, Level::Low, OutputConfig::default());
     let oled_rst = Output::new(p.GPIO21, Level::High, OutputConfig::default());
     embassy_time::Timer::after_millis(10).await;
@@ -212,10 +231,18 @@ pub async fn run<V: Variant>(spawner: Spawner, build_epoch: &str, build_date: &'
         .with_frequency(Rate::from_khz(400))
         .with_timeout(esp_hal::i2c::master::BusTimeout::Maximum)
         .with_software_timeout(esp_hal::i2c::master::SoftwareTimeout::Transaction(esp_hal::time::Duration::from_millis(5)));
-    let oled = I2c::new(p.I2C0, i2c_config)
+    let bus = I2c::new(p.I2C0, i2c_config)
         .ok()
         .map(|i2c| i2c.with_sda(p.GPIO17).with_scl(p.GPIO18))
-        .and_then(|i2c| Oled::new(i2c, oled_rst));
+        .map(SharedI2c::new);
+    let (oled, sensors) = match bus {
+        Some(bus) => {
+            // probed before the panel is initialised: the scan writes a byte to every address
+            let sensors = Sensors::probe(bus.clone()).await;
+            (Oled::new(bus, oled_rst), Some(sensors))
+        }
+        None => (None, None),
+    };
 
     // optional external GPS on the UART1 header (we read 39, write 38; EN 34, RESET 42)
     let gps_uart = esp_hal::uart::Uart::new(p.UART1, esp_hal::uart::Config::default().with_baudrate(9600))
@@ -241,6 +268,7 @@ pub async fn run<V: Variant>(spawner: Spawner, build_epoch: &str, build_date: &'
         button: Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::Up)),
         sleeper: Sleeper::new(p.LPWR),
         oled,
+        sensors,
         oled_failures: 0,
         next_oled_try: 0,
         screen: Policy::default(),

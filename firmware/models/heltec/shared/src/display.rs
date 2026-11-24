@@ -11,12 +11,12 @@
 //! through its RST pin (which also releases a held bus) and initialised again.
 
 use alloc::rc::Rc;
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 
 use esp_hal::Blocking;
 use esp_hal::delay::Delay;
 use esp_hal::gpio::Output;
-use esp_hal::i2c::master::I2c;
+use esp_hal::i2c::master::{Error as I2cError, I2c};
 use meshcore_ui::View;
 use meshcore_ui::layout::Class;
 use ssd1306::mode::BufferedGraphicsMode;
@@ -35,10 +35,44 @@ struct BusStats {
     max_failed: u32,
 }
 
+/// The I2C controller of the OLED, shared with the environment sensors: on the V3 and V4 their
+/// header is wired to the display's SDA/SCL (GPIO17/18), so both take a clone of this handle and
+/// each transfer borrows the controller for its duration — the two never interleave on the wire.
+#[derive(Clone)]
+pub struct SharedI2c<'d>(Rc<RefCell<I2c<'d, Blocking>>>);
+
+impl<'d> SharedI2c<'d> {
+    pub fn new(i2c: I2c<'d, Blocking>) -> Self {
+        Self(Rc::new(RefCell::new(i2c)))
+    }
+}
+
+impl embedded_hal::i2c::ErrorType for SharedI2c<'_> {
+    type Error = I2cError;
+}
+
+impl embedded_hal::i2c::I2c for SharedI2c<'_> {
+    fn transaction(&mut self, address: u8, operations: &mut [embedded_hal::i2c::Operation<'_>]) -> Result<(), Self::Error> {
+        embedded_hal::i2c::I2c::transaction(&mut *self.0.borrow_mut(), address, operations)
+    }
+}
+
+/// The sensor drivers are async; the controller is the display's blocking one, and a transfer is a
+/// few bytes bounded by the software timeout, so the async calls are served synchronously.
+impl embedded_hal_async::i2c::I2c for SharedI2c<'_> {
+    async fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut [embedded_hal_async::i2c::Operation<'_>],
+    ) -> Result<(), Self::Error> {
+        embedded_hal::i2c::I2c::transaction(&mut *self.0.borrow_mut(), address, operations)
+    }
+}
+
 /// Outside strict mode, swallows transfer errors so a frame goes on; after `max_failed`
 /// failures it gives up on the frame without touching the bus.
 struct TolerantI2c<'d> {
-    inner: I2c<'d, Blocking>,
+    inner: SharedI2c<'d>,
     stats: Rc<Cell<BusStats>>,
 }
 
@@ -79,7 +113,7 @@ pub struct Oled<'d> {
 
 impl<'d> Oled<'d> {
     /// `None` if no display answers on the bus.
-    pub fn new(i2c: I2c<'d, Blocking>, rst: Output<'d>) -> Option<Self> {
+    pub fn new(i2c: SharedI2c<'d>, rst: Output<'d>) -> Option<Self> {
         let stats = Rc::new(Cell::new(BusStats { max_failed: 8, ..Default::default() }));
         let bus = TolerantI2c { inner: i2c, stats: stats.clone() };
         let display =

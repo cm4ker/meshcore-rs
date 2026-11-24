@@ -60,6 +60,8 @@ macro_rules! println {
 
 /// Longest legitimate stall is one max-length SF12 transmission (~10 s).
 const WATCHDOG_SECS: u64 = 30;
+/// The environment sensors are read this often for telemetry (as on the other boards).
+const SENSOR_INTERVAL_MS: u64 = 15_000;
 /// The screen stays lit this long after boot or a button press.
 const SCREEN_ON_MS: u64 = 60_000;
 /// `poweroff` or a long press on the home page: the board goes off this long after.
@@ -205,6 +207,17 @@ pub trait RepeaterBoard {
     fn powersaving_supported(&self) -> bool;
     /// The bridge the board can run (`get bridge.type`); none = no bridge.
     fn bridge(&self) -> Option<&'static str>;
+
+    // ---- environment sensors on the board's I2C (empty on a board without the bus)
+    /// The sensors found at boot, for `sensor scan` (empty without an I2C bus).
+    fn sensor_scan(&self) -> String {
+        String::new()
+    }
+    /// The sensors' readings as Cayenne LPP records, plus the text-described ones
+    /// (`sensor add`), for telemetry; empty without an I2C bus.
+    async fn sensor_lpp(&mut self, _descriptors: &[meshcore::sensor::descriptor::Descriptor]) -> Vec<u8> {
+        Vec::new()
+    }
 
     // ---- front end + TX LED
     fn fem_tx_mode(&mut self);
@@ -603,6 +616,7 @@ where
         has_gps: board.has_gps(),
         has_screen: board.has_screen(),
         has_led: true,
+        sensor_scan: board.sensor_scan(),
         ..Default::default()
     };
     let mut mesh = Mesh::new(ctx, Repeater::new(prefs, board_info));
@@ -615,6 +629,9 @@ where
     }
     if let Some(regions) = load(&store, Blob::Regions) {
         mesh.app.regions = meshcore::region::RegionMap::deserialize(&String::from_utf8_lossy(&regions));
+    }
+    if let Some(sensors) = load(&store, Blob::Sensors) {
+        mesh.app.sensors_load(&String::from_utf8_lossy(&sensors));
     }
     if let (Some(s), Some(sl)) = (&store, slots) {
         mesh.app.ota.target = Some(Box::new(FlashTarget::new(s.clone(), sl)));
@@ -784,6 +801,7 @@ where
     let mut noise = NoiseFloor::new();
     let mut next_noise = 0u64;
     let mut next_batt = now_ms() + 60_000;
+    let mut next_sensors = 0u64;
     let mut next_agc_reset = 0u64;
     let mut next_clock_save = now_ms() + CLOCK_SAVE_INTERVAL_MS;
     let mut last_clock = mesh.ctx.current_time();
@@ -970,6 +988,16 @@ where
             if let Some(r) = room.as_mut() {
                 r.app.board.batt_mv = mesh.app.board.batt_mv;
             }
+        }
+
+        // environment sensors for telemetry: each detected one takes the next channel from 2 up
+        if now >= next_sensors {
+            next_sensors = now + SENSOR_INTERVAL_MS;
+            let lpp = board.sensor_lpp(&mesh.app.sensor_descriptors).await;
+            if let Some(r) = room.as_mut() {
+                r.app.board.sensor_lpp = lpp.clone();
+            }
+            mesh.app.board.sensor_lpp = lpp;
         }
 
         let gps_reading = board.gps_latest();
@@ -1225,6 +1253,9 @@ where
         }
         if fx.save_regions && !save(&store, Blob::Regions, mesh.app.regions.serialize().as_bytes()) {
             warn!("regions save failed");
+        }
+        if fx.save_sensors && !save(&store, Blob::Sensors, mesh.app.sensors_serialize().as_bytes()) {
+            warn!("sensors save failed");
         }
         if let Some(prv) = fx.save_identity
             && !save_identity(&store, &prv)

@@ -4,6 +4,7 @@
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::sync::atomic::Ordering;
 
@@ -23,10 +24,11 @@ use log::warn;
 use meshcore::gps::GpsReading;
 use meshcore::prefs::NodePrefs;
 use meshcore_fw::repeater_app::{self, CONSOLE_WOKE_MS, Config, Hardware, RepeaterBoard, SleepWake};
+use meshcore_fw_core::sensors::{Sensors, read_descriptor};
 use meshcore_ui::View;
 
 use crate::battery::{self, Battery};
-use crate::display::Oled;
+use crate::display::{Oled, SharedI2c};
 use crate::ota::SharedStore;
 use crate::power::Sleeper;
 use crate::radio::EspIrq;
@@ -38,6 +40,14 @@ const WATCHDOG_SECS: u64 = 30;
 
 fn now_ms() -> u64 {
     Instant::now().as_millis()
+}
+
+/// 400 kHz, bounded transfers, as the OLED's bus: a stuck sensor must not hold the loop up.
+fn i2c_config() -> I2cConfig {
+    I2cConfig::default()
+        .with_frequency(Rate::from_khz(400))
+        .with_timeout(esp_hal::i2c::master::BusTimeout::Maximum)
+        .with_software_timeout(esp_hal::i2c::master::SoftwareTimeout::Transaction(esp_hal::time::Duration::from_millis(5)))
 }
 
 fn load_prefs<V: Variant>(store: &Option<SharedStore<'_>>) -> NodePrefs {
@@ -53,6 +63,8 @@ struct Heltec<'d, V: Variant> {
     fem: V::FrontEnd,
     led: Output<'d>,
     oled: Option<Oled<'d>>,
+    /// The environment sensors on the display's I2C bus (BME280 and the rest).
+    sensors: Option<Sensors<SharedI2c<'d>>>,
     battery: Battery<'d>,
     button: Input<'d>,
     sleeper: Sleeper<'d>,
@@ -93,6 +105,23 @@ impl<V: Variant> RepeaterBoard for Heltec<'_, V> {
 
     fn bridge(&self) -> Option<&'static str> {
         Some("espnow")
+    }
+
+    fn sensor_scan(&self) -> String {
+        self.sensors.as_ref().map(|s| s.scan.clone()).unwrap_or_default()
+    }
+
+    async fn sensor_lpp(&mut self, descriptors: &[meshcore::sensor::descriptor::Descriptor]) -> Vec<u8> {
+        let Some(sensors) = self.sensors.as_mut() else {
+            return Vec::new();
+        };
+        let mut lpp = Vec::new();
+        let mut channel = sensors.read_lpp(&mut lpp).await;
+        for d in descriptors {
+            read_descriptor(d, &mut sensors.i2c, channel, &mut lpp).await;
+            channel += 1;
+        }
+        lpp
     }
 
     fn fem_tx_mode(&mut self) {
@@ -259,18 +288,23 @@ pub async fn run<V: Variant>(spawner: Spawner, build_epoch: &str, build_date: &'
     let active = V::divider_active(p.GPIO37.reborrow());
     let battery = Battery::new(Adc::new(p.ADC1, adc_cfg), bat_pin, p.GPIO37, active);
 
-    // ---- OLED status screen (Vext powers it; GPIO36 LOW = on)
+    // ---- OLED status screen (Vext powers it; GPIO36 LOW = on) and the environment sensors on the
+    // same two pins: the V3/V4 external I2C header is wired to the display's bus (17/18)
     let _vext = Output::new(p.GPIO36, Level::Low, OutputConfig::default());
     let oled_rst = Output::new(p.GPIO21, Level::High, OutputConfig::default());
     Timer::after_millis(10).await;
-    let i2c_config = I2cConfig::default()
-        .with_frequency(Rate::from_khz(400))
-        .with_timeout(esp_hal::i2c::master::BusTimeout::Maximum)
-        .with_software_timeout(esp_hal::i2c::master::SoftwareTimeout::Transaction(esp_hal::time::Duration::from_millis(5)));
-    let oled = I2c::new(p.I2C0, i2c_config)
+    let bus = I2c::new(p.I2C0, i2c_config())
         .ok()
         .map(|i2c| i2c.with_sda(p.GPIO17).with_scl(p.GPIO18))
-        .and_then(|i2c| Oled::new(i2c, oled_rst));
+        .map(SharedI2c::new);
+    let (oled, sensors) = match bus {
+        Some(bus) => {
+            // probed before the panel is initialised: the scan writes a byte to every address
+            let sensors = Sensors::probe(bus.clone()).await;
+            (Oled::new(bus, oled_rst), Some(sensors))
+        }
+        None => (None, None),
+    };
 
     let button = Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::Up));
     let sleeper = Sleeper::new(p.LPWR);
@@ -295,7 +329,7 @@ pub async fn run<V: Variant>(spawner: Spawner, build_epoch: &str, build_date: &'
         .unwrap(),
     );
 
-    let board = Heltec::<V> { fem, led, oled, battery, button, sleeper };
+    let board = Heltec::<V> { fem, led, oled, sensors, battery, button, sleeper };
     let hw = Hardware { radio, store, wifi: p.WIFI, bt: p.BT, entropy };
     let cfg = Config { build_epoch: build_epoch.parse().unwrap_or(0), build_date };
     // the loop's state on the heap: in the main task's static it would grow with every change to
