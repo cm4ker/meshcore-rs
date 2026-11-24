@@ -7,9 +7,12 @@
 pub mod fem;
 
 use embassy_executor::Spawner;
-use esp_hal::gpio::Level;
+use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::peripherals::GPIO37;
-use heltec_shared::{ConsolePins, FemPins, Variant};
+use esp_hal::uart::{Config, Uart};
+use heltec_shared::display::SharedI2c;
+use heltec_shared::gps::Gps;
+use heltec_shared::{ConsolePins, ExtPins, FemPins, Variant};
 use log::info;
 use meshcore_fw::companion_app::Serial;
 
@@ -45,6 +48,25 @@ impl Variant for HeltecV4 {
 
     fn app_serial(pins: ConsolePins) -> Serial {
         Serial::Usb(meshcore_fw::usb::start(pins.usb))
+    }
+
+    /// V4 wires its external I2C header to the OLED's I2C0 (GPIO17/18), and has a dedicated GNSS
+    /// header on UART1 (RX 39, TX 38, EN 34 active LOW, RESET 42 active LOW).
+    fn ext_peripherals(oled_bus: Option<SharedI2c<'static>>, pins: ExtPins) -> (Option<SharedI2c<'static>>, Gps) {
+        let (rx, tx) = Uart::new(pins.uart1, Config::default().with_baudrate(9600))
+            .unwrap()
+            .with_rx(pins.gpio39)
+            .with_tx(pins.gpio38)
+            .into_async()
+            .split();
+        let gps = Gps {
+            rx,
+            tx,
+            enable: Output::new(pins.gpio34, Level::High, OutputConfig::default()),
+            enable_active: Level::Low,
+            reset: Some(Output::new(pins.gpio42, Level::Low, OutputConfig::default())),
+        };
+        (oled_bus, gps)
     }
 }
 

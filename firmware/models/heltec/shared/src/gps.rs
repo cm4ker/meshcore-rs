@@ -14,7 +14,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::Timer;
 use esp_hal::Async;
-use esp_hal::gpio::Output;
+use esp_hal::gpio::{Level, Output};
 use esp_hal::uart::{UartRx, UartTx};
 use meshcore_fw_core::gps::{self, Nmea};
 
@@ -24,10 +24,12 @@ pub static GPS_ON: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 pub struct Gps {
     pub rx: UartRx<'static, Async>,
     pub tx: UartTx<'static, Async>,
-    /// GPS_EN (GPIO34), active LOW: Low = powered.
+    /// GPS_EN (V4: GPIO34 active LOW; V3: GPIO26 active HIGH).
     pub enable: Output<'static>,
-    /// RESET (GPIO42), active LOW: Low = held in reset.
-    pub reset: Output<'static>,
+    /// Level of `enable` that powers the receiver on.
+    pub enable_active: Level,
+    /// RESET (V4: GPIO42 active LOW; V3: none).
+    pub reset: Option<Output<'static>>,
 }
 
 #[embassy_executor::task]
@@ -36,11 +38,13 @@ pub async fn task(mut g: Gps) {
     let mut buf = [0u8; 64];
     loop {
         while !GPS_ON.wait().await {}
-        // power up: enable (active low) on, pulse reset low->high
-        g.enable.set_low();
-        g.reset.set_low();
-        Timer::after_millis(10).await;
-        g.reset.set_high();
+        // power up: enable on, pulse reset low->high if wired
+        g.enable.set_level(g.enable_active);
+        if let Some(reset) = &mut g.reset {
+            reset.set_low();
+            Timer::after_millis(10).await;
+            reset.set_high();
+        }
         Timer::after_millis(250).await;
         // GPS, BeiDou and GLONASS, as upstream's `configureL76K` (harmless to modules that ignore it)
         let _ = g.tx.write_async(b"$PCAS04,7*1E\r\n").await;
@@ -59,8 +63,10 @@ pub async fn task(mut g: Gps) {
             }
         };
         select(read, async { while GPS_ON.wait().await {} }).await;
-        g.reset.set_low();
-        g.enable.set_high(); // off
+        if let Some(reset) = &mut g.reset {
+            reset.set_low();
+        }
+        g.enable.set_level(!g.enable_active); // off
         gps::clear();
     }
 }

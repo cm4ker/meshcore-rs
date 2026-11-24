@@ -6,10 +6,13 @@
 #![no_std]
 
 use embassy_executor::Spawner;
-use esp_hal::gpio::{Input, InputConfig, Level, Pull};
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
+use esp_hal::i2c::master::I2c;
 use esp_hal::peripherals::GPIO37;
-use esp_hal::uart::{Config, UartRx};
-use heltec_shared::{ConsolePins, FemPins, FrontEnd, Variant};
+use esp_hal::uart::{Config, Uart, UartRx};
+use heltec_shared::display::{SharedI2c, i2c_config};
+use heltec_shared::gps::Gps;
+use heltec_shared::{ConsolePins, ExtPins, FemPins, FrontEnd, Variant};
 use meshcore_fw::companion_app::Serial;
 
 pub struct HeltecV3;
@@ -43,6 +46,30 @@ impl Variant for HeltecV3 {
     /// Over the CP2102 too: the chip's own USB port leads nowhere on the V3.
     fn app_serial(pins: ConsolePins) -> Serial {
         Serial::Uart(UartRx::new(pins.uart0, Config::default()).unwrap().with_rx(pins.rx).into_async())
+    }
+
+    /// V3 does not bring the OLED's I2C (GPIO17/18) out to the pin headers; external sensors sit
+    /// on I2C1 (SDA GPIO41, SCL GPIO42). External GPS follows upstream `variants/heltec_v3`:
+    /// UART1 RX 48 (receiver TX), TX 47 (receiver RX), EN 26 active HIGH.
+    fn ext_peripherals(_oled_bus: Option<SharedI2c<'static>>, pins: ExtPins) -> (Option<SharedI2c<'static>>, Gps) {
+        let sensor_bus = I2c::new(pins.i2c1, i2c_config())
+            .ok()
+            .map(|i2c| i2c.with_sda(pins.gpio41).with_scl(pins.gpio42))
+            .map(SharedI2c::new);
+        let (rx, tx) = Uart::new(pins.uart1, Config::default().with_baudrate(9600))
+            .unwrap()
+            .with_rx(pins.gpio48)
+            .with_tx(pins.gpio47)
+            .into_async()
+            .split();
+        let gps = Gps {
+            rx,
+            tx,
+            enable: Output::new(pins.gpio26, Level::Low, OutputConfig::default()),
+            enable_active: Level::High,
+            reset: None,
+        };
+        (sensor_bus, gps)
     }
 }
 

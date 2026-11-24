@@ -11,7 +11,7 @@ use embassy_executor::Spawner;
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pin, Pull};
-use esp_hal::i2c::master::{Config as I2cConfig, I2c};
+use esp_hal::i2c::master::I2c;
 use esp_hal::peripherals::ADC1;
 use esp_hal::rng::{Trng, TrngSource};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
@@ -27,11 +27,11 @@ use meshcore_ui::refresh::oled::Oled as Policy;
 use meshcore_ui::{Page, View};
 
 use crate::battery::{self, Battery};
-use crate::display::{Oled, SharedI2c};
+use crate::display::{Oled, SharedI2c, i2c_config};
 use crate::power::Sleeper;
 use crate::radio::EspIrq;
 use crate::sx1262::Sx1262;
-use crate::{ConsolePins, FemPins, FrontEnd, Variant, gps, reset, storage};
+use crate::{ConsolePins, ExtPins, FemPins, FrontEnd, Variant, gps, reset, storage};
 
 const WATCHDOG_SECS: u64 = 30;
 /// SX1262 output; the V4's FEM PA makes ~22 dBm of 10 dBm.
@@ -222,44 +222,37 @@ pub async fn run<V: Variant>(spawner: Spawner, build_epoch: &str, build_date: &'
     let active = V::divider_active(p.GPIO37.reborrow());
     let battery = Battery::new(Adc::new(p.ADC1, adc_cfg), bat_pin, p.GPIO37, active);
 
-    // OLED: Vext on with GPIO36 LOW (see the repeater firmware); bounded I2C transfers, shared
-    // with the environment sensors on the same pins (GPIO17/18)
+    // OLED (Vext on with GPIO36 LOW), environment sensors, and optional external GPS
     let _vext = Output::new(p.GPIO36, Level::Low, OutputConfig::default());
     let oled_rst = Output::new(p.GPIO21, Level::High, OutputConfig::default());
     embassy_time::Timer::after_millis(10).await;
-    let i2c_config = I2cConfig::default()
-        .with_frequency(Rate::from_khz(400))
-        .with_timeout(esp_hal::i2c::master::BusTimeout::Maximum)
-        .with_software_timeout(esp_hal::i2c::master::SoftwareTimeout::Transaction(esp_hal::time::Duration::from_millis(5)));
-    let bus = I2c::new(p.I2C0, i2c_config)
+    let oled_bus = I2c::new(p.I2C0, i2c_config())
         .ok()
         .map(|i2c| i2c.with_sda(p.GPIO17).with_scl(p.GPIO18))
         .map(SharedI2c::new);
-    let (oled, sensors) = match bus {
-        Some(bus) => {
-            // probed before the panel is initialised: the scan writes a byte to every address
-            let sensors = Sensors::probe(bus.clone()).await;
-            (Oled::new(bus, oled_rst), Some(sensors))
-        }
-        None => (None, None),
-    };
-
-    // optional external GPS on the UART1 header (we read 39, write 38; EN 34, RESET 42)
-    let gps_uart = esp_hal::uart::Uart::new(p.UART1, esp_hal::uart::Config::default().with_baudrate(9600))
-        .unwrap()
-        .with_rx(p.GPIO39)
-        .with_tx(p.GPIO38)
-        .into_async();
-    let (gps_rx, gps_tx) = gps_uart.split();
-    spawner.spawn(
-        gps::task(gps::Gps {
-            rx: gps_rx,
-            tx: gps_tx,
-            enable: Output::new(p.GPIO34, Level::High, OutputConfig::default()),
-            reset: Output::new(p.GPIO42, Level::Low, OutputConfig::default()),
-        })
-        .unwrap(),
+    let (sensor_bus, gps) = V::ext_peripherals(
+        oled_bus.clone(),
+        ExtPins {
+            i2c1: p.I2C1,
+            uart1: p.UART1,
+            gpio26: p.GPIO26,
+            gpio34: p.GPIO34,
+            gpio38: p.GPIO38,
+            gpio39: p.GPIO39,
+            gpio41: p.GPIO41,
+            gpio42: p.GPIO42,
+            gpio47: p.GPIO47,
+            gpio48: p.GPIO48,
+        },
     );
+    // probed before the OLED is initialised: on V4 both share I2C0 and the scan writes to every address
+    let sensors = match sensor_bus {
+        Some(bus) => Some(Sensors::probe(bus).await),
+        None => None,
+    };
+    let oled = oled_bus.and_then(|bus| Oled::new(bus, oled_rst));
+
+    spawner.spawn(gps::task(gps).unwrap());
 
     let board = Heltec::<V> {
         fem,

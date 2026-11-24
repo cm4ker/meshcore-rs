@@ -16,7 +16,8 @@ use core::cell::{Cell, RefCell};
 use esp_hal::Blocking;
 use esp_hal::delay::Delay;
 use esp_hal::gpio::Output;
-use esp_hal::i2c::master::{Error as I2cError, I2c};
+use esp_hal::i2c::master::{Config as I2cConfig, Error as I2cError, I2c};
+use esp_hal::time::Rate;
 use meshcore_ui::View;
 use meshcore_ui::layout::Class;
 use ssd1306::mode::BufferedGraphicsMode;
@@ -35,9 +36,17 @@ struct BusStats {
     max_failed: u32,
 }
 
-/// The I2C controller of the OLED, shared with the environment sensors: on the V3 and V4 their
-/// header is wired to the display's SDA/SCL (GPIO17/18), so both take a clone of this handle and
-/// each transfer borrows the controller for its duration — the two never interleave on the wire.
+/// 400 kHz, bounded transfers: a stuck OLED or sensor must not hold the main loop up.
+pub fn i2c_config() -> I2cConfig {
+    I2cConfig::default()
+        .with_frequency(Rate::from_khz(400))
+        .with_timeout(esp_hal::i2c::master::BusTimeout::Maximum)
+        .with_software_timeout(esp_hal::i2c::master::SoftwareTimeout::Transaction(esp_hal::time::Duration::from_millis(5)))
+}
+
+/// The I2C controller of the OLED, shared with the environment sensors: on the V4 their header is
+/// wired to the display's SDA/SCL (GPIO17/18), so both take a clone of this handle and each
+/// transfer borrows the controller for its duration — the two never interleave on the wire.
 #[derive(Clone)]
 pub struct SharedI2c<'d>(Rc<RefCell<I2c<'d, Blocking>>>);
 

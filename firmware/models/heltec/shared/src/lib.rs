@@ -22,7 +22,7 @@ pub mod gps;
 pub mod repeater;
 mod variant;
 
-pub use variant::{ConsolePins, FemPins, FrontEnd, Variant};
+pub use variant::{ConsolePins, ExtPins, FemPins, FrontEnd, Variant};
 
 // board-independent parts, shared with other boards
 pub use meshcore_fw::{ble, broker, clock_cell, espnow, frames, net, noise, ota, power, radio, reset, storage, sx1262, wifi_ota};
