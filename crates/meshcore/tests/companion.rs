@@ -2454,3 +2454,130 @@ fn mcrs_info_on_companion_and_repeater() {
     let r_cli = r.app.handle_command(&mut r.ctx, 0, "mcrs");
     assert!(r_cli.starts_with(&format!("> MCRS v{MCRS_VERSION} ({} #170, promicro/repeater", release::PRODUCT_VERSION)));
 }
+
+#[test]
+fn mcrs_peer_data_ack_path_return_retries_and_offline_queue() {
+    use meshcore::mcrs::{self, MAX_PEER_DATA_LEN, McrsInfo, SUB_INFO, SUB_PEER_DATA_WAITING, SUB_SEND_PEER_DATA, SUB_SYNC_PEER_DATA, cap};
+
+    let mut air = Air::new();
+    // Alice <-> Repeater <-> Bob (two hops, proving repeaters forward TXT_TYPE_PEER_DATA transparently)
+    air.link(0, 1);
+    air.link(1, 2);
+
+    let mut a = companion(1, "Alice");
+    let mut r = repeater(2);
+    let mut b = companion(3, "Bob");
+
+    // Exchange adverts so Alice and Bob know each other
+    cmd(&mut a, &[CMD_SEND_SELF_ADVERT, 1]);
+    cmd(&mut b, &[CMD_SEND_SELF_ADVERT, 1]);
+    air.run(&mut [&mut a, &mut r, &mut b], 15_000);
+    frames(&mut a);
+    frames(&mut b);
+
+    let ak = pub_key(&a);
+    let bk = pub_key(&b);
+
+    // 1. Companion answers REQ_TYPE_MCRS SUB_INFO over LoRa with cap::PEER_DATA
+    let mut info_req = vec![CMD_SEND_BINARY_REQ];
+    info_req.extend_from_slice(&bk);
+    info_req.extend_from_slice(&[mcrs::OPCODE, SUB_INFO]);
+    let sent_info = cmd(&mut a, &info_req);
+    let info_tag = sent_info[0][2..6].to_vec();
+    air.run(&mut [&mut a, &mut r, &mut b], 15_000);
+    let info_resp = only(&frames(&mut a), PUSH_CODE_BINARY_RESPONSE);
+    assert_eq!(info_resp.len(), 1);
+    assert_eq!(&info_resp[0][2..6], &info_tag[..]);
+    let bob_info = McrsInfo::decode(&info_resp[0][6..]).expect("valid companion MCRS info");
+    assert_ne!(bob_info.caps & cap::PEER_DATA, 0);
+
+    // Reset Alice's route to Bob so first peer-data packet goes FLOOD and learns return path
+    let mut reset = vec![CMD_RESET_PATH];
+    reset.extend_from_slice(&bk);
+    cmd(&mut a, &reset);
+    frames(&mut a);
+    frames(&mut b);
+
+    // Helper to build CMD_MCRS SUB_SEND_PEER_DATA
+    let build_send = |attempt: u8, ts: u32, dst: &[u8], app_id: u16, payload: &[u8]| {
+        let mut f = vec![CMD_MCRS, SUB_SEND_PEER_DATA, attempt];
+        f.extend_from_slice(&ts.to_le_bytes());
+        f.extend_from_slice(&dst[..6]);
+        f.extend_from_slice(&app_id.to_le_bytes());
+        f.extend_from_slice(payload);
+        f
+    };
+
+    // Validation checks
+    assert_eq!(cmd(&mut a, &[CMD_MCRS, SUB_SEND_PEER_DATA, 0])[0], vec![RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG]);
+    assert_eq!(cmd(&mut a, &build_send(0, 1000, &bk, 0, &[1, 2]))[0], vec![RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG]);
+    assert_eq!(
+        cmd(&mut a, &build_send(0, 1000, &bk, 0x0100, &[0xAA; MAX_PEER_DATA_LEN + 1]))[0],
+        vec![RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG]
+    );
+    assert_eq!(cmd(&mut a, &build_send(0, 1000, &[0x99; 6], 0x0100, &[1]))[0], vec![RESP_CODE_ERR, ERR_CODE_NOT_FOUND]);
+
+    // 2. Flood send of an 8-byte chess move with embedded NUL bytes (0x00)
+    let chess_move = [0x04, 0xF2, 0xA4, 0x01, 0x00, 0x00, 0x0C, 0x5A];
+    let sent = cmd(&mut a, &build_send(0, 1_700_000_001, &bk, 0x0100, &chess_move));
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0][0], RESP_CODE_MCRS);
+    assert_eq!(sent[0][1], SUB_SEND_PEER_DATA);
+    assert_eq!(sent[0][2], 1, "first send floods");
+    let ack_tag_0 = u32::from_le_bytes(sent[0][3..7].try_into().unwrap());
+    assert_ne!(ack_tag_0, 0);
+
+    air.run(&mut [&mut a, &mut r, &mut b], 15_000);
+
+    // Alice got PUSH_CODE_SEND_CONFIRMED and learned direct path to Bob
+    let a_frames = frames(&mut a);
+    let confirmed = only(&a_frames, PUSH_CODE_SEND_CONFIRMED);
+    assert_eq!(confirmed.len(), 1, "ACK confirmed over flood + path return");
+    assert_eq!(u32::from_le_bytes(confirmed[0][1..5].try_into().unwrap()), ack_tag_0);
+    assert!(!only(&a_frames, PUSH_CODE_PATH_UPDATED).is_empty(), "path learned from flood ACK");
+
+    // Bob got PUSH_CODE_MCRS [SUB_PEER_DATA_WAITING], NOT regular offline_queue text message
+    let b_frames = frames(&mut b);
+    assert!(only(&b_frames, PUSH_CODE_MCRS).iter().any(|f| f.as_slice() == [PUSH_CODE_MCRS, SUB_PEER_DATA_WAITING]));
+    assert_eq!(cmd(&mut b, &[CMD_SYNC_NEXT_MESSAGE])[0], vec![RESP_CODE_NO_MORE_MESSAGES]);
+
+    // Drain Bob's peer_data_queue
+    let synced = cmd(&mut b, &[CMD_MCRS, SUB_SYNC_PEER_DATA]);
+    assert_eq!(synced.len(), 1);
+    assert_eq!(synced[0][0], RESP_CODE_MCRS);
+    assert_eq!(synced[0][1], SUB_SYNC_PEER_DATA);
+    assert_eq!(&synced[0][3..9], &ak[..6]);
+    assert_ne!(synced[0][9], 0xFF, "arrived via flood");
+    assert_eq!(u32::from_le_bytes(synced[0][10..14].try_into().unwrap()), 1_700_000_001);
+    assert_eq!(u16::from_le_bytes(synced[0][14..16].try_into().unwrap()), 0x0100);
+    assert_eq!(synced[0][16], chess_move.len() as u8);
+    assert_eq!(&synced[0][17..], &chess_move);
+    // Queue is now empty
+    assert_eq!(cmd(&mut b, &[CMD_MCRS, SUB_SYNC_PEER_DATA])[0], vec![RESP_CODE_MCRS, SUB_SYNC_PEER_DATA]);
+
+    // 3. Direct send + extended retry (attempt = 5 > 3) + max 150-byte binary payload while Bob's phone is asleep!
+    b.app.connected = false;
+    let mut big_payload = [0u8; MAX_PEER_DATA_LEN];
+    for (i, byte) in big_payload.iter_mut().enumerate() {
+        *byte = (i % 251) as u8; // includes 0x00 at index 0
+    }
+    let sent_ext = cmd(&mut a, &build_send(5, 1_700_000_002, &bk, 0x0100, &big_payload));
+    assert_eq!(sent_ext[0][2], 0, "second send goes direct");
+    let ack_tag_5 = u32::from_le_bytes(sent_ext[0][3..7].try_into().unwrap());
+    assert_ne!(ack_tag_5, ack_tag_0);
+
+    air.run(&mut [&mut a, &mut r, &mut b], 15_000);
+
+    // Even with Bob's app disconnected, Alice received ACK!
+    let confirmed_5 = only(&frames(&mut a), PUSH_CODE_SEND_CONFIRMED);
+    assert_eq!(confirmed_5.len(), 1, "ACK confirmed for attempt=5 while Bob's phone is offline");
+    assert_eq!(u32::from_le_bytes(confirmed_5[0][1..5].try_into().unwrap()), ack_tag_5);
+    assert_eq!(b.app.queued_peer_data(), 1);
+
+    // Bob wakes up and pulls the 150-byte binary payload intact
+    b.app.connected = true;
+    let synced_big = cmd(&mut b, &[CMD_MCRS, SUB_SYNC_PEER_DATA]);
+    assert_eq!(synced_big[0][9], 0xFF, "arrived direct");
+    assert_eq!(synced_big[0][16], MAX_PEER_DATA_LEN as u8);
+    assert_eq!(&synced_big[0][17..], &big_payload[..]);
+}

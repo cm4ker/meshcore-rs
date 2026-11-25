@@ -44,6 +44,9 @@ pub const MAX_CONTACTS: usize = 350;
 pub const MAX_GROUP_CHANNELS: usize = 40;
 pub const MAX_ANON_CONTACTS: usize = 8;
 pub const OFFLINE_QUEUE_SIZE: usize = 256;
+/// Separate offline queue for incoming `TXT_TYPE_PEER_DATA` binary datagrams, so older or
+/// third-party clients calling `CMD_SYNC_NEXT_MESSAGE` never choke on or drop them.
+pub const PEER_DATA_QUEUE_SIZE: usize = 64;
 pub const MAX_TEXT_LEN: usize = 160;
 pub const OUT_PATH_UNKNOWN: u8 = 0xFF;
 
@@ -72,6 +75,8 @@ pub const TXT_TYPE_PLAIN: u8 = 0;
 pub const TXT_TYPE_CLI_DATA: u8 = 1;
 pub const TXT_TYPE_SIGNED_PLAIN: u8 = 2;
 pub const TXT_TYPE_CLI_COMMAND: u8 = 3;
+/// `meshcore-rs` MCRS v2 binary P2P datagram (`0x30..=0x3F` vendor range of the 6-bit `txt_type`).
+pub const TXT_TYPE_PEER_DATA: u8 = 0x38;
 
 pub const REQ_TYPE_GET_STATUS: u8 = 0x01;
 pub const REQ_TYPE_KEEP_ALIVE: u8 = 0x02;
@@ -207,6 +212,8 @@ pub const PUSH_CODE_PATH_DISCOVERY_RESPONSE: u8 = 0x8D;
 pub const PUSH_CODE_CONTROL_DATA: u8 = 0x8E;
 pub const PUSH_CODE_CONTACT_DELETED: u8 = 0x8F;
 pub const PUSH_CODE_CONTACTS_FULL: u8 = 0x90;
+/// `meshcore-rs` extension push (`[0xE0, subcode, ...]`).
+pub const PUSH_CODE_MCRS: u8 = crate::mcrs::PUSH_OPCODE;
 
 pub const ERR_CODE_UNSUPPORTED_CMD: u8 = 1;
 pub const ERR_CODE_NOT_FOUND: u8 = 2;
@@ -766,7 +773,12 @@ impl Companion {
 
     /// Messages waiting in the offline queue.
     pub fn queued_messages(&self) -> usize {
-        self.offline_queue.len()
+        self.offline_queue.iter().filter(|f| f.first() != Some(&RESP_CODE_MCRS)).count()
+    }
+
+    /// Incoming binary peer datagrams waiting in the MCRS v2 queue.
+    pub fn queued_peer_data(&self) -> usize {
+        self.offline_queue.iter().filter(|f| f.first() == Some(&RESP_CODE_MCRS)).count()
     }
 
     /// Outbound packets or a contacts write still pending (`hasPendingWork`).
@@ -1232,6 +1244,73 @@ impl Companion {
         self.write_frame(&[PUSH_CODE_MSG_WAITING]);
     }
 
+    #[cold]
+    #[inline(never)]
+    #[cfg_attr(target_arch = "arm", unsafe(link_section = ".mcrs"))]
+    fn append_mcrs_info(&self, sender_timestamp: u32, reply: &mut Vec<u8>) {
+        reply.extend_from_slice(&sender_timestamp.to_le_bytes());
+        reply.extend_from_slice(&self.mcrs_info().encode());
+    }
+
+    #[cold]
+    #[inline(never)]
+    #[cfg_attr(target_arch = "arm", unsafe(link_section = ".mcrs"))]
+    fn on_peer_data(&mut self, ctx: &mut MeshCtx, idx: usize, pkt: &Packet, data: &[u8]) {
+        if data.len() < 8 {
+            return;
+        }
+        let app_id = u16::from_le_bytes([data[5], data[6]]);
+        let payload_len = data[7] as usize;
+        if app_id == 0 || payload_len > crate::mcrs::MAX_PEER_DATA_LEN || 8 + payload_len > data.len() {
+            return;
+        }
+        let ext_attempt = data.get(8 + payload_len).copied().unwrap_or(0);
+
+        self.contacts[idx].lastmod = ctx.current_time();
+        self.mark_connection_active(ctx, idx);
+
+        let mut f = [0u8; MAX_FRAME_SIZE];
+        f[0] = RESP_CODE_MCRS;
+        f[1] = crate::mcrs::SUB_SYNC_PEER_DATA;
+        f[2] = pkt.snr as u8;
+        f[3..9].copy_from_slice(&self.contacts[idx].id.pub_key[..6]);
+        f[9] = if pkt.is_route_flood() { pkt.path_len } else { 0xFF };
+        f[10..14].copy_from_slice(&data[0..4]);
+        f[14..17 + payload_len].copy_from_slice(&data[5..8 + payload_len]);
+
+        let n = self.offline_queue.len();
+        let mut count = 0usize;
+        for _ in 0..n {
+            if let Some(q) = self.offline_queue.pop_front() {
+                if q.first() == Some(&RESP_CODE_MCRS) {
+                    count += 1;
+                }
+                self.offline_queue.push_back(q);
+            }
+        }
+        if count >= PEER_DATA_QUEUE_SIZE || n >= OFFLINE_QUEUE_SIZE {
+            if self.pop_offline(true).is_none() {
+                return;
+            }
+        }
+        self.offline_queue.push_back(f[..17 + payload_len].to_vec());
+        self.write_frame(&[PUSH_CODE_MCRS, crate::mcrs::SUB_PEER_DATA_WAITING]);
+
+        let mut ack = [0u8; 6];
+        crypto::sha256(
+            &mut ack[..4],
+            &[&data[..8 + payload_len], &[ext_attempt], &self.contacts[idx].id.pub_key],
+        );
+        ack[4] = ext_attempt;
+        ctx.rng.fill(&mut ack[5..]);
+        if pkt.is_route_flood() {
+            let secret = self.secret_of(ctx, idx);
+            self.send_path_return(ctx, idx, &secret, pkt, PAYLOAD_TYPE_ACK, &ack, TXT_ACK_DELAY);
+        } else {
+            self.send_ack_to(ctx, idx, &ack);
+        }
+    }
+
     fn note_message(&mut self, from: String, text: &[u8], now: u32) {
         if self.recent.len() >= RECENT_MESSAGES {
             self.recent.pop_front();
@@ -1333,6 +1412,8 @@ impl Companion {
                 self.lpp_sensors(&mut reply, perms);
                 self.lpp_temperature(&mut reply);
             }
+        } else if data.first() == Some(&crate::mcrs::OPCODE) && data.get(1) == Some(&crate::mcrs::SUB_INFO) {
+            self.append_mcrs_info(sender_timestamp, &mut reply);
         }
         reply
     }
@@ -1574,6 +1655,7 @@ impl MeshApp for Companion {
                         self.send_ack_to(ctx, idx, &ack);
                     }
                 }
+                TXT_TYPE_PEER_DATA => self.on_peer_data(ctx, idx, pkt, data),
                 _ => {}
             }
         } else if payload_type == PAYLOAD_TYPE_REQ && len > 4 {

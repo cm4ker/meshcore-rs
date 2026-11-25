@@ -21,14 +21,39 @@ use crate::release;
 /// Current `meshcore-rs` extension protocol version (`MCRS_VERSION`).
 ///
 /// Bump whenever a new subcommand or trailing field is added so clients can gate features on it.
-pub const MCRS_VERSION: u8 = 1;
+///
+/// - v1: `SUB_INFO` (`0x00`) on companion link and remote repeater/room LoRa requests.
+/// - v2: Reliable ACKed binary P2P datagrams (`SUB_SEND_PEER_DATA`, `SUB_SYNC_PEER_DATA`,
+///   `PUSH_OPCODE`, `cap::PEER_DATA`) and `REQ_TYPE_MCRS` `SUB_INFO` replies on companions.
+pub const MCRS_VERSION: u8 = 2;
 
 /// Vendor opcode shared by companion frames (`CMD_MCRS` / `RESP_MCRS`) and LoRa binary requests
 /// (`REQ_TYPE_MCRS`).
 pub const OPCODE: u8 = 0x70;
 
+/// Unprompted push opcode (`0xE0`, above upstream's `0x80..=0x90` and below Ommesh's `0xF0`/`0xF1`
+/// phone-relay frames). Second byte identifies the notification (e.g. [`SUB_PEER_DATA_WAITING`]).
+pub const PUSH_OPCODE: u8 = 0xE0;
+
 /// Subcommand `0x00`: query protocol version, build identity and board capabilities.
 pub const SUB_INFO: u8 = 0x00;
+
+/// Subcommand `0x01`: send an ACKed encrypted binary P2P datagram to a contact.
+pub const SUB_SEND_PEER_DATA: u8 = 0x01;
+
+/// Subcommand `0x02`: pop the next incoming binary P2P datagram from the companion's queue.
+pub const SUB_SYNC_PEER_DATA: u8 = 0x02;
+
+/// Push subcode `0x03` (under [`PUSH_OPCODE`]): at least one incoming binary P2P datagram is
+/// queued and ready for [`SUB_SYNC_PEER_DATA`].
+pub const SUB_PEER_DATA_WAITING: u8 = 0x03;
+
+/// Maximum binary payload length of a peer-to-peer datagram (`TXT_TYPE_PEER_DATA`).
+///
+/// Chosen so `8 + MAX_PEER_DATA_LEN + 1 (ext_attempt) = 159 <= 160` (10 AES-128 blocks on air)
+/// and both companion TX (`15 + 150 = 165`) and RX (`17 + 150 = 167`) frames fit inside
+/// `MAX_FRAME_SIZE` (176).
+pub const MAX_PEER_DATA_LEN: usize = 150;
 
 /// Maximum length of the product version string in [`McrsInfo`].
 const MAX_PRODUCT_VERSION: usize = 31;
@@ -70,6 +95,8 @@ pub mod cap {
     pub const POWERSAVING: u32 = 1 << 14;
     /// Repeater supports MQTT observer uplink (`mqtt.*`).
     pub const MQTT: u32 = 1 << 15;
+    /// Companion supports ACKed binary P2P datagrams (`SUB_SEND_PEER_DATA` / `SUB_SYNC_PEER_DATA`).
+    pub const PEER_DATA: u32 = 1 << 16;
 }
 
 /// Build identity and capability snapshot returned by [`SUB_INFO`].

@@ -7,3 +7,11 @@ MEMORY
   FLASH : ORIGIN = 0x00026000, LENGTH = 0x84000 - 0x26000 - 64
   RAM   : ORIGIN = 0x20004000, LENGTH = 256K - 16K
 }
+
+SECTIONS
+{
+  .mcrs : ALIGN(4)
+  {
+    *(.mcrs .mcrs.*);
+  } > FLASH
+} INSERT AFTER .rodata;

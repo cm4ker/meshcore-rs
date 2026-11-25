@@ -63,17 +63,14 @@ impl Companion {
             CMD_MCRS => {
                 if len < 2 {
                     self.write_err(ERR_CODE_ILLEGAL_ARG);
+                } else if frame[1] == crate::mcrs::SUB_INFO {
+                    let body = self.mcrs_info().encode();
+                    let mut f = Vec::with_capacity(1 + body.len());
+                    f.push(RESP_CODE_MCRS);
+                    f.extend_from_slice(&body);
+                    self.write_frame(&f);
                 } else {
-                    match frame[1] {
-                        crate::mcrs::SUB_INFO => {
-                            let body = self.mcrs_info().encode();
-                            let mut f = Vec::with_capacity(1 + body.len());
-                            f.push(RESP_CODE_MCRS);
-                            f.extend_from_slice(&body);
-                            self.write_frame(&f);
-                        }
-                        _ => self.write_err(ERR_CODE_UNSUPPORTED_CMD),
-                    }
+                    self.handle_mcrs_v2(ctx, frame);
                 }
             }
             CMD_DEVICE_QUERY if len >= 2 => {
@@ -350,7 +347,7 @@ impl Companion {
                     self.write_err(ERR_CODE_ILLEGAL_ARG);
                 }
             }
-            CMD_SYNC_NEXT_MESSAGE => match self.offline_queue.pop_front() {
+            CMD_SYNC_NEXT_MESSAGE => match self.pop_offline(false) {
                 Some(f) => self.write_frame(&f),
                 None => self.write_frame(&[RESP_CODE_NO_MORE_MESSAGES]),
             },
@@ -896,6 +893,84 @@ impl Companion {
         let pkt = ctx.create_datagram(PAYLOAD_TYPE_TXT_MSG, &id, &secret, &temp)?;
         let (sent, est) = self.send_with_timeout(ctx, idx, pkt);
         Some((sent, u32::from_le_bytes(ack), est))
+    }
+
+    #[inline(never)]
+    #[cfg_attr(target_arch = "arm", unsafe(link_section = ".mcrs"))]
+    pub(super) fn pop_offline(&mut self, peer_data: bool) -> Option<Vec<u8>> {
+        let n = self.offline_queue.len();
+        let mut found = None;
+        for _ in 0..n {
+            let Some(f) = self.offline_queue.pop_front() else {
+                break;
+            };
+            if found.is_none() && (f.first() == Some(&RESP_CODE_MCRS)) == peer_data {
+                found = Some(f);
+            } else {
+                self.offline_queue.push_back(f);
+            }
+        }
+        found
+    }
+
+    /// `meshcore-rs` v2 extension commands (`SUB_SEND_PEER_DATA`, `SUB_SYNC_PEER_DATA`).
+    #[cold]
+    #[inline(never)]
+    #[cfg_attr(target_arch = "arm", unsafe(link_section = ".mcrs"))]
+    fn handle_mcrs_v2(&mut self, ctx: &mut MeshCtx, frame: &[u8]) {
+        match frame[1] {
+            crate::mcrs::SUB_SEND_PEER_DATA => {
+                let payload = frame.get(15..).unwrap_or(&[]);
+                if frame.len() < 15 || (frame[13] | frame[14]) == 0 || payload.len() > crate::mcrs::MAX_PEER_DATA_LEN {
+                    return self.write_err(ERR_CODE_ILLEGAL_ARG);
+                }
+                let Some(idx) = self.lookup_contact(&frame[7..13]) else {
+                    return self.write_err(ERR_CODE_NOT_FOUND);
+                };
+                let attempt = frame[2];
+                let mut temp = [0u8; 8 + crate::mcrs::MAX_PEER_DATA_LEN + 1];
+                temp[0..4].copy_from_slice(&frame[3..7]);
+                temp[4] = (TXT_TYPE_PEER_DATA << 2) | (attempt & 3);
+                temp[5..7].copy_from_slice(&frame[13..15]);
+                temp[7] = payload.len() as u8;
+                let base_len = 8 + payload.len();
+                temp[8..base_len].copy_from_slice(payload);
+                let ext_attempt = if attempt > 3 { attempt } else { 0 };
+                let mut ack = [0u8; 4];
+                crypto::sha256(&mut ack, &[&temp[..base_len], &[ext_attempt], ctx.self_id.pub_key()]);
+                let total_len = if attempt > 3 {
+                    temp[base_len] = attempt;
+                    base_len + 1
+                } else {
+                    base_len
+                };
+                let secret = self.secret_of(ctx, idx);
+                let id = self.contacts[idx].id;
+                let Some(pkt) = ctx.create_datagram(PAYLOAD_TYPE_TXT_MSG, &id, &secret, &temp[..total_len]) else {
+                    return self.write_err(ERR_CODE_TABLE_FULL);
+                };
+                let (sent, est_timeout) = self.send_with_timeout(ctx, idx, pkt);
+                let expected_ack = u32::from_le_bytes(ack);
+                self.expected_acks[self.next_ack_idx] = Some(AckEntry {
+                    msg_sent: ctx.now,
+                    ack: expected_ack,
+                    contact: self.contacts[idx].id.pub_key,
+                });
+                self.next_ack_idx = (self.next_ack_idx + 1) % EXPECTED_ACK_TABLE_SIZE;
+                let mut f = [0u8; 11];
+                f[0] = RESP_CODE_MCRS;
+                f[1] = crate::mcrs::SUB_SEND_PEER_DATA;
+                f[2] = sent.flag();
+                f[3..7].copy_from_slice(&ack);
+                f[7..11].copy_from_slice(&est_timeout.to_le_bytes());
+                self.write_frame(&f);
+            }
+            crate::mcrs::SUB_SYNC_PEER_DATA => match self.pop_offline(true) {
+                Some(f) => self.write_frame(&f),
+                None => self.write_frame(&[RESP_CODE_MCRS, crate::mcrs::SUB_SYNC_PEER_DATA]),
+            },
+            _ => self.write_err(ERR_CODE_UNSUPPORTED_CMD),
+        }
     }
 
     /// `sendCommandData`: CLI text to a server (no ACK expected).
@@ -1598,7 +1673,7 @@ impl Companion {
     /// `meshcore-rs` protocol version, build identity and hardware capabilities (`CMD_MCRS` `SUB_INFO`).
     pub fn mcrs_info(&self) -> crate::mcrs::McrsInfo {
         use crate::mcrs::cap;
-        let mut caps = cap::TIMESYNC;
+        let mut caps = cap::TIMESYNC | cap::PEER_DATA;
         if self.board.has_screen {
             caps |= cap::SCREEN;
         }
