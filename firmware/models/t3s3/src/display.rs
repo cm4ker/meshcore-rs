@@ -21,6 +21,7 @@ use esp_hal::gpio::Output;
 use esp_hal::i2c::master::I2c;
 use meshcore_ui::View;
 use meshcore_ui::layout::Class;
+use ssd1306::command::AddrMode;
 use ssd1306::mode::BufferedGraphicsMode;
 use ssd1306::prelude::*;
 use ssd1306::{I2CDisplayInterface, Ssd1306};
@@ -86,7 +87,7 @@ impl<'d> Oled<'d> {
         let bus = TolerantI2c { inner: i2c, stats: stats.clone() };
         let display =
             Ssd1306::new(I2CDisplayInterface::new(bus), DisplaySize128x64, DisplayRotation::Rotate0).into_buffered_graphics_mode();
-        let mut oled = Self { display, stats, rst, on: true, needs_init: true };
+        let mut oled = Self { display, stats, rst, on: false, needs_init: true };
         oled.reinit().then_some(oled)
     }
 
@@ -106,8 +107,21 @@ impl<'d> Oled<'d> {
         delay.delay_millis(1);
         self.rst.set_high();
         delay.delay_millis(2);
+        // Clear GDDRAM while the panel and its charge pump are off (after RST): `ssd1306::init`
+        // turns the display on (0xAF) without flushing, which would otherwise show random power-on
+        // RAM until the first frame is drawn.
         self.set_strict(true);
-        self.needs_init = self.display.init().is_err() || self.display.set_brightness(BRIGHTNESS).is_err();
+        let ready = self.display.set_display_on(false).is_ok()
+            && self.display.set_addr_mode(AddrMode::Horizontal).is_ok();
+        let cleared = if ready {
+            self.display.clear_buffer();
+            self.set_strict(false);
+            self.display.flush().is_ok()
+        } else {
+            false
+        };
+        self.set_strict(true);
+        self.needs_init = !(cleared && self.display.init().is_ok() && self.display.set_brightness(BRIGHTNESS).is_ok());
         self.set_strict(false);
         if !self.needs_init && !self.on {
             let _ = self.display.set_display_on(false);

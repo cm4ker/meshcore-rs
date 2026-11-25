@@ -87,9 +87,10 @@ impl Oled {
     }
 
     /// Adafruit's SSD1306 initialisation for the 128 x 64 panel with its charge pump, which is what
-    /// upstream's driver sends: the same panel, the same picture.
+    /// upstream's driver sends: the same panel, the same picture. Leaves the panel off (`0xAE`) so
+    /// random power-on GDDRAM is never lit before [`Self::show`] writes the first frame.
     async fn init(&mut self) -> bool {
-        const INIT: [u8; 25] = [
+        const INIT: [u8; 24] = [
             0xAE, // display off
             0xD5, 0x80, // clock divide
             0xA8, 0x3F, // multiplex 64
@@ -105,14 +106,11 @@ impl Oled {
             0xDB, 0x40, // VCOMH
             0xA4, // resume from RAM
             0xA6, // not inverted
-            0xAF, // display on
         ];
         let mut frame = [0u8; INIT.len() + 1];
         frame[0] = 0x00; // commands follow
         frame[1..].copy_from_slice(&INIT);
-        let ok = self.bus_write(&frame).await;
-        self.on = ok;
-        ok
+        self.bus_write(&frame).await
     }
 
     /// One frame: each of the eight pages set and written. A failed transfer ends the frame (the
@@ -122,7 +120,8 @@ impl Oled {
     /// a page is selected by its address range (`0x22`) and the columns by theirs (`0x21`): the
     /// older `0xB0` page command belongs to page addressing mode and is ignored here.
     pub async fn show(&mut self, frame: &Frame) {
-        if !self.on && !self.init().await {
+        let wake = !self.on;
+        if wake && !self.init().await {
             return;
         }
         let mut row = [0u8; WIDTH + 1];
@@ -136,6 +135,9 @@ impl Oled {
             if !self.bus_write(&row).await {
                 return;
             }
+        }
+        if wake && self.bus_write(&[0x00, 0xAF]).await {
+            self.on = true;
         }
     }
 
