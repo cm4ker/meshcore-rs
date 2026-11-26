@@ -844,3 +844,43 @@ fn screen_and_led_settings_on_a_repeater() {
     assert_eq!(saved.screen_mode, ScreenMode::Off.code());
     assert!(!saved.led_enabled);
 }
+
+/// Clearing `guest.password` or `owner.info` works both with a trailing space (upstream LoRa CLI)
+/// and bare (serial console, where trailing whitespace is trimmed).
+#[test]
+fn clear_guest_password_and_owner_info() {
+    let mut r = repeater(1);
+    let r_id = r.ctx.self_id.id;
+    let try_login = |r: &mut Mesh<Repeater>, seed: u8, ts: u32, password: &[u8], now: u64| {
+        let mut c = client(seed);
+        let secret = c.ctx.self_id.calc_shared_secret(&r_id.pub_key).unwrap();
+        let mut data = ts.to_le_bytes().to_vec();
+        data.extend_from_slice(password);
+        let mut req = c.ctx.create_anon_datagram(&r_id, &secret, &data).unwrap();
+        req.set_route_type(ROUTE_TYPE_DIRECT);
+        req.path_len = 0;
+        r.on_rx_frame(now, &frame(&req), 7.0, -60.0);
+        !drain_tx(r, now + 10_000).is_empty()
+    };
+
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set guest.password secret"), "OK");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get guest.password"), "> secret");
+    assert!(!try_login(&mut r, 2, 1_760_000_100, b"", 0), "non-empty guest password rejects blank login");
+
+    // Trailing space (upstream form) clears it.
+    assert_eq!(r.app.handle_command(&mut r.ctx, 1, "set guest.password "), "OK");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get guest.password"), "> ");
+    assert!(try_login(&mut r, 3, 1_760_000_200, b"", 20_000), "blank login accepted once cleared");
+
+    // Bare key (serial form after trim_end) also clears it.
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set guest.password secret"), "OK");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set guest.password"), "OK");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get guest.password"), "> ");
+    assert!(try_login(&mut r, 4, 1_760_000_300, b"", 40_000));
+
+    // Same for `owner.info`.
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set owner.info hill|club"), "OK");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get owner.info"), "> hill|club");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "set owner.info"), "OK");
+    assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get owner.info"), "> ");
+}

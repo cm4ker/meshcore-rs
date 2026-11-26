@@ -2580,7 +2580,8 @@ impl Repeater {
                 self.save_prefs();
                 "OK".into()
             }
-        } else if let Some(v) = cfg.strip_prefix("guest.password ") {
+        } else if cfg == "guest.password" || cfg.starts_with("guest.password ") {
+            let v = cfg.strip_prefix("guest.password ").unwrap_or("");
             self.prefs.guest_password = truncate_str(v, PASSWORD_MAX);
             self.save_prefs();
             "OK".into()
@@ -2619,7 +2620,8 @@ impl Repeater {
             self.set_flood_limit(v, |p, m| p.flood_max_advert = m)
         } else if let Some(v) = cfg.strip_prefix("flood.max ") {
             self.set_flood_limit(v, |p, m| p.flood_max = m)
-        } else if let Some(v) = cfg.strip_prefix("owner.info ") {
+        } else if cfg == "owner.info" || cfg.starts_with("owner.info ") {
+            let v = cfg.strip_prefix("owner.info ").unwrap_or("");
             self.prefs.owner_info = truncate_str(&v.replace('|', "\n"), OWNER_INFO_MAX);
             self.save_prefs();
             "OK".into()
