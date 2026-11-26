@@ -135,7 +135,7 @@ class EspInstall {
             int seq=(int)(best+1);byte[] flag=new byte[32];Arrays.fill(flag,(byte)0xff);ByteBuffer b=ByteBuffer.wrap(flag).order(ByteOrder.LITTLE_ENDIAN);
             b.putInt(0,seq).putInt(24,2).putInt(28,seqCrc(seq));write(meta+(1-sector)*4096,flag);
         }finally{wire.dtr(false);wire.rts(true);Thread.sleep(200);wire.rts(false);}
-        log.show("Запись проверена. После перезагрузки нажмите «Версия устройства».");
+        log.show("Запись проверена. После перезагрузки нажмите «Проверить устройство».");
     }
 }
 

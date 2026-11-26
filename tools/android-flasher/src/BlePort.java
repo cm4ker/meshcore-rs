@@ -1,64 +1,165 @@
 package ru.ommesh.otg;
 import android.bluetooth.*;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Build;
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
 
-final class BlePort extends BluetoothGattCallback implements Ota.Port, Closeable {
+final class BlePort extends BluetoothGattCallback implements Ota.Port, Closeable, LegacyDfu.Link {
+    static final UUID DFU=UUID.fromString("00001530-1212-efde-1523-785feabcd123"),
+        CONTROL=UUID.fromString("00001531-1212-efde-1523-785feabcd123"),
+        PACKET=UUID.fromString("00001532-1212-efde-1523-785feabcd123");
     static final UUID SERVICE=UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e"),
         RX=UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),TX=UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e"),
         CCC=UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
-    final BlockingQueue<String> events=new LinkedBlockingQueue<>();
+    static final class Event {
+        final String stage;
+        final int status;
+        Event(String stage,int status){this.stage=stage;this.status=status;}
+    }
+    static final class GattFailure extends IOException {
+        final int status;
+        GattFailure(String stage,int status){
+            super("Bluetooth, "+stage+" (GATT "+status+").");
+            this.status=status;
+        }
+    }
+    final BlockingQueue<Event> events=new LinkedBlockingQueue<>();
     final BlockingQueue<byte[]> frames=new LinkedBlockingQueue<>();
-    BluetoothGatt gatt;BluetoothGattCharacteristic rx;
+    BluetoothGatt gatt;BluetoothGattCharacteristic rx,control;
     volatile boolean disconnected;volatile int mtu=23;
     BlePort(Context c,BluetoothDevice device)throws IOException {
+        this(c,device,false);
+    }
+    BlePort(Context c,BluetoothDevice device,boolean dfu)throws IOException {
         try{
             gatt=device.connectGatt(c,false,this,BluetoothDevice.TRANSPORT_LE);
             if(gatt==null)throw new IOException("Не удалось открыть Bluetooth.");
             await("connect",25000);
             if(!gatt.discoverServices())throw new IOException("Не удалось запросить службы BLE.");
             await("services",15000);
-            BluetoothGattService service=gatt.getService(SERVICE);
-            if(service==null)throw new IOException("Нет службы MeshCore UART. Откройте окно BLE-обновления на устройстве.");
-            rx=service.getCharacteristic(RX);BluetoothGattCharacteristic tx=service.getCharacteristic(TX);
-            if(rx==null||tx==null||!gatt.setCharacteristicNotification(tx,true))throw new IOException("Недоступен канал MeshCore BLE.");
-            BluetoothGattDescriptor desc=tx.getDescriptor(CCC);
-            if(desc==null)throw new IOException("Недоступны уведомления BLE.");
-            desc.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-            if(!gatt.writeDescriptor(desc))throw new IOException("Не удалось включить уведомления.");
-            await("notify",30000);
-            if(gatt.requestMtu(247))await("mtu",12000);
+            BluetoothGattService service=gatt.getService(dfu?DFU:SERVICE);
+            if(service==null)throw new IOException(dfu?"Нет службы Nordic Legacy DFU. Переведите плату в режим BLE OTA.":"Нет службы MeshCore UART. Откройте окно BLE-обновления на устройстве.");
+            rx=service.getCharacteristic(dfu?PACKET:RX);
+            BluetoothGattCharacteristic tx=service.getCharacteristic(dfu?CONTROL:TX);
+            if(dfu)control=tx;
+            if(rx==null||tx==null)throw new IOException("Недоступен канал BLE.");
+            if(!dfu && gatt.requestMtu(247))await("mtu",12000);
+            enableUpdates(c,device,tx,dfu);
             gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH);
         }catch(Exception e){close();throw new IOException(e.getMessage(),e);}
+    }
+    void enableUpdates(Context context,BluetoothDevice device,BluetoothGattCharacteristic tx,boolean dfu)throws IOException{
+        BluetoothGattDescriptor descriptor=tx.getDescriptor(CCC);
+        boolean notify=(tx.getProperties()&BluetoothGattCharacteristic.PROPERTY_NOTIFY)!=0;
+        boolean indicate=(tx.getProperties()&BluetoothGattCharacteristic.PROPERTY_INDICATE)!=0;
+        if(descriptor==null||(!notify&&!indicate)||!gatt.setCharacteristicNotification(tx,true))
+            throw new IOException("Недоступны ответы устройства по BLE.");
+        byte[] config=notify?BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE:
+            BluetoothGattDescriptor.ENABLE_INDICATION_VALUE;
+        try{
+            subscribe(descriptor,config);
+        }catch(GattFailure first){
+            boolean unsupported=first.status==BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED;
+            boolean protectedAttribute=first.status==BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION||
+                first.status==BluetoothGatt.GATT_INSUFFICIENT_ENCRYPTION;
+            boolean useIndications=unsupported&&notify&&indicate;
+            if(dfu||(!unsupported&&!protectedAttribute))throw first;
+            if(device.getBondState()!=BluetoothDevice.BOND_BONDED)waitForBond(context,device);
+            try{
+                subscribe(descriptor,useIndications?BluetoothGattDescriptor.ENABLE_INDICATION_VALUE:config);
+            }catch(GattFailure second){
+                throw new IOException("Плата отклонила подписку на ответы BLE (GATT "+second.status+
+                    "). Закройте другие подключения к плате, снова откройте Bluetooth на плате и повторите поиск.",second);
+            }
+        }
+    }
+    void subscribe(BluetoothGattDescriptor descriptor,byte[] config)throws IOException{
+        boolean sent;
+        if(Build.VERSION.SDK_INT>=33){
+            sent=gatt.writeDescriptor(descriptor,config)==BluetoothStatusCodes.SUCCESS;
+        }else{
+            sent=descriptor.setValue(config)&&gatt.writeDescriptor(descriptor);
+        }
+        if(!sent)throw new IOException("Не удалось запросить ответы устройства по BLE.");
+        await("подписка BLE",30000);
+    }
+    static void waitForBond(Context context,BluetoothDevice device)throws IOException{
+        CountDownLatch result=new CountDownLatch(1);
+        BroadcastReceiver receiver=new BroadcastReceiver(){
+            @Override public void onReceive(Context c,Intent intent){
+                BluetoothDevice other=intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                int state=intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE,BluetoothDevice.BOND_NONE);
+                if(device.equals(other)&&state!=BluetoothDevice.BOND_BONDING)result.countDown();
+            }
+        };
+        IntentFilter filter=new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+        if(Build.VERSION.SDK_INT>=33)context.registerReceiver(receiver,filter,Context.RECEIVER_EXPORTED);
+        else context.registerReceiver(receiver,filter);
+        try{
+            if(device.getBondState()==BluetoothDevice.BOND_NONE&&!device.createBond())
+                throw new IOException("Телефон не смог начать сопряжение. Откройте Bluetooth на плате и повторите попытку.");
+            if(device.getBondState()!=BluetoothDevice.BOND_BONDED)result.await(45,TimeUnit.SECONDS);
+            if(device.getBondState()!=BluetoothDevice.BOND_BONDED)
+                throw new IOException("Сопряжение не завершено. Подтвердите запрос Android и введите PIN с платы, если он запрошен.");
+        }catch(InterruptedException e){
+            Thread.currentThread().interrupt();throw new IOException(e);
+        }finally{context.unregisterReceiver(receiver);}
     }
     void await(String what,int ms)throws IOException{
         long end=System.nanoTime()+ms*1000000L;
         try{
-            while(!disconnected){String result=events.poll(Math.max(1,(end-System.nanoTime())/1000000),TimeUnit.MILLISECONDS);
+            while(!disconnected){Event result=events.poll(Math.max(1,(end-System.nanoTime())/1000000),TimeUnit.MILLISECONDS);
                 if(result==null||System.nanoTime()>end)throw new IOException("Нет ответа BLE ("+what+").");
-                if(result.equals(what))return;
-                if(result.startsWith("!"))throw new IOException(result.substring(1));
+                if(disconnected)break;
+                if(result.stage.equals(what)){
+                    if(result.status!=BluetoothGatt.GATT_SUCCESS)throw new GattFailure(what,result.status);
+                    return;
+                }
             }
         }catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException(e);}
         throw new IOException("Связь Bluetooth прервана.");
     }
-    void event(String name,int status){events.offer(status==0?name:"!Ошибка Bluetooth • "+status+" ("+name+")");}
+    void event(String name,int status){events.offer(new Event(name,status));}
     public void onConnectionStateChange(BluetoothGatt g,int status,int state){
-        if(state==BluetoothProfile.STATE_DISCONNECTED){disconnected=true;events.offer("!Устройство отключилось.");}
+        if(state==BluetoothProfile.STATE_DISCONNECTED){disconnected=true;event("disconnect",status);}
         else if(state==BluetoothProfile.STATE_CONNECTED)event("connect",status);
     }
     public void onServicesDiscovered(BluetoothGatt g,int s){event("services",s);}
-    public void onMtuChanged(BluetoothGatt g,int m,int s){if(s==0)mtu=m;events.offer("mtu");}
-    public void onDescriptorWrite(BluetoothGatt g,BluetoothGattDescriptor d,int s){event("notify",s);}
+    public void onMtuChanged(BluetoothGatt g,int m,int s){if(s==0)mtu=m;event("mtu",BluetoothGatt.GATT_SUCCESS);}
+    public void onDescriptorWrite(BluetoothGatt g,BluetoothGattDescriptor d,int s){
+        if(CCC.equals(d.getUuid()))event("подписка BLE",s);
+    }
     public void onCharacteristicWrite(BluetoothGatt g,BluetoothGattCharacteristic c,int s){event("write",s);}
     public void onCharacteristicChanged(BluetoothGatt g,BluetoothGattCharacteristic c){if(Build.VERSION.SDK_INT<33)received(c,c.getValue());}
     public void onCharacteristicChanged(BluetoothGatt g,BluetoothGattCharacteristic c,byte[] value){received(c,value);}
     void received(BluetoothGattCharacteristic c,byte[] b){
+        if(CONTROL.equals(c.getUuid())&&b!=null){frames.offer(b.clone());return;}
         if(TX.equals(c.getUuid())&&b!=null&&b.length>0&&b.length<=300)
             frames.offer(BleFrames.incoming(b));
+    }
+    public void control(byte... value)throws IOException{
+        control.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);control.setValue(value);
+        if(!gatt.writeCharacteristic(control))throw new IOException("Не удалось отправить команду DFU.");
+        try{await("write",15000);}catch(IOException e){if((value[0]!=5 && value[0]!=6)||!disconnected)throw e;}
+    }
+    public void packet(byte[] value)throws IOException{
+        rx.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);rx.setValue(value);
+        if(!gatt.writeCharacteristic(rx))throw new IOException("Не удалось отправить пакет DFU.");
+        await("write",15000);
+    }
+    public byte[] notice()throws IOException{
+        try{
+            for(int i=0;i<120;i++){
+                byte[] r=frames.poll(500,TimeUnit.MILLISECONDS);if(r!=null)return r;
+                if(disconnected)throw new IOException("Загрузчик отключился.");
+            }
+            throw new IOException("Истекло время ожидания ответа DFU.");
+        }catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException(e);}
     }
     public void write(byte[] framed)throws IOException{
         byte[] b=BleFrames.outgoing(framed);

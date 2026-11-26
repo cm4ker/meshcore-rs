@@ -12,7 +12,7 @@ same as the LoRa update of a repeater), so no LoRa airtime is used.
                                                              # Bluetooth > Add device, enter the PIN
     python ota_app.py --ble <address> --pin 123456 release.mcfw   # or pair here (Windows), with
                                                                   # the PIN `fw ble` replied
-    python ota_app.py --tcp 192.168.1.50:5000 firmware.bin
+    python ota_app.py --tcp 192.168.1.50:5000 release.mcfw
     python ota_app.py --port COM4 --info                     # what the device runs
     python ota_app.py --list                                 # serial ports, MeshCore devices on BLE
 
@@ -32,8 +32,10 @@ envelope goes first. A device that pins a root key (`fw_root` custom variable on
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import hashlib
+import json
 import math
 import pathlib
 import struct
@@ -41,6 +43,7 @@ import sys
 import time
 import zlib
 
+import firmware_catalog
 
 from meshcore_ota import (  # noqa: E402
     DEFAULT_DELTA_TOOL, ERRORS, REPO, describe_device, describe_envelope, envelope_pieces, find_base, load_firmware, log,
@@ -199,6 +202,8 @@ class TcpLink(StreamLink):
     @classmethod
     async def open(cls, hostport):
         host, port = hostport.rsplit(":", 1)
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
         reader, writer = await asyncio.open_connection(host, int(port))
         return cls(reader, writer)
 
@@ -277,6 +282,29 @@ async def open_link(args):
     return await TcpLink.open(args.tcp)
 
 
+async def read_device(link):
+    dev = await link.request(bytes([CMD_DEVICE_QUERY, 3]))
+    model = dev[19:59].split(b"\0")[0].decode(errors="replace")
+    version = dev[59:79].split(b"\0")[0].decode(errors="replace")
+    info = await link.request(bytes([OTA_INFO]))
+    if len(info) < 5:
+        raise ValueError("Плата вернула неполные сведения об обновлении.")
+    capacity = struct.unpack_from("<I", info, 1)[0] if info[0] else 0
+    _, _, running = info[5:].partition(b"\0")
+    return firmware_catalog.device_summary(model, version, capacity, running), running
+
+
+async def probe(args):
+    link = await open_link(args)
+    try:
+        device, _ = await read_device(link)
+        if args.tcp:
+            device["tcp"] = True
+        return device
+    finally:
+        await link.close()
+
+
 async def running_sha8(args):
     """The start of the SHA-256 of the image the device runs, asked again after its reboot."""
     for _ in range(6):
@@ -320,7 +348,7 @@ async def list_devices():
         print("  none (a repeater advertises only while its update window is open: `fw ble`)")
 
 
-async def main():
+async def main(argv=None):
     ap = argparse.ArgumentParser(description=" ".join(__doc__.split("\n\n")[0].split()))
     ap.add_argument("image", nargs="?", help="release .mcfw, delta .mcfd, or image .bin")
     link_args = ap.add_mutually_exclusive_group()
@@ -334,21 +362,56 @@ async def main():
     ap.add_argument("--raw", action="store_true",
                     help="send the whole image uncompressed: the device only checks it at the end (slow, but "
                     "it gets firmware whose commit of a compressed update fails onto a new one)")
-    ap.add_argument("--info", action="store_true", help="only show the device and the image it runs")
-    ap.add_argument("--list", action="store_true", help="list the serial ports and the MeshCore devices on BLE")
-    args = ap.parse_args()
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--info", action="store_true", help="only show the device and the image it runs")
+    mode.add_argument("--list", action="store_true", help="list the serial ports and the MeshCore devices on BLE")
+    mode.add_argument("--device-json", action="store_true", help="show the device information as JSON")
+    mode.add_argument("--catalog", action="store_true", help="show releases for the selected device as JSON")
+    mode.add_argument("--download-release", help="download a catalog asset (base64-encoded JSON)")
+    ap.add_argument("--download-dir", type=pathlib.Path, help="directory for the downloaded release")
+    ap.add_argument("--uf2-board", help="with --catalog: list UF2 files for this board")
+    ap.add_argument("--uf2-role", choices=("companion", "repeater"))
+    args = ap.parse_args(argv)
     if args.list:
         return await list_devices()
+    if args.download_release:
+        if not args.download_dir:
+            ap.error("--download-release requires --download-dir")
+        try:
+            asset = json.loads(base64.b64decode(args.download_release, validate=True))
+            path = await asyncio.to_thread(firmware_catalog.download, asset, args.download_dir)
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            sys.exit(str(exc))
+        print(json.dumps({"path": str(path)}, ensure_ascii=False))
+        return
+    if args.catalog and args.uf2_board:
+        try:
+            device = firmware_catalog.uf2_target(args.uf2_board, args.uf2_role)
+            result = await asyncio.to_thread(firmware_catalog.catalog, device)
+        except (OSError, ValueError) as exc:
+            sys.exit(str(exc))
+        print(json.dumps(result, ensure_ascii=False))
+        return
     if not (args.port or args.ble or args.tcp):
         ap.error("say how to reach the device: --port, --ble or --tcp (--list shows what is there)")
+    if args.catalog or args.device_json:
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                device = await probe(args)
+                result = await asyncio.to_thread(firmware_catalog.catalog, device) if args.catalog else device
+        except (OSError, ValueError) as exc:
+            sys.exit(str(exc))
+        print(json.dumps(result, ensure_ascii=False))
+        return
     if not args.info and not args.image:
         ap.error("an image is required (or --info)")
+    if args.tcp and args.image and pathlib.Path(args.image).suffix.lower() not in (".mcfw", ".mcfd"):
+        ap.error("Через Wi-Fi / TCP можно установить только подписанный .mcfw или .mcfd.")
 
     link = await open_link(args)
     try:
-        dev = await link.request(bytes([CMD_DEVICE_QUERY, 3]))
-        model = dev[19:59].split(b"\0")[0].decode(errors="replace")
-        version = dev[59:79].split(b"\0")[0].decode(errors="replace")
+        device, running = await read_device(link)
+        model, version, capacity = device["model"], device["version"], device["capacity"]
         log(f"device: {model}, firmware {version}")
         board = ("xiao-c6" if "Xiao" in model else "t-echo" if "T-Echo" in model
                  else "promicro" if "ProMicro" in model else "heltec")
@@ -358,11 +421,8 @@ async def main():
         after = ("it installs the image and restarts, on trial from 0.9.0-dev.4 on" if board == "t-echo"
                  else "on trial until it has run healthy for 2 minutes")
 
-        info = await link.request(bytes([OTA_INFO]))
-        if not info[0]:
+        if not capacity:
             sys.exit("the device has no update slot (single-slot partition table?)")
-        capacity = struct.unpack_from("<I", info, 1)[0]
-        _, _, running = info[5:].partition(b"\0")
         log(f"update slot {capacity // 1024} KiB")
         if len(running) >= 12:
             run_len, run_sha8 = struct.unpack_from("<I", running)[0], running[4:12]
@@ -373,6 +433,8 @@ async def main():
         repeater = len(running) >= 19 and running[13] == 1
         if args.info:
             return
+        if args.tcp and not roots:
+            sys.exit("Для Wi-Fi / TCP плата должна доверять ключу подписанного выпуска.")
 
         is_delta = pathlib.Path(args.image).suffix.lower() == ".mcfd"
         if is_delta:
@@ -383,6 +445,8 @@ async def main():
             sha = hashlib.sha256(image).digest()
         if len(running) >= 12 and running[4:12] == sha[:8]:
             sys.exit("the device already runs this image")
+        if args.tcp and not envelope:
+            sys.exit("Через Wi-Fi / TCP нужен подписанный выпуск .mcfw или .mcfd.")
         if envelope:
             log(describe_envelope(envelope))
         elif roots:

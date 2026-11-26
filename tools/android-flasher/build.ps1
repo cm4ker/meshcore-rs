@@ -1,7 +1,21 @@
-param([Parameter(Mandatory)][string]$ToolRoot,[Parameter(Mandatory)][string]$KeyStore,[Parameter(Mandatory)][string]$PasswordFile)
+param(
+    [Parameter(Mandatory)][string]$ToolRoot,
+    [Parameter(Mandatory)][string]$KeyStore,
+    [Parameter(Mandatory)][string]$PasswordFile,
+    [string]$OutputPath
+)
 $ErrorActionPreference='Stop'
+$ToolRoot=(Resolve-Path -LiteralPath $ToolRoot).Path
+$KeyStore=(Resolve-Path -LiteralPath $KeyStore).Path
+$PasswordFile=(Resolve-Path -LiteralPath $PasswordFile).Path
+if($OutputPath){$OutputPath=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)}
 Push-Location $PSScriptRoot
 try{
+if(!$OutputPath){
+    $manifest=[xml](Get-Content -LiteralPath AndroidManifest.xml -Raw)
+    $version=$manifest.manifest.GetAttribute('versionName','http://schemas.android.com/apk/res/android')
+    $OutputPath="build/ota-app-$version-Android.apk"
+}
 $jdk=(Get-ChildItem -LiteralPath $ToolRoot -Directory -Filter 'jdk-*'|Select -First 1).FullName
 $env:JAVA_HOME=$jdk
 $env:Path="$jdk\bin;$env:Path"
@@ -37,8 +51,8 @@ try {
 } finally {$archive.Dispose()}
 & "$bt/zipalign.exe" -f -p 4 build/release/unsigned.apk build/release/aligned.apk
 if($LASTEXITCODE){exit $LASTEXITCODE}
-& "$bt/apksigner.bat" sign --v4-signing-enabled false --ks $KeyStore --ks-pass "file:$PasswordFile" --out build/ota-app-1.2-Android.apk build/release/aligned.apk
+& "$bt/apksigner.bat" sign --v4-signing-enabled false --ks $KeyStore --ks-pass "file:$PasswordFile" --out $OutputPath build/release/aligned.apk
 if($LASTEXITCODE){exit $LASTEXITCODE}
-& "$bt/apksigner.bat" verify --verbose --print-certs build/ota-app-1.2-Android.apk
+& "$bt/apksigner.bat" verify --verbose --print-certs $OutputPath
 exit $LASTEXITCODE
 }finally{Pop-Location}

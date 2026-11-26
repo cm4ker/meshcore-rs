@@ -48,15 +48,28 @@ final class Ota {
     }
     static final class Device {
         int runningSize, capacity, board=-1,role=-1,build,roots; byte[] hash;
+        String model="",version="";
+
+        String summary() {
+            String identity=model.isEmpty()?"Устройство MeshCore":model;
+            if(!version.isEmpty())identity+=" · "+version;
+            String details=board>=0?"Сборка №"+(build&0xffffffffL)+" · ":"";
+            if(role==1)details+="Репитер · ";
+            if(role==2)details+="Компаньон · ";
+            return identity+"\n"+details+"слот "+capacity/1024+" КиБ";
+        }
     }
     Device info() throws IOException {
         byte[] dev=request(22,new byte[]{3},10000);
         need(dev.length>=59,"Неполный ответ с моделью устройства.");
-        log.show(field(dev,19,59)+" · "+field(dev,59,79));
+        Device d=new Device();
+        d.model=field(dev,19,59);
+        d.version=field(dev,59,79);
+        log.show(d.model+" · "+d.version);
         byte[] a=request(0xf5,new byte[0],15000);
         need(a.length>=5,"Плата не вернула параметры OTA.");
         need(a[0]!=0,"У устройства нет слота обновления.");
-        Device d=new Device();d.capacity=i32(a,1);
+        d.capacity=i32(a,1);
         int k=5;while(k<a.length&&a[k]!=0)k++;k++;
         if(a.length-k>=12){d.runningSize=i32(a,k);d.hash=Arrays.copyOfRange(a,k+4,k+12);}
         if(a.length-k>=19){d.board=a[k+12]&255;d.role=a[k+13]&255;d.build=i32(a,k+14);d.roots=a[k+18]&255;log.show("Сборка №"+d.build+" · слот "+d.capacity/1024+" КиБ");}
@@ -161,7 +174,7 @@ final class Ota {
         log.show("Плата проверяет полученный образ…");
         byte[] commit;
         try {commit=request(0xf3,new byte[0],120000);}
-        catch(IOException lost){throw new IOException("Ответ после записи не получен. После перезагрузки нажмите «Версия устройства» и сверьте сборку.",lost);}
+        catch(IOException lost){throw new IOException("Ответ после записи не получен. После перезагрузки нажмите «Проверить устройство» и сверьте сборку.",lost);}
         accepted(commit,"Завершение OTA");
         log.show("Плата подтвердила запись. Дождитесь перезагрузки.");
     }

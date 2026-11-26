@@ -5,10 +5,10 @@ Invoke-WebRequest https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-w
 Expand-Archive python.zip engine
 python -m pip install --no-compile --target engine -r requirements.txt
 if($LASTEXITCODE){exit $LASTEXITCODE}
-Copy-Item usb_flash.py,ota_app.py,meshcore_ota.py,*.csv engine
+Copy-Item usb_flash.py,ota_app.py,meshcore_ota.py,firmware_catalog.py,nrf_flash.py,*.csv engine
 & .\engine\python.exe -X utf8 .\engine\ota_app.py --help
 if($LASTEXITCODE){exit $LASTEXITCODE}
-& .\engine\python.exe -c "import usb_flash,bleak.backends.winrt.client,struct; assert struct.calcsize('P')==4"
+& .\engine\python.exe -c "import usb_flash,firmware_catalog,nrf_flash,bleak.backends.winrt.client,struct; assert struct.calcsize('P')==4"
 if($LASTEXITCODE){exit $LASTEXITCODE}
 [IO.Compression.ZipFile]::CreateFromDirectory("$root\engine","$root\engine.zip")
 $lib=(Get-ChildItem "$env:WINDIR\Microsoft.NET\assembly\GAC_MSIL\System.Management.Automation" -Recurse -Filter System.Management.Automation.dll|Select-Object -First 1).FullName

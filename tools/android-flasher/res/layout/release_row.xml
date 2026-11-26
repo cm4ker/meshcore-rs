@@ -1,0 +1,15 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:orientation="vertical" android:minHeight="48dp" android:padding="10dp"
+    android:background="@drawable/field" android:foreground="?android:attr/selectableItemBackground"
+    android:focusable="true" android:clickable="true">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:gravity="center_vertical" android:orientation="horizontal">
+        <TextView android:id="@+id/release_version" style="@style/SectionTitle"
+            android:layout_width="0dp" android:layout_weight="1" android:textSize="15sp" />
+        <TextView style="@style/FieldLabel" android:layout_width="wrap_content" android:layout_marginBottom="0dp"
+            android:layout_marginStart="6dp" android:text="Скачать" android:textColor="@color/accent" />
+    </LinearLayout>
+    <TextView android:id="@+id/release_details" style="@style/Body" android:layout_marginTop="3dp" />
+    <TextView android:id="@+id/release_note" style="@style/Body" android:visibility="gone" />
+</LinearLayout>
