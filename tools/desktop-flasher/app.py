@@ -551,6 +551,7 @@ class Flasher:
             tree.selection_set(str(recommended))
         tree.bind("<Double-1>", lambda _: download())
         toggle()
+        dialog.update_idletasks()
         dialog.grab_set()
 
 
@@ -569,5 +570,11 @@ if __name__ == "__main__":
         ui.method.current(3)
         ui.changed()
         assert file_formats(ui.method.get()) == (".uf2",)
+        ui.show_catalog({"device": {"summary": "Heltec T114 · Компаньон"}, "recommended": 0,
+                         "assets": [{"tag": "v0.9.0-r194", "format": ".uf2", "base": 0,
+                                     "size": 549888, "issue": "", "prerelease": False}]})
+        dialog = root.grab_current()
+        assert isinstance(dialog, tk.Toplevel)
+        dialog.destroy()
         root.after(100, root.destroy)
     root.mainloop()

@@ -81,9 +81,11 @@ jobs:
         shell: bash
         env:
           PACKAGE: ${{ matrix.package }}
-        run: mv "out/MeshCore-$PACKAGE" "out/ota-app-$OTA_APP_VERSION-$PACKAGE"
+        run: |
+          mkdir -p release-packages
+          cp "out/MeshCore-$PACKAGE" "release-packages/ota-app-$OTA_APP_VERSION-$PACKAGE"
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.arch }}
-          path: tools/desktop-flasher/out/ota-app-${{ env.OTA_APP_VERSION }}-${{ matrix.package }}
+          path: tools/desktop-flasher/release-packages/ota-app-${{ env.OTA_APP_VERSION }}-${{ matrix.package }}
           if-no-files-found: error
