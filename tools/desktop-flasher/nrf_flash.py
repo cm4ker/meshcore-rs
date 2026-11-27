@@ -12,6 +12,8 @@ import struct
 import sys
 import zipfile
 
+from meshcore_ota import cli_progress
+
 
 BOARDS = {
     "heltec-t096": "Heltec T096",
@@ -194,7 +196,7 @@ def inspect_uf2_drive(root):
     return {"model": model or board_id, "board": board, "version": version[1], "softdevice": softdevice}
 
 
-def write_uf2(path, root, board=None, log=print):
+def write_uf2(path, root, board=None, log=print, *, progress=None):
     """Validate the selected volume and copy the original UF2 bytes to it."""
     raw, _ = _read_uf2(path)
     root = Path(root).resolve(strict=True)
@@ -204,11 +206,15 @@ def write_uf2(path, root, board=None, log=print):
     last = 0
     try:
         with (root / "UPDATE.UF2").open("xb", buffering=0) as output:
+            if progress:
+                progress(0, len(raw))
             while written < len(raw):
                 count = output.write(raw[written:written + 16 * 1024])
                 if not count:
                     raise OSError("Диск перестал принимать данные.")
                 written += count
+                if progress:
+                    progress(written, len(raw))
                 percent = written * 100 // len(raw)
                 if percent // 10 > last:
                     last = percent // 10
@@ -245,7 +251,7 @@ def _receipt(reply, sent):
         raise OSError(f"Передано {sent} байт, загрузчик подтвердил {received}.")
 
 
-async def _transfer_legacy(image, control, packet, notice, log):
+async def _transfer_legacy(image, control, packet, notice, log, *, progress=None):
     async def response(command, reply=None):
         if reply is None:
             reply = await notice()
@@ -269,6 +275,9 @@ async def _transfer_legacy(image, control, packet, notice, log):
     # An acknowledgement after every packet lets small bootloader queues keep up.
     await control(b"\x08\x01\x00")
     await control(b"\x03")
+    if progress:
+        progress(0, len(image))
+    last_reported_percent = 0
     last = 0
     for offset in range(0, len(image), 20):
         payload = image[offset:offset + 20]
@@ -281,6 +290,9 @@ async def _transfer_legacy(image, control, packet, notice, log):
                 raise OSError(f"Загрузчик завершил приём после {sent} байт.")
             _receipt(reply, sent)
         percent = sent * 100 // len(image)
+        if progress and sent < len(image) and percent > last_reported_percent:
+            last_reported_percent = percent
+            progress(sent, len(image))
         if percent // 10 > last:
             last = percent // 10
             log(f"Передано {percent} %")
@@ -290,6 +302,8 @@ async def _transfer_legacy(image, control, packet, notice, log):
         _receipt(reply, len(image))
         reply = await notice()
     await response(3, reply)
+    if progress:
+        progress(len(image), len(image))
     await control(b"\x04")
     await response(4)
     log("Загрузчик подтвердил образ.")
@@ -297,7 +311,7 @@ async def _transfer_legacy(image, control, packet, notice, log):
     log("Отправлена команда перезагрузки. Проверьте версию после запуска платы.")
 
 
-async def install_dfu(address, path, board, log=print):
+async def install_dfu(address, path, board, log=print, *, progress=None):
     from bleak import BleakClient, BleakScanner
     from bleak.exc import BleakError
 
@@ -354,7 +368,7 @@ async def install_dfu(address, path, board, log=print):
                 raise OSError("Загрузчик отключился.")
             return reply
 
-        await _transfer_legacy(image, control, packet, notice, log)
+        await _transfer_legacy(image, control, packet, notice, log, progress=progress)
 
 
 def main():
@@ -374,15 +388,16 @@ def main():
     export.add_argument("path")
     export.add_argument("output")
     args = parser.parse_args()
+    progress = cli_progress()
     try:
         if args.command == "scan":
             print(json.dumps(asyncio.run(scan_dfu()), ensure_ascii=False))
         elif args.command == "inspect":
             print(json.dumps(inspect_uf2_drive(args.root), ensure_ascii=False))
         elif args.command == "dfu":
-            asyncio.run(install_dfu(args.address, args.path, args.board))
+            asyncio.run(install_dfu(args.address, args.path, args.board, progress=progress))
         elif args.command == "write":
-            write_uf2(args.path, args.root, args.board)
+            write_uf2(args.path, args.root, args.board, progress=progress)
         elif args.command == "export":
             export_dfu_zip(args.path, args.output)
             print("DFU ZIP сохранён.")

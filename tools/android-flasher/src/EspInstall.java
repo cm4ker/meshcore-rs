@@ -76,13 +76,19 @@ class EspInstall {
         need(Arrays.equals(md5(bytes),command(0x13,ints(addr,bytes.length,0,0),0,30000)),"Содержимое флеш-памяти не прошло проверку.");
     }
     void write(int addr,byte[] bytes)throws Exception{
+        write(addr,bytes,Progress.NONE);
+    }
+    void write(int addr,byte[] bytes,Progress progress)throws Exception{
         final int block=4096,n=(bytes.length+block-1)/block;
         command(2,ints(bytes.length,n,block,addr),0,30000);
+        progress.update("Запись образа ESP",0,n);
         for(int i=0;i<n;i++){
             byte[] b=new byte[block];Arrays.fill(b,(byte)0xff);System.arraycopy(bytes,i*block,b,0,Math.min(block,bytes.length-i*block));
             command(3,join(ints(block,i,0,0),b),xor(b),15000);
+            progress.update("Запись образа ESP",i+1,n);
             if(n>1&&(i+1)%32==0)log.show("Запись: "+(i+1)*100/n+" %");
         }
+        progress.update("Проверка образа ESP",n,n);
         verify(addr,bytes);
     }
     static byte[] validate(byte[] file,int board,int chip)throws Exception{
@@ -115,12 +121,17 @@ class EspInstall {
     }
     static int seqCrc(int x){int crc=0;for(int i=0;i<4;i++){crc^=(x>>>(8*i))&255;for(int j=0;j<8;j++)crc=(crc>>>1)^((crc&1)!=0?0xedb88320:0);}return ~crc;}
     void install(byte[] file,Ota.Device d,boolean clean)throws Exception{
+        install(file,d,clean,Progress.NONE);
+    }
+    void install(byte[] file,Ota.Device d,boolean clean,Progress progress)throws Exception{
         String board=d.board==8?"t3s3":d.board==1?"heltec-v4":d.board==2?"heltec-v3":d.board==3?"xiao-c6":d.board==6?"heltec-paper":null;
         need(board!=null,"Эта ESP-плата не поддерживается загрузчиком.");
         int chip=d.board==3?13:9;
         byte[] app=validate(file,d.board,chip);
         try{
+            progress.update("Вход в загрузчик ESP",0,app.length);
             log.show("Вход в загрузчик "+board+"…");startBoot(chip,chip==9?"esp32s3":"esp32c6");
+            progress.update("Проверка разделов ESP",0,app.length);
             Map<String,int[]> pt=layout(read(0x8000,4096),board);int meta=pt.get("otadata")[0];
             byte[] records=read(meta,8192);long best=0;int sector=1;
             for(int s=0;s<2;s++){int p=s*4096,q=i32(records,p),state=i32(records,p+24);
@@ -130,8 +141,10 @@ class EspInstall {
             int[] old=pt.get("ota_"+active),next=pt.get("ota_"+(1-active));
             need(d.runningSize>0&&d.runningSize<=old[1]&&app.length<=next[1],"Неверный размер раздела или прошивки.");
             need(Arrays.equals(Arrays.copyOf(digest(read(old[0],d.runningSize)),8),d.hash),"Активный слот не подтверждён.");
-            write(next[0],app);
+            write(next[0],app,progress);
+            if(clean)progress.update("Очистка данных ноды",app.length,app.length);
             if(clean)for(String key:new String[]{"nvs","meshcore","companion"}){int[] x=pt.get(key);log.show("Очистка "+key+"…");command(0xd1,ints(x[0],x[1]),0,60000);byte[] blank=new byte[x[1]];Arrays.fill(blank,(byte)0xff);verify(x[0],blank);}
+            progress.update("Выбор нового слота ESP",app.length,app.length);
             int seq=(int)(best+1);byte[] flag=new byte[32];Arrays.fill(flag,(byte)0xff);ByteBuffer b=ByteBuffer.wrap(flag).order(ByteOrder.LITTLE_ENDIAN);
             b.putInt(0,seq).putInt(24,2).putInt(28,seqCrc(seq));write(meta+(1-sector)*4096,flag);
         }finally{wire.dtr(false);wire.rts(true);Thread.sleep(200);wire.rts(false);}

@@ -1,9 +1,11 @@
 """Local ESP serial installation for two-slot meshcore-rs boards."""
 import argparse
 import asyncio
+from contextlib import nullcontext, redirect_stdout
 import csv
 import hashlib
 import pathlib
+import re
 import struct
 import sys
 import tempfile
@@ -12,7 +14,7 @@ import zlib
 import esptool
 from esptool.bin_image import LoadFirmwareImage
 from ota_app import SerialLink, OTA_INFO, running_sha8
-from meshcore_ota import BOARDS
+from meshcore_ota import BOARDS, cli_progress
 
 ROOT = pathlib.Path(__file__).parent
 CHIPS = {"t3s3": ("ESP32-S3", 9), "heltec-v3": ("ESP32-S3", 9),
@@ -96,15 +98,44 @@ def next_slot(records):
     return (seq-1) % 2, 1-sector, seq+1
 
 
-def write_verified(stub, chip, offset, path):
-    esptool.main(["--chip", chip.lower().replace("-", ""), "--no-stub", "--after", "no_reset_stub",
-                  "write_flash", "--compress", hex(offset), str(path)], esp=stub)
+class EspWriteOutput:
+    """Forward esptool 4.8's text while relaying its write progress to the GUI."""
+
+    def __init__(self, stream, progress):
+        self.stream = stream
+        self.progress = progress
+        self.previous_step = 0
+
+    def write(self, data):
+        step = re.fullmatch(r"Writing at 0x[0-9a-f]+\.\.\. \((\d{1,3}) %\)", data.strip())
+        if step:
+            # esptool prints a block before sending it, so report the previous one.
+            percent = int(step[1])
+            if self.previous_step and percent >= self.previous_step:
+                self.progress(self.previous_step, 100)
+            self.previous_step = percent
+        return self.stream.write(data)
+
+    def flush(self):
+        self.stream.flush()
+
+    def isatty(self):
+        return False
+
+
+def write_verified(stub, chip, offset, path, *, progress=None):
+    output = redirect_stdout(EspWriteOutput(sys.stdout, progress)) if progress else nullcontext()
+    with output:
+        esptool.main(["--chip", chip.lower().replace("-", ""), "--no-stub", "--after", "no_reset_stub",
+                      "write_flash", "--compress", hex(offset), str(path)], esp=stub)
     data = path.read_bytes()
     require(stub.flash_md5sum(offset, len(data)).lower() == hashlib.md5(data).hexdigest(),
             "Контрольная сумма записанных данных не совпала.")
+    if progress:
+        progress(100, 100)
 
 
-def install(args):
+def install(args, *, progress=None):
     board, running_size, running_hash = asyncio.run(identify(args.port))
     require(board in CHIPS, f"Неподдерживаемая модель: {board}.")
     chip = CHIPS[board][0]
@@ -137,7 +168,9 @@ def install(args):
             print(f"Проверено: {board}, слот ota_{1-active}, {len(image)} байт.", flush=True)
             if args.check:
                 return
-            write_verified(stub, chip, target[2], app)
+            if progress:
+                progress(0, 100)
+            write_verified(stub, chip, target[2], app, progress=progress)
             if args.new_node:
                 for name in ("nvs", "meshcore", "companion"):
                     _, _, address, size = parts[name]
@@ -168,7 +201,7 @@ if __name__ == "__main__":
     parser.add_argument("--check", action="store_true")
     parser.add_argument("image", type=pathlib.Path)
     try:
-        install(parser.parse_args())
+        install(parser.parse_args(), progress=cli_progress())
     except Exception as exc:
         sys.exit(str(exc))
 

@@ -45,6 +45,9 @@ public class MainActivity extends Activity {
     Spinner method, dfuModel;
     EditText host;
     ProgressBar progress;
+    View operationProgress;
+    TextView progressStage, progressPercent;
+    boolean trackingProgress;
     Button flashUsb, resetNode, exportDfu;
     LegacyPackage pendingExport;
     TextView guide;
@@ -77,7 +80,7 @@ public class MainActivity extends Activity {
             if(!PERMISSION.equals(event.getAction())||pending==null)return;
             UsbDevice target=pending; pending=null;
             if(usb.hasPermission(target))runOperation(target,requested);
-            else{line("Доступ к USB не предоставлен.");idle();}
+            else{line("Доступ к USB не предоставлен.");failProgress();idle();}
         }
     };
     final BroadcastReceiver devicesReceiver=new BroadcastReceiver(){
@@ -93,7 +96,7 @@ public class MainActivity extends Activity {
             }
             if(!busy&&mode()==0)refresh();
             else if(pending!=null&&!usb.getDeviceList().containsKey(pending.getDeviceName())){
-                pending=null;line("Устройство отключено.");idle();
+                pending=null;line("Устройство отключено.");failProgress();idle();
             }
         }
     };
@@ -163,6 +166,8 @@ public class MainActivity extends Activity {
         deviceLabel=view("device_label");deviceDetails=view("device_details");
         modelLabel=view("model_label");guide=view("guide");
         fileName=view("file_name");fileHint=view("file_hint");status=view("status");progress=view("progress");
+        operationProgress=view("operation_progress");
+        progressStage=view("progress_stage");progressPercent=view("progress_percent");
         previousStatus=view("previous_status");
         host=view("host");
         host.setText(getPreferences(0).getString("host",""));
@@ -274,8 +279,6 @@ public class MainActivity extends Activity {
         clearFile.setEnabled(!busy);
         clearFile.setVisibility(file==null?View.GONE:View.VISIBLE);
         releases.setEnabled(!busy&&(dfu?board!=null:(connected||checkDrive)));
-        progress.setVisibility(busy||scanning?View.VISIBLE:View.GONE);
-
         String mismatch=dfu?dfuFirmwareIssue(board):
             usbUf2&&uf2Drive!=null?dfuFirmwareIssue(uf2Drive.info.board):"";
         fileHint.setText(mismatch);
@@ -375,6 +378,7 @@ public class MainActivity extends Activity {
         final Uri source=file;
         final String name=displayName;
         busy=true;controls();
+        beginProgress("Подготовка DFU-пакета");
         new Thread(()->{
             try{
                 LegacyPackage pkg=LegacyPackage.fromUf2(readFile(source));
@@ -384,9 +388,9 @@ public class MainActivity extends Activity {
                     Intent out=new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/zip");
                     out.addCategory(Intent.CATEGORY_OPENABLE);
                     out.putExtra(Intent.EXTRA_TITLE,name.substring(0,name.length()-4)+"-dfu.zip");
-                    try{startActivityForResult(out,EXPORT_DFU);}catch(RuntimeException ex){pendingExport=null;line(ex.toString());idle();}
+                    try{startActivityForResult(out,EXPORT_DFU);}catch(RuntimeException ex){pendingExport=null;line(ex.toString());failProgress();idle();}
                 });
-            }catch(Exception ex){line("Ошибка: "+ex.getMessage());runOnUiThread(()->{if(!isDestroyed())idle();});}
+            }catch(Exception ex){line("Ошибка: "+ex.getMessage());runOnUiThread(()->{if(!isDestroyed()){failProgress();idle();}});}
         },"DFU-package").start();
     }
     @Override protected void onActivityResult(int request,int result,Intent data){
@@ -398,9 +402,10 @@ public class MainActivity extends Activity {
         }
         if(request==EXPORT_DFU){
             final LegacyPackage pkg=pendingExport;pendingExport=null;
-            if(result!=RESULT_OK||data==null||data.getData()==null){idle();return;}
+            if(result!=RESULT_OK||data==null||data.getData()==null){clearProgress();idle();return;}
             final Uri dest=data.getData(), source=file;
             busy=true;controls();
+            beginProgress("Сохранение DFU-пакета");
             new Thread(()->{
                 try{
                     LegacyPackage ready=pkg!=null?pkg:LegacyPackage.fromUf2(readFile(source));
@@ -409,7 +414,11 @@ public class MainActivity extends Activity {
                         ready.save(out);
                     }
                     line("DFU-пакет сохранён.");
-                }catch(Exception e){line("Ошибка сохранения: "+e.getMessage());}
+                    runOnUiThread(()->{if(!isDestroyed())finishProgress("DFU-пакет сохранён");});
+                }catch(Exception e){
+                    line("Ошибка сохранения: "+e.getMessage());
+                    runOnUiThread(()->{if(!isDestroyed())failProgress();});
+                }
                 finally{runOnUiThread(()->{if(!isDestroyed())idle();});}
             },"DFU-save").start();
             return;
@@ -422,6 +431,7 @@ public class MainActivity extends Activity {
             }
             file=selected;
             showFile();
+            clearProgress();
             controls();
         }
     }
@@ -440,10 +450,59 @@ public class MainActivity extends Activity {
     }
 
     void resetStatus(){
+        clearProgress();
         lastMessage="";
         previousStatus.setText("");
         previousStatus.setVisibility(View.GONE);
         status.setText("Готово к работе");
+    }
+
+    void clearProgress(){
+        trackingProgress=false;
+        operationProgress.setVisibility(View.GONE);
+    }
+
+    void beginProgress(String stage){
+        trackingProgress=true;
+        showProgress(stage,0);
+        operationProgress.setVisibility(View.VISIBLE);
+    }
+
+    void showProgress(String stage,int percent){
+        progressStage.setText(stage);
+        progressPercent.setText(percent+" %");
+        progress.setProgress(percent);
+    }
+
+    Ota.Progress reportProgress(){
+        return new Ota.Progress(){
+            int lastPercent=0;
+            String lastStage="";
+
+            public void update(String stage,int completed,int total){
+                int percent=total<=0?0:(int)Math.min(99,100L*completed/total);
+                // A retry can report fewer accepted units. Keep the last confirmed display.
+                final int confirmed=Math.max(lastPercent,percent);
+                if(confirmed==lastPercent&&stage.equals(lastStage))return;
+                lastPercent=confirmed;
+                lastStage=stage;
+                runOnUiThread(()->{
+                    if(!isDestroyed()&&trackingProgress)showProgress(stage,confirmed);
+                });
+            }
+        };
+    }
+
+    void finishProgress(String stage){
+        if(!trackingProgress)return;
+        trackingProgress=false;
+        showProgress(stage,100);
+    }
+
+    void failProgress(){
+        if(!trackingProgress)return;
+        trackingProgress=false;
+        progressStage.setText("Ошибка · "+progressStage.getText());
     }
 
     void line(String message){
@@ -474,6 +533,7 @@ public class MainActivity extends Activity {
         if(busy)return;
         for(String perm:blePermissions())if(checkSelfPermission(perm)!=PackageManager.PERMISSION_GRANTED){requestPermissions(blePermissions(),42);return;}
         stopScan();
+        clearProgress();
         try{
             BluetoothManager m=(BluetoothManager)getSystemService(BLUETOOTH_SERVICE);
             if(m==null||m.getAdapter()==null||!m.getAdapter().isEnabled()){line("Включите Bluetooth и повторите поиск.");return;}
@@ -528,7 +588,6 @@ public class MainActivity extends Activity {
     void stopScan(){
         if(scanning&&scanner!=null&&callback!=null)try{scanner.stopScan(callback);}catch(RuntimeException ignored){}
         scanning=false;
-        progress.setVisibility(busy?View.VISIBLE:View.GONE);
     }
     @Override public void onRequestPermissionsResult(int req,String[] perms,int[] results){
         super.onRequestPermissionsResult(req,perms,results);
@@ -656,11 +715,12 @@ public class MainActivity extends Activity {
         final Uri source=file;
         final String name=displayName;
         busy=true;controls();startReport("Запись UF2 на USB-диск…");
+        beginProgress("Подготовка UF2");
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         new Thread(()->{
             Uri installed=null;
             try{
-                drive.write(getContentResolver(),name,readFile(source),this::line);
+                drive.write(getContentResolver(),name,readFile(source),this::line,reportProgress());
                 installed=source;
                 line("UF2 записан. Дождитесь перезагрузки платы.");
             }catch(Exception e){line("USB UF2. "+e.getMessage());}
@@ -677,13 +737,14 @@ public class MainActivity extends Activity {
 
     void permission(UsbDevice target,String op){
         busy=true;controls();startReport("Подключение по USB…");getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if(!op.equals("info")&&!op.equals("catalog"))beginProgress("Подключение по USB");
         if(usb.hasPermission(target)){runOperation(target,op);return;}
         pending=target;requested=op;
         try {
             PendingIntent grant=PendingIntent.getBroadcast(this,target.getDeviceId(),new Intent(PERMISSION).setPackage(getPackageName()),
                 PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);
             usb.requestPermission(target,grant);
-        }catch(RuntimeException e){pending=null;line(e.toString());idle();}
+        }catch(RuntimeException e){pending=null;line(e.toString());failProgress();idle();}
     }
     byte[] readFile(Uri selected)throws IOException{
         try(InputStream in=getContentResolver().openInputStream(selected);ByteArrayOutputStream out=new ByteArrayOutputStream()){
@@ -695,6 +756,7 @@ public class MainActivity extends Activity {
     }
     void sendDfu(BluetoothDevice device){
         stopScan();busy=true;controls();startReport("Подготовка UF2…");getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        beginProgress("Подготовка UF2");
         final Uri selected=file;
         new Thread(()->{
             boolean installed=false;
@@ -702,7 +764,7 @@ public class MainActivity extends Activity {
                 LegacyPackage pkg=LegacyPackage.fromUf2(readFile(selected));
                 line("Подготовлен образ приложения: "+pkg.image.length+" байт.");
                 try(BlePort port=new BlePort(this,device,true)){
-                    LegacyDfu.send(port,pkg,this::line);
+                    LegacyDfu.send(port,pkg,this::line,reportProgress());
                     installed=true;
                 }
             }catch(Exception e){line("Ошибка DFU: "+e.getMessage());}
@@ -712,6 +774,7 @@ public class MainActivity extends Activity {
     void wireless(BluetoothDevice dev,String address,String op){
         boolean flashing=op.equals("update");
         stopScan();busy=true;controls();startReport("Подключение к плате…");getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if(flashing)beginProgress("Подключение к плате");
         if(dev==null)getPreferences(0).edit().putString("host",address).apply();
         final Uri selected=file;
         final FirmwareFormat format=FirmwareFormat.fromName(displayName);
@@ -725,7 +788,7 @@ public class MainActivity extends Activity {
                 try(Closeable session=(Closeable)transport){
                     Ota ota=new Ota(transport,this::line);
                     if(flashing){
-                        ota.update(image,format==FirmwareFormat.MCFD);
+                        ota.update(image,format==FirmwareFormat.MCFD,reportProgress());
                         installed=true;
                     }else detected=ota.info();
                 }
@@ -759,10 +822,10 @@ public class MainActivity extends Activity {
                     if(op.equals("flash")||op.equals("reset")){
                         Ota.Device device=session.info();
                         new EspInstall(w,n->getAssets().open("esp/"+n),this::line,target.getVendorId()==0x303a&&target.getProductId()==0x1001)
-                            .install(bytes,device,op.equals("reset"));
+                            .install(bytes,device,op.equals("reset"),reportProgress());
                         installed=true;
                     }else if(flashing){
-                        session.update(bytes,format==FirmwareFormat.MCFD);
+                        session.update(bytes,format==FirmwareFormat.MCFD,reportProgress());
                         installed=true;
                     }else detected=session.info();
                 }
@@ -791,6 +854,8 @@ public class MainActivity extends Activity {
                 showFile();
                 if(Objects.equals(checkedEndpoint,targetEndpoint))checkedDevice=null;
             }
+            if(installedFile!=null)finishProgress("Запись завершена");
+            else failProgress();
             idle();
             if(catalog && detected!=null){
                 if(!Objects.equals(targetEndpoint,endpoint())){
@@ -812,31 +877,35 @@ public class MainActivity extends Activity {
         String selectedEndpoint=endpoint();
         int diskGeneration=usbDiskGeneration;
         stopScan();busy=true;controls();line("Загрузка выпусков для "+target.model+"…");
+        beginProgress("Загрузка списка выпусков");
         new Thread(()->{
             try{
                 List<FirmwareReleases.Asset> assets=FirmwareReleases.load(target);
                 runOnUiThread(()->{
                     if(isDestroyed())return;
+                    clearProgress();
                     idle();
                     boolean changed=target.uf2?mode()==0&&usbDiskGeneration!=diskGeneration:
                         !Objects.equals(selectedEndpoint,endpoint());
                     if(changed){line("Устройство сменилось. Снова нажмите «Из GitHub».");return;}
                     new ReleasePicker(this,target,assets,asset->downloadRelease(asset,target)).show();
                 });
-            }catch(Exception e){line("Каталог GitHub: "+e.getMessage());runOnUiThread(()->{if(!isDestroyed())idle();});}
+            }catch(Exception e){line("Каталог GitHub: "+e.getMessage());runOnUiThread(()->{if(!isDestroyed()){failProgress();idle();}});}
         },"Firmware-releases").start();
     }
     void downloadRelease(FirmwareReleases.Asset asset,FirmwareReleases.Target target){
         busy=true;controls();line("Загрузка "+asset.name+"…");
+        beginProgress("Подключение к GitHub");
         new Thread(()->{
             try{
-                File downloaded=FirmwareReleases.download(asset,new File(getFilesDir(),"firmware"),target);
+                File downloaded=FirmwareReleases.download(asset,new File(getFilesDir(),"firmware"),target,reportProgress());
                 runOnUiThread(()->{
                     if(isDestroyed())return;
                     file=Uri.fromFile(downloaded);showFile();
+                    finishProgress("Прошивка загружена");
                     line("Загружено "+asset.tag+". Файл выбран для прошивки.");idle();
                 });
-            }catch(Exception e){line("Ошибка загрузки: "+e.getMessage());runOnUiThread(()->{if(!isDestroyed())idle();});}
+            }catch(Exception e){line("Ошибка загрузки: "+e.getMessage());runOnUiThread(()->{if(!isDestroyed()){failProgress();idle();}});}
         },"Firmware-download").start();
     }
     @Override public void onBackPressed(){

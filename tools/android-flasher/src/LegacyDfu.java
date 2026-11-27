@@ -40,7 +40,11 @@ final class LegacyDfu {
         Ota.need(received==sent,"Передано "+sent+" байт, загрузчик подтвердил "+received+". Ответ DFU: "+hex(r));
     }
     static void send(Link link,LegacyPackage pkg,Ota.Log log)throws IOException{
+        send(link,pkg,log,Ota.Progress.NONE);
+    }
+    static void send(Link link,LegacyPackage pkg,Ota.Log log,Ota.Progress progress)throws IOException{
         log.show("Согласование начала DFU…");
+        progress.update("Подключение к загрузчику",0,pkg.image.length);
         link.control((byte)1,(byte)4);
         link.packet(Ota.le(12).putInt(0).putInt(0).putInt(pkg.image.length).array());
         response(link,1);
@@ -51,6 +55,7 @@ final class LegacyDfu {
         final int interval=1;
         link.control((byte)8,(byte)interval,(byte)0);
         link.control((byte)3);
+        progress.update("Передача прошивки",0,pkg.image.length);
         int packets=0,last=0;
         for(int pos=0;pos<pkg.image.length;){
             int next=Math.min(pos+20,pkg.image.length);
@@ -58,6 +63,7 @@ final class LegacyDfu {
             if(++packets%interval==0 && pos<pkg.image.length){
                 byte[] r=link.notice();
                 receipt(link,r,pos);
+                progress.update("Передача прошивки",pos,pkg.image.length);
             }
             int percent=pos*100/pkg.image.length;
             if(percent/10>last){last=percent/10;log.show("Передано "+percent+" %");}
@@ -68,6 +74,7 @@ final class LegacyDfu {
             completed=link.notice();
         }
         checkResponse(link,completed,3);
+        progress.update("Проверка образа",pkg.image.length,pkg.image.length);
         link.control((byte)4);response(link,4);
         log.show("Загрузчик подтвердил образ.");
         link.control((byte)5);

@@ -3,7 +3,7 @@ import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 root=Path(SPECPATH)
-data=[(str(p),".") for p in root.glob("*.csv")]
+data=[(str(p),".") for p in root.glob("*.csv")]+[(str(root/"ommesh.png"),".")]
 esp_data,esp_bins,esp_imports=collect_all("esptool")
 hidden=esp_imports+collect_submodules("bleak.backends")+["firmware_catalog","nrf_flash"]
 a=Analysis([str(root/"app.py")],pathex=[str(root)],binaries=esp_bins,datas=data+esp_data,

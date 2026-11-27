@@ -46,8 +46,8 @@ import zlib
 import firmware_catalog
 
 from meshcore_ota import (  # noqa: E402
-    DEFAULT_DELTA_TOOL, ERRORS, REPO, describe_device, describe_envelope, envelope_pieces, find_base, load_firmware, log,
-    make_delta, store_image,
+    DEFAULT_DELTA_TOOL, ERRORS, REPO, cli_progress, describe_device, describe_envelope, envelope_pieces, find_base,
+    load_firmware, log, make_delta, store_image,
 )
 
 # run as the release's program (PyInstaller), away from the repository and its image stores
@@ -348,7 +348,7 @@ async def list_devices():
         print("  none (a repeater advertises only while its update window is open: `fw ble`)")
 
 
-async def main(argv=None):
+async def main(argv=None, *, progress=None):
     ap = argparse.ArgumentParser(description=" ".join(__doc__.split("\n\n")[0].split()))
     ap.add_argument("image", nargs="?", help="release .mcfw, delta .mcfd, or image .bin")
     link_args = ap.add_mutually_exclusive_group()
@@ -379,7 +379,7 @@ async def main(argv=None):
             ap.error("--download-release requires --download-dir")
         try:
             asset = json.loads(base64.b64decode(args.download_release, validate=True))
-            path = await asyncio.to_thread(firmware_catalog.download, asset, args.download_dir)
+            path = await asyncio.to_thread(firmware_catalog.download, asset, args.download_dir, progress=progress)
         except (OSError, TypeError, ValueError, KeyError) as exc:
             sys.exit(str(exc))
         print(json.dumps({"path": str(path)}, ensure_ascii=False))
@@ -489,23 +489,33 @@ async def main(argv=None):
         if reply[0]:
             sys.exit(f"begin failed: {ERRORS.get(reply[0], reply[0])}")
         log(f"session open: {how}, {total} chunks")
+        if progress:
+            progress(0, total)
 
         start = time.time()
+        status_interval = max(64, min(500, math.ceil(total / 30))) if progress else 500
+        last_logged = 0
         missing = list(range(total))
         for round_no in range(50):
             for k, i in enumerate(missing):
                 body = struct.pack("<H", i) + payload[i * CHUNK:(i + 1) * CHUNK]
                 await link.send(bytes([OTA_DATA]) + body + struct.pack("<I", zlib.crc32(body)))
-                if round_no == 0 and k % 500 == 499:
+                if round_no == 0 and (k + 1) % status_interval == 0:
                     # asking for the status also keeps a serial link from queueing far ahead
                     reply = await ota_status(link)
                     received = struct.unpack_from("<H", reply, 1)[0] if not reply[0] else k + 1
-                    rate = received * CHUNK / max(time.time() - start, 1e-3) / 1024
-                    log(f"device has {received}/{total} chunks ({rate:.1f} KiB/s)")
+                    if progress and not reply[0]:
+                        progress(received, total)
+                    if k + 1 - last_logged >= 500:
+                        last_logged = k + 1
+                        rate = received * CHUNK / max(time.time() - start, 1e-3) / 1024
+                        log(f"device has {received}/{total} chunks ({rate:.1f} KiB/s)")
             reply = await ota_status(link)
             if reply[0]:
                 sys.exit(f"status failed: {ERRORS.get(reply[0], reply[0])}")
             received, tot, n = struct.unpack_from("<HHB", reply, 1)
+            if progress:
+                progress(received, tot)
             if received == tot:
                 break
             missing = list(struct.unpack_from(f"<{n}H", reply, 6))
@@ -553,5 +563,5 @@ async def main(argv=None):
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(progress=cli_progress()))
 

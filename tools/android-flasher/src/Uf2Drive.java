@@ -116,6 +116,9 @@ final class Uf2Drive {
     }
 
     void write(ContentResolver resolver,String name,byte[] firmware,Ota.Log log)throws Exception {
+        write(resolver,name,firmware,log,Ota.Progress.NONE);
+    }
+    void write(ContentResolver resolver,String name,byte[] firmware,Ota.Log log,Ota.Progress progress)throws Exception {
         Info current=inspect(resolver,tree).info;
         Ota.need(info.sameAs(current),"Диск загрузчика изменился. Повторите проверку устройства.");
         current.checkFirmwareName(name);
@@ -127,14 +130,17 @@ final class Uf2Drive {
         Ota.need(descriptor!=null,"Не удалось открыть файл на USB-диске.");
         int sent=0;
         int lastPercent=0;
+        progress.update("Запись UF2 на USB-диск",0,firmware.length);
         try(ParcelFileDescriptor.AutoCloseOutputStream out=new ParcelFileDescriptor.AutoCloseOutputStream(descriptor)){
             while(sent<firmware.length){
                 int count=Math.min(16*1024,firmware.length-sent);
                 out.write(firmware,sent,count);
                 sent+=count;
+                progress.update("Запись UF2 на USB-диск",sent,firmware.length);
                 int percent=sent*100/firmware.length;
                 if(percent/10>lastPercent){lastPercent=percent/10;log.show("UF2 передано "+percent+" %");}
             }
+            progress.update("Подтверждение записи USB",sent,firmware.length);
             out.getFD().sync();
         }catch(IOException e){
             if(sent==firmware.length)

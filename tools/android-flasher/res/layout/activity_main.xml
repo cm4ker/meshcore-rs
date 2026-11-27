@@ -122,12 +122,8 @@
     <ru.ommesh.otg.JournalPanel android:id="@+id/journal_panel"
         android:layout_width="match_parent" android:layout_height="wrap_content"
         android:orientation="vertical" android:background="@color/surface">
-        <FrameLayout android:layout_width="match_parent" android:layout_height="3dp"
-            android:background="@color/stroke">
-            <ProgressBar android:id="@+id/progress" style="?android:attr/progressBarStyleHorizontal"
-                android:layout_width="match_parent" android:layout_height="match_parent"
-                android:indeterminateOnly="true" android:visibility="gone" />
-        </FrameLayout>
+        <View android:layout_width="match_parent" android:layout_height="1dp"
+            android:background="@color/stroke" />
         <LinearLayout android:id="@+id/journal_header"
             android:layout_width="match_parent" android:layout_height="wrap_content"
             android:orientation="vertical">
@@ -147,6 +143,26 @@
                     android:layout_width="wrap_content" android:layout_marginStart="4dp"
                     android:text="Развернуть" android:contentDescription="Открыть весь журнал" />
             </LinearLayout>
+        </LinearLayout>
+        <LinearLayout android:id="@+id/operation_progress"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical" android:paddingStart="18dp" android:paddingEnd="18dp"
+            android:paddingBottom="10dp" android:visibility="gone">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/progress_stage" style="@style/Body"
+                    android:layout_width="0dp" android:layout_weight="1"
+                    android:maxLines="2" android:ellipsize="end" />
+                <TextView android:id="@+id/progress_percent" style="@style/Body"
+                    android:layout_width="wrap_content" android:layout_marginStart="12dp"
+                    android:fontFamily="sans-serif-medium" android:textColor="@color/accent" />
+            </LinearLayout>
+            <ProgressBar android:id="@+id/progress" style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent" android:layout_height="8dp" android:layout_marginTop="4dp"
+                android:minHeight="0dp" android:maxHeight="8dp" android:max="100"
+                android:indeterminate="false" android:indeterminateOnly="false"
+                android:progressTint="@color/accent" android:progressBackgroundTint="@color/accent_light"
+                android:importantForAccessibility="no" />
         </LinearLayout>
         <FrameLayout android:id="@+id/journal_body"
             android:layout_width="match_parent" android:layout_height="wrap_content">

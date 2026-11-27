@@ -146,6 +146,9 @@ final class FirmwareReleases {
         return parse(new String(fetch(url,8*1024*1024),StandardCharsets.UTF_8),target);
     }
     static byte[] fetch(String address,int limit)throws IOException {
+        return fetch(address,limit,0,Ota.Progress.NONE);
+    }
+    static byte[] fetch(String address,int limit,int expectedSize,Ota.Progress progress)throws IOException {
         URL url=new URL(address);
         for(int redirect=0;redirect<6;redirect++){
             Ota.need("https".equals(url.getProtocol()),"Загрузка требует HTTPS.");
@@ -167,6 +170,7 @@ final class FirmwareReleases {
                     while((n=in.read(buffer))!=-1){
                         Ota.need(out.size()+n<=limit,"Файл превышает допустимый размер.");
                         out.write(buffer,0,n);
+                        if(expectedSize>0)progress.update("Загрузка прошивки",out.size(),expectedSize);
                     }
                     return out.toByteArray();
                 }
@@ -175,11 +179,15 @@ final class FirmwareReleases {
         throw new IOException("Слишком много перенаправлений.");
     }
     static File download(Asset asset,File directory,Target target)throws Exception {
+        return download(asset,directory,target,Ota.Progress.NONE);
+    }
+    static File download(Asset asset,File directory,Target target,Ota.Progress progress)throws Exception {
         Ota.need(asset.name.matches("[a-zA-Z0-9._-]+") &&
             asset.url.startsWith("https://github.com/cm4ker/meshcore-rs/releases/download/"),"Неверный адрес файла выпуска.");
         Ota.need(asset.size>0 && asset.size<=MAX_IMAGE,"Недопустимый размер файла выпуска.");
-        byte[] bytes=fetch(asset.url,MAX_IMAGE);
+        byte[] bytes=fetch(asset.url,MAX_IMAGE,asset.size,progress);
         Ota.need(bytes.length==asset.size,"Файл загружен не полностью.");
+        progress.update("Проверка загруженного файла",bytes.length,asset.size);
         if(asset.digest.startsWith("sha256:")){
             StringBuilder hash=new StringBuilder();
             for(byte b:Ota.digest(bytes))hash.append(String.format(Locale.ROOT,"%02x",b&255));

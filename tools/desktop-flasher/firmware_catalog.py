@@ -58,11 +58,23 @@ class HttpsRedirect(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def fetch(url):
+def fetch(url, *, progress=None, size=None):
     request = Request(url, headers={"User-Agent": "ota-app-desktop", "Accept": "application/vnd.github+json" if url == API else "application/octet-stream"})
     try:
         with build_opener(HttpsRedirect()).open(request, timeout=25) as response:
-            body = response.read(MAX_SIZE + 1)
+            if progress and size:
+                progress(0, size)
+                body = bytearray()
+                while len(body) <= size:
+                    chunk = response.read(min(32 * 1024, size + 1 - len(body)))
+                    if not chunk:
+                        break
+                    body.extend(chunk)
+                    if len(body) <= size:
+                        progress(len(body), size)
+                body = bytes(body)
+            else:
+                body = response.read(MAX_SIZE + 1)
     except HTTPError as exc:
         if exc.code in (403, 429):
             raise ValueError("GitHub ограничил запросы. Попробуйте позже.") from exc
@@ -184,11 +196,11 @@ def validate_firmware(asset, data):
         raise ValueError("Размер или контрольная сумма образа не совпадает с манифестом.")
 
 
-def download(asset, directory):
+def download(asset, directory, *, progress=None):
     url = asset_url(asset)
     if not 0 < asset["size"] <= MAX_SIZE:
         raise ValueError("Недопустимый размер файла выпуска.")
-    data = fetch(url)
+    data = fetch(url, progress=progress, size=asset["size"]) if progress else fetch(url)
     if len(data) != asset["size"]:
         raise ValueError("Файл загружен не полностью.")
     digest = asset["digest"]

@@ -68,6 +68,16 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def cli_progress():
+    if os.environ.get("OTA_APP_REPORT_PROGRESS") != "1":
+        return None
+
+    def report(done, total):
+        print(f"OTA_PROGRESS {done} {total}", flush=True)
+
+    return report
+
+
 def airtime_ms(length, sf, bw_khz, cr):
     """LoRa time on air (explicit header, CRC on), same formula as the firmware."""
     preamble = 32 if sf <= 8 else 16

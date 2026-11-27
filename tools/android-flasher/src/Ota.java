@@ -10,6 +10,10 @@ import java.util.zip.*;
 final class Ota {
     interface Port { void write(byte[] frame) throws IOException; int read(byte[] buffer,int ms) throws IOException; }
     interface Log { void show(String message); }
+    interface Progress {
+        Progress NONE=(stage,completed,total)->{};
+        void update(String stage,int completed,int total);
+    }
     final Port port;
     final Log log;
     final byte[] input=new byte[1024];
@@ -94,6 +98,9 @@ final class Ota {
         update(file,false);
     }
     void update(byte[] file,boolean delta) throws Exception {
+        update(file,delta,Progress.NONE);
+    }
+    void update(byte[] file,boolean delta,Progress progress) throws Exception {
         Device device=info();
         need(file.length>0,"Пустой файл.");
         boolean signed=file.length>=4&&file[0]=='M'&&file[1]=='C'&&file[2]=='F'&&file[3]=='W';
@@ -151,6 +158,9 @@ final class Ota {
         need(total>0&&total<=65535,"Слишком большой образ.");
         accepted(request(0xf0,begin,30000),"Начало OTA");
         log.show("Передача прошивки…");
+        progress.update("Передача прошивки",0,total);
+        int confirmationInterval=Math.min(500,Math.max(20,total/30));
+        int lastLogged=0;
         int[] missing=new int[total];for(int i=0;i<total;i++)missing[i]=i;
         boolean complete=false;
         for(int round=0;round<50&&!complete;round++){
@@ -160,10 +170,17 @@ final class Ota {
                 CRC32 crc=new CRC32();crc.update(body,0,len+2);
                 ByteBuffer.wrap(body).order(ByteOrder.LITTLE_ENDIAN).putInt(len+2,(int)crc.getValue());
                 send(0xf1,body);
-                if(round==0&&(k+1)%500==0){byte[] r=status();log.show("Принято "+u16(r,1)+" из "+total+" блоков");}
+                if(round==0&&k+1<missing.length&&(k+1)%confirmationInterval==0){
+                    int have=confirmedBlocks(status(),total);
+                    progress.update("Передача прошивки",have,total);
+                    if(have-lastLogged>=500){
+                        log.show("Принято "+have+" из "+total+" блоков");
+                        lastLogged=have;
+                    }
+                }
             }
-            byte[] r=status();int have=u16(r,1),count=r[5]&255;
-            need(u16(r,3)==total&&have<=total,"Некорректное число блоков в ответе.");
+            byte[] r=status();int have=confirmedBlocks(r,total),count=r[5]&255;
+            progress.update("Передача прошивки",have,total);
             complete=have==total;
             if(!complete){
                 need(count>0&&r.length>=6+2*count,"Плата не вернула пропущенные блоки.");
@@ -171,12 +188,18 @@ final class Ota {
             }
         }
         need(complete,"Плата не получила все блоки.");
+        progress.update("Проверка и запись образа",total,total);
         log.show("Плата проверяет полученный образ…");
         byte[] commit;
         try {commit=request(0xf3,new byte[0],120000);}
         catch(IOException lost){throw new IOException("Ответ после записи не получен. После перезагрузки нажмите «Проверить устройство» и сверьте сборку.",lost);}
         accepted(commit,"Завершение OTA");
         log.show("Плата подтвердила запись. Дождитесь перезагрузки.");
+    }
+    static int confirmedBlocks(byte[] response,int total)throws IOException{
+        int received=u16(response,1);
+        need(u16(response,3)==total&&received<=total,"Некорректное число блоков в ответе.");
+        return received;
     }
 }
 
