@@ -16,43 +16,94 @@ final class BlePort extends BluetoothGattCallback implements Ota.Port, Closeable
     static final UUID SERVICE=UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e"),
         RX=UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e"),TX=UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e"),
         CCC=UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
+    private static final String SUBSCRIPTION = "подписка BLE";
+    private static final int ATT_INVALID_HANDLE = 0x01;
+    private static final int ATT_ATTRIBUTE_NOT_FOUND = 0x0a;
+    private static final int ATT_DATABASE_OUT_OF_SYNC = 0x12;
     static final class Event {
         final String stage;
         final int status;
         Event(String stage,int status){this.stage=stage;this.status=status;}
     }
     static final class GattFailure extends IOException {
+        final String stage;
         final int status;
         GattFailure(String stage,int status){
             super("Bluetooth, "+stage+" (GATT "+status+").");
+            this.stage=stage;
             this.status=status;
+        }
+        boolean needsServiceDiscovery() {
+            return SUBSCRIPTION.equals(stage) && (status == ATT_INVALID_HANDLE
+                || status == ATT_ATTRIBUTE_NOT_FOUND || status == ATT_DATABASE_OUT_OF_SYNC);
         }
     }
     final BlockingQueue<Event> events=new LinkedBlockingQueue<>();
     final BlockingQueue<byte[]> frames=new LinkedBlockingQueue<>();
     BluetoothGatt gatt;BluetoothGattCharacteristic rx,control;
     volatile boolean disconnected;volatile int mtu=23;
-    BlePort(Context c,BluetoothDevice device)throws IOException {
-        this(c,device,false);
+
+    private BlePort() {}
+
+    static BlePort open(Context context, BluetoothDevice device, boolean dfu, Ota.Log log) throws IOException {
+        for (int attempt = 0; ; attempt++) {
+            BlePort port = new BlePort();
+            boolean ready = false;
+            try {
+                port.connect(context, device, dfu);
+                ready = true;
+                return port;
+            } catch (GattFailure failure) {
+                if (dfu || !failure.needsServiceDiscovery()) throw failure;
+                if (attempt > 0) {
+                    throw new IOException("Плата не приняла подписку на ответы BLE (GATT " + failure.status
+                        + "). Удалите сопряжение с этой платой в настройках Android, снова откройте Bluetooth"
+                        + " на плате и нажмите «Проверить устройство».", failure);
+                }
+                log.show("Bluetooth (GATT " + failure.status + "). Переподключение и повторный поиск служб…");
+                port.refreshServiceCache();
+            } finally {
+                if (!ready) port.close();
+            }
+            // Give Android time to close the old link and the board time to advertise again.
+            try {
+                Thread.sleep(750);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Повторное подключение Bluetooth прервано.", e);
+            }
+        }
     }
-    BlePort(Context c,BluetoothDevice device,boolean dfu)throws IOException {
-        try{
-            gatt=device.connectGatt(c,false,this,BluetoothDevice.TRANSPORT_LE);
-            if(gatt==null)throw new IOException("Не удалось открыть Bluetooth.");
-            await("connect",25000);
-            if(!gatt.discoverServices())throw new IOException("Не удалось запросить службы BLE.");
-            await("services",15000);
-            BluetoothGattService service=gatt.getService(dfu?DFU:SERVICE);
-            if(service==null)throw new IOException(dfu?"Нет службы Nordic Legacy DFU. Переведите плату в режим BLE OTA.":"Нет службы MeshCore UART. Откройте окно BLE-обновления на устройстве.");
-            rx=service.getCharacteristic(dfu?PACKET:RX);
-            BluetoothGattCharacteristic tx=service.getCharacteristic(dfu?CONTROL:TX);
-            if(dfu)control=tx;
-            if(rx==null||tx==null)throw new IOException("Недоступен канал BLE.");
-            if(!dfu && gatt.requestMtu(247))await("mtu",12000);
-            enableUpdates(c,device,tx,dfu);
-            gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH);
-        }catch(Exception e){close();throw new IOException(e.getMessage(),e);}
+
+    private void connect(Context context, BluetoothDevice device, boolean dfu) throws IOException {
+        gatt = device.connectGatt(context, false, this, BluetoothDevice.TRANSPORT_LE);
+        if (gatt == null) throw new IOException("Не удалось открыть Bluetooth.");
+        await("connect", 25000);
+        if (!gatt.discoverServices()) throw new IOException("Не удалось запросить службы BLE.");
+        await("services", 15000);
+        BluetoothGattService service = gatt.getService(dfu ? DFU : SERVICE);
+        if (service == null) {
+            throw new IOException(dfu ? "Нет службы Nordic Legacy DFU. Переведите плату в режим BLE OTA."
+                : "Нет службы MeshCore UART. Откройте окно BLE-обновления на устройстве.");
+        }
+        rx = service.getCharacteristic(dfu ? PACKET : RX);
+        BluetoothGattCharacteristic tx = service.getCharacteristic(dfu ? CONTROL : TX);
+        if (dfu) control = tx;
+        if (rx == null || tx == null) throw new IOException("Недоступен канал BLE.");
+        if (!dfu && gatt.requestMtu(247)) await("mtu", 12000);
+        enableUpdates(context, device, tx, dfu);
+        gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH);
     }
+
+    private void refreshServiceCache() {
+        // Some Android versions expose this method. Reconnect even when it is unavailable.
+        try {
+            BluetoothGatt.class.getMethod("refresh").invoke(gatt);
+        } catch (ReflectiveOperationException | SecurityException unavailable) {
+            // Service discovery still runs on the new connection.
+        }
+    }
+
     void enableUpdates(Context context,BluetoothDevice device,BluetoothGattCharacteristic tx,boolean dfu)throws IOException{
         BluetoothGattDescriptor descriptor=tx.getDescriptor(CCC);
         boolean notify=(tx.getProperties()&BluetoothGattCharacteristic.PROPERTY_NOTIFY)!=0;
@@ -73,6 +124,7 @@ final class BlePort extends BluetoothGattCallback implements Ota.Port, Closeable
             try{
                 subscribe(descriptor,useIndications?BluetoothGattDescriptor.ENABLE_INDICATION_VALUE:config);
             }catch(GattFailure second){
+                if(second.needsServiceDiscovery())throw second;
                 throw new IOException("Плата отклонила подписку на ответы BLE (GATT "+second.status+
                     "). Закройте другие подключения к плате, снова откройте Bluetooth на плате и повторите поиск.",second);
             }
@@ -86,7 +138,7 @@ final class BlePort extends BluetoothGattCallback implements Ota.Port, Closeable
             sent=descriptor.setValue(config)&&gatt.writeDescriptor(descriptor);
         }
         if(!sent)throw new IOException("Не удалось запросить ответы устройства по BLE.");
-        await("подписка BLE",30000);
+        await(SUBSCRIPTION,30000);
     }
     static void waitForBond(Context context,BluetoothDevice device)throws IOException{
         CountDownLatch result=new CountDownLatch(1);
@@ -132,7 +184,7 @@ final class BlePort extends BluetoothGattCallback implements Ota.Port, Closeable
     public void onServicesDiscovered(BluetoothGatt g,int s){event("services",s);}
     public void onMtuChanged(BluetoothGatt g,int m,int s){if(s==0)mtu=m;event("mtu",BluetoothGatt.GATT_SUCCESS);}
     public void onDescriptorWrite(BluetoothGatt g,BluetoothGattDescriptor d,int s){
-        if(CCC.equals(d.getUuid()))event("подписка BLE",s);
+        if(CCC.equals(d.getUuid()))event(SUBSCRIPTION,s);
     }
     public void onCharacteristicWrite(BluetoothGatt g,BluetoothGattCharacteristic c,int s){event("write",s);}
     public void onCharacteristicChanged(BluetoothGatt g,BluetoothGattCharacteristic c){if(Build.VERSION.SDK_INT<33)received(c,c.getValue());}

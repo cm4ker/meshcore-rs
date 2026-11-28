@@ -8,7 +8,7 @@ $appDirectory = if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'ommesh.ico'
 $exe = Join-Path $appDirectory 'engine\python.exe'
 $form = New-Object Windows.Forms.Form
 $form.Icon = [Drawing.Icon]::new((Join-Path $appDirectory 'ommesh.ico'))
-$form.Text = 'ota-app 1.3.1 · MeshCore'
+$form.Text = 'ota-app 1.3.2 · MeshCore'
 $form.AutoScaleDimensions = [Drawing.SizeF]::new(96, 96)
 $form.AutoScaleMode = 'Dpi'
 $form.ClientSize = [Drawing.Size]::new(820, 690)
@@ -217,16 +217,20 @@ $clearFile.Anchor = 'Top, Right'
 $clearFile.AccessibleName = 'Снять выбор файла'
 $sources = Add-Control TableLayoutPanel '' 16 81 756 35 $firmwareCard
 $sources.Anchor = 'Top, Left, Right'
-$sources.ColumnCount = 2
+$sources.ColumnCount = 3
 $sources.RowCount = 1
-$null = $sources.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Percent', 50))
-$null = $sources.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Percent', 50))
+for ($column = 0; $column -lt 3; $column++) {
+    $null = $sources.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Percent', 100 / 3))
+}
 $browse = Add-Control Button 'Выбрать файл' 0 0 370 35 $sources
 $browse.Margin = [Windows.Forms.Padding]::new(0, 0, 4, 0)
 $browse.Dock = 'Fill'
 $catalog = Add-Control Button 'Из GitHub' 0 0 370 35 $sources
-$catalog.Margin = [Windows.Forms.Padding]::new(4, 0, 0, 0)
+$catalog.Margin = [Windows.Forms.Padding]::new(4, 0, 4, 0)
 $catalog.Dock = 'Fill'
+$offline = Add-Control Button 'Офлайн' 0 0 240 35 $sources
+$offline.Margin = [Windows.Forms.Padding]::new(4, 0, 0, 0)
+$offline.Dock = 'Fill'
 $update = Add-Control Button 'Обновить прошивку' 16 124 756 42 $firmwareCard 'Primary'
 $update.Anchor = 'Top, Left, Right'
 $usbFlash = Add-Control Button 'Прошить через USB' 16 173 171 33 $firmwareCard 'Quiet'
@@ -236,10 +240,11 @@ $exportDfu = Add-Control Button 'Сохранить DFU ZIP' 16 173 171 33 $firm
 $journal = Add-ShellPanel 2 $palette.Surface
 $grip = Add-Control Panel '' 0 3 820 14 $journal
 $grip.Anchor = 'Top, Left, Right'
-$grip.Cursor = [Windows.Forms.Cursors]::Hand
+$grip.Cursor = [Windows.Forms.Cursors]::SizeNS
+$grip.AccessibleName = 'Изменить высоту журнала'
 $handle = Add-Control Panel '' 392 5 36 4 $grip
 $handle.BackColor = $palette.Muted
-$handle.Cursor = [Windows.Forms.Cursors]::Hand
+$handle.Cursor = [Windows.Forms.Cursors]::SizeNS
 $grip.Add_Resize({ $handle.Left = [Math]::Max(0, ($grip.ClientSize.Width - $handle.Width) / 2) })
 $progressArea = Add-Control Panel '' 20 19 780 39 $journal
 $progressArea.Anchor = 'Top, Left, Right'
@@ -284,11 +289,17 @@ $ports = @{ Values = @() }
 $state = @{
     Process = $null; Output = $null; Errors = $null; Mode = ''; Text = ''
     Drive = $null; PendingRoot = ''; DfuDevices = @{}; DeviceKey = ''; Device = $null
-    JournalOpen = $false; ProgressTitle = ''; ProgressPercent = -1
+    JournalOpen = $false; JournalHeight = 320; JournalDrag = $null
+    ProgressTitle = ''; ProgressPercent = -1; BluetoothErrorText = ''
 }
-$transferModes = @('Download','Update','USBFlash','NewNode','DfuWrite','Uf2Write')
+$transferModes = @('Download','LibrarySync','Update','USBFlash','NewNode','DfuWrite','Uf2Write')
+$structuredModes = @('Info','Catalog','Download','Uf2Info','DfuList','Library','LibraryIndex','LibrarySync','LibraryCheck')
 $operationTitles = @{
     Download = 'Загрузка прошивки из GitHub'
+    Library = 'Чтение сохранённых прошивок'
+    LibraryIndex = 'Загрузка списка выпусков'
+    LibrarySync = 'Загрузка офлайн-набора'
+    LibraryCheck = 'Проверка сохранённого файла'
     Update = 'Обновление прошивки'
     USBFlash = 'Запись прошивки через USB'
     NewNode = 'Запись прошивки со сбросом'
@@ -301,7 +312,7 @@ $operationTitles = @{
     Catalog = 'Загрузка каталога GitHub'
     Export = 'Сохранение DFU-пакета'
 }
-$controls = @($method,$address,$pin,$model,$find,$browse,$info,$update,$usbFlash,$newNode,$diskButton,$exportDfu,$catalog,$clearFile)
+$controls = @($method,$address,$pin,$model,$find,$browse,$info,$update,$usbFlash,$newNode,$diskButton,$exportDfu,$catalog,$offline,$clearFile)
 $tips = New-Object Windows.Forms.ToolTip
 $tips.AutoPopDelay = 15000
 $tips.SetToolTip($pin, 'Введите шестизначный PIN, который показывает устройство.')
@@ -309,6 +320,9 @@ $tips.SetToolTip($newNode, 'Прошивка ESP по USB с удалением 
 $tips.SetToolTip($usbFlash, 'Установить образ приложения через загрузчик ESP.')
 $tips.SetToolTip($info, 'Читает модель устройства и установленную сборку.')
 $tips.SetToolTip($catalog, 'Показывает выпуски для модели и роли устройства.')
+$tips.SetToolTip($offline, 'Скачайте набор заранее или выберите уже сохранённую прошивку.')
+$tips.SetToolTip($grip, 'Потяните вверх, чтобы увеличить журнал. Нажатие раскрывает или сворачивает его.')
+$tips.SetToolTip($handle, 'Потяните вверх, чтобы увеличить журнал.')
 
 function Get-Formats {
     switch ($method.SelectedIndex) {
@@ -448,14 +462,16 @@ $help.Add_Click({
     if ($method.SelectedIndex -ne 3 -and -not (Uses-Uf2Drive)) {
         $steps += '', '1. Нажмите «Проверить устройство». Появятся модель, версия и номер сборки.', '2. Нажмите «Из GitHub» для подбора файла или «Выбрать файл». Дельта .mcfd должна подходить к установленной сборке.', '3. Нажмите «Обновить прошивку», сверьте файл и запустите запись. После перезапуска снова проверьте устройство.'
     }
-    $steps += '', 'Кнопка «Развернуть» показывает все записи журнала. Последняя запись видна и в свёрнутом виде.'
+    $steps += '', 'Нажмите «Развернуть» для просмотра журнала. Потяните полоску над журналом вверх, чтобы увеличить его.'
     Show-DetailsDialog $method.Text ($steps -join $newline)
 })
 
 function Set-JournalLayout {
-    $height = if ($state.JournalOpen) { 213 } else { 66 }
     $offset = if ($state.ProgressTitle) { 42 } else { 0 }
     $scale = $form.DeviceDpi / 96
+    $available = [Math]::Floor(($shell.ClientSize.Height - $header.Height) / $scale) - $offset - 74
+    $maximum = [Math]::Max(148, $available)
+    $height = if ($state.JournalOpen) { [Math]::Min($state.JournalHeight, $maximum) } else { 66 }
     $journalHeading.Top = [Math]::Round((26 + $offset) * $scale)
     $status.Top = $journalHeading.Top
     $journalToggle.Top = [Math]::Round((23 + $offset) * $scale)
@@ -464,6 +480,7 @@ function Set-JournalLayout {
     $log.Visible = $state.JournalOpen
     $journalToggle.Text = if ($state.JournalOpen) { 'Свернуть' } else { 'Развернуть' }
     $shell.PerformLayout()
+    $log.Height = [Math]::Max(1, $journal.ClientSize.Height - $log.Top - $log.Left / 2)
 }
 
 function Switch-Journal {
@@ -473,6 +490,46 @@ function Switch-Journal {
         $log.SelectionStart = $log.TextLength
         $log.ScrollToCaret()
     }
+}
+
+function Resize-Journal([double]$height) {
+    $wasOpen = $state.JournalOpen
+    $state.JournalOpen = $height -ge 110
+    if ($state.JournalOpen) { $state.JournalHeight = [Math]::Max(148, $height) }
+    Set-JournalLayout
+    if ($state.JournalOpen -and !$wasOpen) {
+        $log.SelectionStart = $log.TextLength
+        $log.ScrollToCaret()
+    }
+}
+
+function Start-JournalDrag($sender, $eventArgs) {
+    if ($eventArgs.Button -ne [Windows.Forms.MouseButtons]::Left) { return }
+    $scale = $form.DeviceDpi / 96
+    $offset = if ($state.ProgressTitle) { 42 } else { 0 }
+    $state.JournalDrag = @{
+        Y = [Windows.Forms.Cursor]::Position.Y
+        Height = $drawerRow.Height / $scale - $offset
+        Moved = $false
+    }
+    $sender.Capture = $true
+}
+
+function Move-JournalDrag($sender) {
+    $drag = $state.JournalDrag
+    if (!$drag -or !$sender.Capture) { return }
+    $distance = ($drag.Y - [Windows.Forms.Cursor]::Position.Y) / ($form.DeviceDpi / 96)
+    if (!$drag.Moved -and [Math]::Abs($distance) -lt 5) { return }
+    $drag.Moved = $true
+    Resize-Journal ($drag.Height + $distance)
+}
+
+function Stop-JournalDrag($sender, $eventArgs) {
+    if ($eventArgs.Button -ne [Windows.Forms.MouseButtons]::Left -or !$state.JournalDrag) { return }
+    $moved = $state.JournalDrag.Moved
+    $state.JournalDrag = $null
+    $sender.Capture = $false
+    if (!$moved) { Switch-Journal }
 }
 
 function Set-ProgressFill {
@@ -498,8 +555,13 @@ function Set-OperationProgress([string]$title, [int]$percent = -1, [switch]$Fail
 
 $track.Add_Resize({ Set-ProgressFill })
 $journalToggle.Add_Click({ Switch-Journal })
-$grip.Add_Click({ Switch-Journal })
-$handle.Add_Click({ Switch-Journal })
+foreach ($part in @($grip,$handle)) {
+    $part.Add_MouseDown({ param($sender,$eventArgs) Start-JournalDrag $sender $eventArgs })
+    $part.Add_MouseMove({ param($sender,$eventArgs) Move-JournalDrag $sender })
+    $part.Add_MouseUp({ param($sender,$eventArgs) Stop-JournalDrag $sender $eventArgs })
+    $part.Add_MouseCaptureChanged({ param($sender,$eventArgs) if (!$sender.Capture) { $state.JournalDrag = $null } })
+}
+$form.Add_ClientSizeChanged({ Set-JournalLayout })
 $journal.Add_Resize({
     $log.Width = [Math]::Max(1, $journal.ClientSize.Width - 2 * $log.Left)
     $log.Height = [Math]::Max(1, $journal.ClientSize.Height - $log.Top - $log.Left / 2)
@@ -781,6 +843,8 @@ function Start-Engine([string]$mode,[string]$scriptName,[string[]]$arguments) {
 
 function Start-EngineProcess([string]$mode, [Diagnostics.ProcessStartInfo]$start) {
     $log.Clear()
+    $state.BluetoothErrorText = ''
+    $tips.SetToolTip($status, '')
     Set-OperationProgress $operationTitles[$mode]
     try { $state.Process = [Diagnostics.Process]::Start($start) }
     catch {
@@ -803,6 +867,160 @@ function Get-DownloadDirectory {
     $directory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'ota-app\Firmware'
     $null = [IO.Directory]::CreateDirectory($directory)
     return $directory
+}
+
+function Start-Library([string]$operation, [string[]]$arguments) {
+    if (!$state.Process) {
+        Start-Engine $operation 'firmware_library.py' (@('--directory',(Get-DownloadDirectory)) + $arguments)
+    }
+}
+
+$offline.Add_Click({
+    $device = if ($state.DeviceKey -eq (Get-ContextKey) -and -not $state.Drive -and $method.SelectedIndex -ne 3) {
+        $state.Device
+    } else { $null }
+    $nrfIds = @{'t-echo'=4; 'promicro'=5; 'heltec-t114'=7; 'heltec-t096'=9}
+    $slug = Get-Board
+    $boardId = if ($slug) { [int]$nrfIds[$slug] } else { 0 }
+    $formats = if ($state.Drive) { @('.uf2') } else { @(Get-Formats) }
+    $context = @{ device=$device; board=$boardId; formats=@($formats); usb=$method.SelectedIndex -eq 0 -and !$state.Drive }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $context -Depth 6 -Compress)))
+    Start-Library 'Library' @('list',$encoded)
+})
+
+function New-LibraryDialog([string]$title, [int]$width, [int]$height) {
+    $dialog = New-Object Windows.Forms.Form
+    $dialog.Text = $title
+    $dialog.Icon = $form.Icon
+    $dialog.Font = $form.Font
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.AutoScaleDimensions = [Drawing.SizeF]::new(96, 96)
+    $dialog.AutoScaleMode = 'Dpi'
+    $dialog.BackColor = $palette.Surface
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.ClientSize = [Drawing.Size]::new($width,$height)
+    $dialog.MinimizeBox = $false
+    $dialog.MaximizeBox = $false
+    $heading = Add-Control Label $title 18 12 ($width-36) 34 $dialog
+    $heading.Font = $sectionFont
+    $heading.ForeColor = $palette.Ink
+    return $dialog
+}
+
+function Show-Library($data) {
+    $items = @($data.files | Where-Object { $null -ne $_ })
+    $deltas = @($items | Where-Object format -eq '.mcfd')
+    $visible = @{ Rows = @() }
+    $dialog = New-LibraryDialog 'Офлайн-библиотека' 680 473
+    try {
+        $null = Add-Control Label "Сохранено $($data.total) · Доступно в этом режиме $($items.Count)" 18 52 644 24 $dialog
+        $note = if ($data.device) { $data.device } else { 'Проверьте устройство, чтобы подобрать прошивку по модели и сборке.' }
+        $details = Add-Control Label $note 18 80 644 36 $dialog
+        $details.ForeColor = $palette.Muted
+        $onlyDelta = Add-Control CheckBox "Только дельты .mcfd ($($deltas.Count))" 18 115 644 28 $dialog
+        $onlyDelta.Enabled = $deltas.Count -gt 0
+        $list = Add-Control ListBox '' 18 151 644 204 $dialog
+        $empty = if ($data.total) { 'Нет сохранённых прошивок для выбранного подключения.' } else {
+            'Скачайте набор заранее, чтобы прошивать без интернета.'
+        }
+        $fileDetails = Add-Control Label $empty 18 366 644 51 $dialog
+        $fileDetails.ForeColor = $palette.Muted
+        $use = Add-Control Button 'Выбрать' 502 422 160 35 $dialog 'Primary'
+        $use.DialogResult = 'OK'
+        $use.Enabled = $false
+        $download = Add-Control Button 'Скачать набор…' 18 422 178 35 $dialog
+        $download.DialogResult = 'Retry'
+        $close = Add-Control Button 'Закрыть' 386 422 108 35 $dialog 'Quiet'
+        $close.DialogResult = 'Cancel'
+        $dialog.CancelButton = $close
+        $list.Add_SelectedIndexChanged({
+            if ($list.SelectedIndex -lt 0) {
+                $use.Enabled = $false
+                $fileDetails.Text = $empty
+                return
+            }
+            $asset = $visible.Rows[$list.SelectedIndex]
+            $description = @($asset.name,"Выпуск $($asset.tag)")
+            if ($asset.issue) {
+                $prefix = if ($asset.enabled) { 'Только через USB-загрузчик · ' } else { '' }
+                $description += "$prefix$($asset.issue)"
+            }
+            $fileDetails.Text = $description -join $newline
+            $use.Enabled = $asset.enabled
+        })
+        $list.Add_DoubleClick({ if ($use.Enabled) { $use.PerformClick() } })
+        $refresh = {
+            $selected = if ($list.SelectedIndex -ge 0) { $visible.Rows[$list.SelectedIndex] } else { $null }
+            $visible.Rows = @(if ($onlyDelta.Checked) { $deltas } else { $items })
+            $list.BeginUpdate()
+            try {
+                $list.Items.Clear()
+                foreach ($asset in $visible.Rows) { $null = $list.Items.Add($asset.label) }
+                if ($visible.Rows.Count) {
+                    $list.SelectedIndex = [Math]::Max(0, [array]::IndexOf($visible.Rows, $selected))
+                }
+            } finally { $list.EndUpdate() }
+        }
+        $onlyDelta.Add_CheckedChanged($refresh)
+        & $refresh
+        $answer = $dialog.ShowDialog($form)
+        if ($answer -eq 'Retry') { return @{ download = $true } }
+        if ($answer -eq 'OK' -and $use.Enabled -and $list.SelectedIndex -ge 0) {
+            return @{ asset = $visible.Rows[$list.SelectedIndex] }
+        }
+    } finally { $dialog.Dispose() }
+}
+
+function Show-LibraryIndex($data) {
+    $versions = @($data.versions)
+    $boardIds = @(0) + @($data.boards.PSObject.Properties | Sort-Object Value | ForEach-Object { [int]$_.Name })
+    $roleIds = @(0,2,1)
+    $dialog = New-LibraryDialog 'Скачать набор' 560 333
+    try {
+        $null = Add-Control Label 'Выпуск' 18 52 524 22 $dialog
+        $version = Add-Control ComboBox '' 18 77 524 27 $dialog
+        $version.DropDownStyle = 'DropDownList'
+        foreach ($release in $versions) {
+            $suffix = if ($release.prerelease) { ' · предварительный' } else { '' }
+            $null = $version.Items.Add("$($release.tag)$suffix")
+        }
+        $null = Add-Control Label 'Модель' 18 118 524 22 $dialog
+        $boardPick = Add-Control ComboBox '' 18 143 524 27 $dialog
+        $boardPick.DropDownStyle = 'DropDownList'
+        $null = $boardPick.Items.Add('Все платы')
+        foreach ($id in $boardIds | Select-Object -Skip 1) {
+            $null = $boardPick.Items.Add($data.boards.PSObject.Properties["$id"].Value)
+        }
+        $null = Add-Control Label 'Роль' 18 184 524 22 $dialog
+        $rolePick = Add-Control ComboBox '' 18 209 524 27 $dialog
+        $rolePick.DropDownStyle = 'DropDownList'
+        $rolePick.Items.AddRange(@('Обе роли','Компаньон','Репитер'))
+        $summary = Add-Control Label '' 18 248 524 28 $dialog
+        $summary.ForeColor = $palette.Muted
+        $download = Add-Control Button 'Скачать' 377 282 165 35 $dialog 'Primary'
+        $download.DialogResult = 'OK'
+        $close = Add-Control Button 'Закрыть' 253 282 115 35 $dialog 'Quiet'
+        $close.DialogResult = 'Cancel'
+        $dialog.CancelButton = $close
+        $version.SelectedIndex = $boardPick.SelectedIndex = $rolePick.SelectedIndex = 0
+        $refresh = {
+            $boardId = $boardIds[$boardPick.SelectedIndex]
+            $roleId = $roleIds[$rolePick.SelectedIndex]
+            $files = @($versions[$version.SelectedIndex].assets | Where-Object {
+                (!$boardId -or $_.board -eq $boardId) -and (!$roleId -or $_.role -eq $roleId)
+            })
+            $download.Enabled = $files.Count -gt 0
+            $summary.Text = if ($files.Count) {
+                $size = ($files | Measure-Object size -Sum).Sum / 1MB
+                'Файлов: {0} · {1:N1} МиБ' -f $files.Count,$size
+            } else { 'Для выбранной модели и роли файлов нет.' }
+        }
+        foreach ($box in @($version,$boardPick,$rolePick)) { $box.Add_SelectedIndexChanged($refresh) }
+        & $refresh
+        if ($dialog.ShowDialog($form) -eq 'OK' -and $download.Enabled) {
+            return @($versions[$version.SelectedIndex].tag, $boardIds[$boardPick.SelectedIndex], $roleIds[$rolePick.SelectedIndex])
+        }
+    } finally { $dialog.Dispose() }
 }
 
 function Start-Catalog($arguments) {
@@ -835,7 +1053,7 @@ function Start-Ota([string]$mode) {
                 $log.Lines = [string[]]@($address.Items)
                 $status.Text = "Найдено COM-портов: $($ports.Values.Count)."
             }
-            1 { Start-Engine 'List' 'ota_app.py' @('--list') }
+            1 { Start-Engine 'List' 'ota_app.py' @('--scan-ble') }
             3 { Start-Engine 'DfuList' 'nrf_flash.py' @('scan') }
         }
         return
@@ -918,7 +1136,11 @@ function Start-Ota([string]$mode) {
 
 function Finish-Engine([int]$exitCode) {
     if ($exitCode -ne 0) {
-        $status.Text = "Ошибка операции (код $exitCode). Подробности в журнале."
+        $status.Text = if ($state.BluetoothErrorText) { $state.BluetoothErrorText } else {
+            "Ошибка операции (код $exitCode). Подробности в журнале."
+        }
+        $tips.SetToolTip($status,$status.Text)
+        if ($state.Mode -in @('List','DfuList') -and $state.BluetoothErrorText) { Show-Notice $state.BluetoothErrorText }
         return
     }
     switch ($state.Mode) {
@@ -947,6 +1169,29 @@ function Finish-Engine([int]$exitCode) {
             Set-Firmware $data.path
             $status.Text = 'Файл GitHub загружен и выбран.'
             $log.AppendText($status.Text + $newline)
+        }
+        'Library' {
+            $status.Text = 'Сохранённые прошивки прочитаны.'
+            Set-Controls
+            $selection = Show-Library (ConvertFrom-Json $state.Text)
+            if ($selection.download) { Start-Library 'LibraryIndex' @('index') }
+            elseif ($selection.asset) { Start-Library 'LibraryCheck' @('check',$selection.asset.path,$selection.asset.digest) }
+        }
+        'LibraryIndex' {
+            $status.Text = 'Список выпусков загружен.'
+            Set-Controls
+            $selection = @(Show-LibraryIndex (ConvertFrom-Json $state.Text))
+            if ($selection.Count -eq 3) { Start-Library 'LibrarySync' (@('sync') + $selection) }
+        }
+        'LibrarySync' {
+            $result = ConvertFrom-Json $state.Text
+            $status.Text = "Скачано: $($result.downloaded). Уже в библиотеке: $($result.existing)."
+            $log.AppendText($status.Text + $newline)
+        }
+        'LibraryCheck' {
+            $data = ConvertFrom-Json $state.Text
+            Set-Firmware $data.path
+            $status.Text = 'Выбрана сохранённая прошивка.'
         }
         'Uf2Info' {
             $state.Drive = ConvertFrom-Json $state.Text
@@ -1000,6 +1245,9 @@ $portTimer.Interval = 1000
 $portTimer.Add_Tick({ if (-not $state.Process) { Refresh-Ports } })
 
 function Receive-EngineLine([string]$stream, [string]$line) {
+    if ($stream -eq 'Errors' -and $line.StartsWith('Bluetooth. ', [StringComparison]::Ordinal)) {
+        $state.BluetoothErrorText = $line
+    }
     if ($line.StartsWith('OTA_PROGRESS ', [StringComparison]::Ordinal)) {
         if ($state.Mode -in $transferModes -and $line -cmatch '\AOTA_PROGRESS ([0-9]{1,19}) ([0-9]{1,19})\z') {
             $current = [uint64]$Matches[1]
@@ -1008,7 +1256,7 @@ function Receive-EngineLine([string]$stream, [string]$line) {
                 $percent = [int][Math]::Min(99, [Math]::Floor(100.0 * $current / $total))
                 $title = $operationTitles[$state.Mode]
                 if ($current -eq $total) {
-                    $title = if ($state.Mode -eq 'Download') { 'Проверка загруженного файла' } else { 'Ожидание подтверждения записи' }
+                    $title = if ($state.Mode -in @('Download','LibrarySync')) { 'Проверка загрузки' } else { 'Ожидание подтверждения записи' }
                 }
                 if ($percent -gt $state.ProgressPercent -or ($percent -eq $state.ProgressPercent -and $current -eq $total -and $title -ne $state.ProgressTitle)) {
                     Set-OperationProgress $title $percent
@@ -1017,10 +1265,10 @@ function Receive-EngineLine([string]$stream, [string]$line) {
         }
         return
     }
-    if ($stream -eq 'Output' -and $state.Mode -in @('Info','Catalog','Download','Uf2Info','DfuList','List')) {
+    if ($stream -eq 'Output' -and ($state.Mode -in $structuredModes -or $state.Mode -eq 'List')) {
         $state.Text += $line + $newline
     }
-    if ($stream -eq 'Errors' -or $state.Mode -notin @('Info','Catalog','Download','Uf2Info','DfuList')) {
+    if ($stream -eq 'Errors' -or $state.Mode -notin $structuredModes) {
         $log.AppendText($line + $newline)
         if ($line.Trim()) { $status.Text = $line.Trim() }
     }
@@ -1049,7 +1297,7 @@ function Receive-EngineOutput {
         elseif (-not $transfer) { Set-OperationProgress '' }
         Finish-Engine $exitCode
         if ($exitCode -eq 0 -and $transfer) {
-            $title = if ($mode -eq 'Download') { 'Загрузка завершена' } else { 'Запись завершена' }
+            $title = if ($mode -in @('Download','LibrarySync')) { 'Загрузка завершена' } else { 'Запись завершена' }
             Set-OperationProgress $title 100
         }
     }
@@ -1080,12 +1328,14 @@ $form.Add_FormClosing({
 
 function Start-ProgressFixture([string]$mode, [string[]]$lines) {
     $fixture = [Diagnostics.ProcessStartInfo]::new($exe)
-    $fixture.Arguments = '-u -c ' + (Quote-Argument ($lines -join "`n"))
+    $fixture.Arguments = '-X utf8 -u -c ' + (Quote-Argument ($lines -join "`n"))
     $fixture.UseShellExecute = $false
     $fixture.CreateNoWindow = $true
     $fixture.RedirectStandardInput = $true
     $fixture.RedirectStandardOutput = $true
     $fixture.RedirectStandardError = $true
+    $fixture.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $fixture.StandardErrorEncoding = [Text.Encoding]::UTF8
     Start-EngineProcess $mode $fixture
 }
 
@@ -1126,6 +1376,12 @@ function Test-OperationProgress {
         Wait-ProgressFixture { !$state.Process } 'Device info did not finish'
         if ($state.Device.summary -ne 'Test device' -or $state.ProgressTitle -or $log.Text -match 'OTA_PROGRESS') { throw 'Info must preserve its data and clear the progress area' }
 
+        Start-ProgressFixture 'Info' @('import sys', 'print("Bluetooth. Не удалось включить уведомления от платы.", file=sys.stderr)', 'print("Введите PIN с экрана платы.", file=sys.stderr)', 'sys.exit(1)')
+        Wait-ProgressFixture { !$state.Process } 'Bluetooth error did not finish'
+        if ($status.Text -notlike 'Bluetooth. *уведомления*' -or $log.Text -notlike '*Введите PIN*') {
+            throw 'The Bluetooth failure and its instruction must be shown.'
+        }
+
         Start-ProgressFixture 'List' @('print("02:00:00:12:34:56 Test device RSSI -45")')
         Wait-ProgressFixture { !$state.Process } 'Device discovery did not finish'
         if ($address.Items.Count -ne 1 -or $state.ProgressTitle) { throw 'Discovery must preserve its results and clear the progress area' }
@@ -1155,8 +1411,18 @@ try {
         $clientSize = $form.ClientSize
         Switch-Journal
         if (!$state.JournalOpen -or $journalToggle.Text -ne 'Свернуть') { throw 'Journal expansion failed' }
+        $logHeight = $log.Height
+        Resize-Journal 490
+        if ($log.Height -le $logHeight -or $viewport.Height -lt 65 -or $form.ClientSize -ne $clientSize) {
+            throw 'The journal must grow within the current window.'
+        }
         Switch-Journal
         if ($state.JournalOpen -or $journalToggle.Text -ne 'Развернуть' -or $form.ClientSize -ne $clientSize) { throw 'Journal collapse failed' }
+        Resize-Journal 300
+        Resize-Journal 66
+        if ($state.JournalOpen -or $log.Visible -or $drawerRow.Height -gt [Math]::Round(66 * $form.DeviceDpi / 96)) {
+            throw 'Dragging down must collapse the journal.'
+        }
         $form.ClientSize = [Drawing.Size]::new(668, 470)
         Set-OperationProgress 'Обновление прошивки' 25
         $shell.PerformLayout()

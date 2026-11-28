@@ -12,12 +12,14 @@ import tkinter as tk
 from argparse import Namespace
 from tkinter import filedialog, font, messagebox, ttk
 
-from bleak import BleakScanner
 from serial.tools import list_ports
+
 import firmware_catalog
+import firmware_library
 import nrf_flash
 import ota_app
 import usb_flash
+from ble_scan import BluetoothScanUnavailable, discover_ble
 
 
 USB = "USB"
@@ -179,7 +181,7 @@ class LogStream(io.TextIOBase):
 class Flasher:
     def __init__(self, root):
         self.root = root
-        root.title("ota-app 1.3.1 · MeshCore")
+        root.title("ota-app 1.3.2 · MeshCore")
         self.events = queue.Queue()
         self.busy = False
         self.labels = {}
@@ -188,6 +190,7 @@ class Flasher:
         self.disk = None
         self.checked = None
         self.pending_catalog = None
+        self.pending_library = None
         self.journal_open = False
         self.appearance = Appearance(root)
         px = self.appearance.px
@@ -280,11 +283,13 @@ class Flasher:
         self.clear.grid(row=0, column=1, padx=(px(4), 0))
         files = ttk.Frame(firmware, style="Surface.TFrame")
         files.grid(row=3, column=0, sticky="ew", pady=(px(10), px(10)))
-        files.columnconfigure((0, 1), weight=1, uniform="browse")
+        files.columnconfigure((0, 1, 2), weight=1, uniform="browse")
         self.browse = ttk.Button(files, text="Выбрать файл", style="Secondary.TButton", command=self.choose)
         self.browse.grid(row=0, column=0, sticky="ew", padx=(0, px(4)))
         self.github = ttk.Button(files, text="Из GitHub", style="Secondary.TButton", command=lambda: self.start("catalog"))
-        self.github.grid(row=0, column=1, sticky="ew", padx=(px(4), 0))
+        self.github.grid(row=0, column=1, sticky="ew", padx=px(4))
+        self.offline = ttk.Button(files, text="Офлайн", style="Secondary.TButton", command=self.open_library)
+        self.offline.grid(row=0, column=2, sticky="ew", padx=(px(4), 0))
         self.buttons = {}
         for row, (name, label) in enumerate((("update", "Обновить прошивку"), ("usb", "Прошить через USB"),
                             ("new", "Новая нода со сбросом…"), ("export", "Сохранить DFU ZIP"))):
@@ -542,6 +547,7 @@ class Flasher:
             self.disk_button.grid_remove()
         self.browse.configure(state="disabled" if self.busy else "normal")
         self.github.configure(state="disabled" if self.busy else "normal")
+        self.offline.configure(state="disabled" if self.busy else "normal")
         self.clear.configure(state="disabled" if self.busy or not self.file.get() else "normal")
         if nrf:
             self.nrf.grid()
@@ -681,6 +687,19 @@ class Flasher:
         disk = self.disk[0] if self.disk else None
         threading.Thread(target=self.worker, args=(op, transport, target, path, board, disk), daemon=True).start()
 
+    def library_context(self):
+        transport = self.method.get()
+        device = self.checked[2] if self.checked and self.checked[:2] == (transport, self.target()) else None
+        slug = BOARD_NAMES.get(self.board.get()) or self.nrf_detected_board()
+        if self.disk or transport == DFU:
+            device = None
+        return dict(formats=file_formats(transport, self.disk is not None), device=device,
+                    usb=transport == USB and not self.disk, board=firmware_library.BOARD_IDS.get(slug, 0))
+
+    def open_library(self):
+        if not self.busy:
+            self.launch("library", self.method.get(), self.library_context(), "")
+
     def worker(self, op, transport, target, path, board, disk):
         stream = LogStream(self.events)
 
@@ -693,7 +712,7 @@ class Flasher:
                     devices = asyncio.run(nrf_flash.scan_dfu())
                     self.events.put(("dfu", {f"{device['name']} ({device['address']})": device for device in devices}))
                 elif op == "scan":
-                    found = asyncio.run(BleakScanner.discover(timeout=10, return_adv=True))
+                    found = asyncio.run(discover_ble())
                     devices = {}
                     for device, advertisement in found.values():
                         name = advertisement.local_name or device.name or ""
@@ -703,8 +722,18 @@ class Flasher:
                 elif op == "catalog-uf2":
                     self.events.put(("catalog", firmware_catalog.catalog(firmware_catalog.uf2_target(board, target))))
                 elif op == "download":
-                    directory = pathlib.Path.home() / ".ota-app" / "firmware"
-                    self.events.put(("file", str(firmware_catalog.download(target, directory, progress=progress))))
+                    file, _ = firmware_library.store(target, progress=progress)
+                    self.events.put(("file", str(file)))
+                elif op == "library":
+                    self.events.put(("library", ("saved", firmware_library.saved(target))))
+                elif op == "library-index":
+                    self.events.put(("library", ("index", firmware_library.index())))
+                elif op == "library-sync":
+                    result = firmware_library.sync(*target, progress=progress)
+                    print(f"Скачано: {result['downloaded']}. Уже в библиотеке: {result['existing']}.")
+                    self.events.put(("library", ("saved", firmware_library.saved(path))))
+                elif op == "library-check":
+                    self.events.put(("file", str(firmware_library.verify(target["path"], target["digest"]))))
                 elif op == "export":
                     nrf_flash.export_dfu_zip(path, target)
                 elif op == "update" and disk:
@@ -727,6 +756,10 @@ class Flasher:
                     else:
                         asyncio.run(ota_app.main(["--" + flag, target, path], progress=progress))
             self.events.put(("done", (True, op)))
+        except BluetoothScanUnavailable as exc:
+            self.events.put(("log", f"{exc}\n"))
+            self.events.put(("done", (False, op)))
+            self.events.put(("scan-unavailable", str(exc)))
         except (Exception, SystemExit) as exc:
             self.events.put(("log", f"\n{exc or type(exc).__name__}\n"))
             self.events.put(("done", (False, op)))
@@ -758,8 +791,13 @@ class Flasher:
                 self.update_summary()
             elif kind == "catalog":
                 self.pending_catalog = value
+            elif kind == "library":
+                self.pending_library = value
             elif kind == "file":
                 self.file.set(value)
+            elif kind == "scan-unavailable":
+                self.status.set(value)
+                self.notice(value)
             elif kind == "done":
                 success, operation = value
                 self.busy = False
@@ -777,6 +815,13 @@ class Flasher:
                 if self.pending_catalog is not None:
                     catalog, self.pending_catalog = self.pending_catalog, None
                     self.show_catalog(catalog)
+                if self.pending_library is not None:
+                    page, data = self.pending_library
+                    self.pending_library = None
+                    if page == "saved":
+                        self.show_library(data)
+                    else:
+                        self.show_library_index(data)
         self.root.after(100, self.poll)
 
     def show_progress(self, done, total):
@@ -793,6 +838,149 @@ class Flasher:
         elif success:
             self.progress.configure(value=100)
             self.percent.set("100%")
+
+    def library_window(self, title):
+        px = self.appearance.px
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.configure(background=SCREEN)
+        dialog.bind("<Escape>", lambda _: dialog.destroy())
+        self.appearance.header(dialog, title, "Прошивки MeshCore-RS").pack(fill="x")
+        panel = ttk.Frame(dialog, padding=px(16), style="Surface.TFrame")
+        panel.pack(fill="both", expand=True)
+        dialog.grab_set()
+        return dialog, panel
+
+    def show_library(self, data):
+        dialog, panel = self.library_window("Офлайн-библиотека")
+        px = self.appearance.px
+        assets = data["files"]
+        panel.columnconfigure(0, weight=1)
+        ttk.Label(panel, text=f"Сохранено {data['total']} · Доступно в этом режиме {len(assets)}",
+                  style="FieldTitle.TLabel").grid(sticky="w")
+        note = data["device"] or "Проверьте устройство, чтобы подобрать прошивку по модели и сборке."
+        ttk.Label(panel, text=note, style="Surface.TLabel", wraplength=px(560), justify="left").grid(
+            sticky="w", pady=(px(5), px(10)))
+        deltas = [asset for asset in assets if asset["format"] == ".mcfd"]
+        visible = assets
+        only_delta = tk.BooleanVar()
+        filter_button = ttk.Checkbutton(panel, text=f"Только дельты .mcfd ({len(deltas)})", variable=only_delta)
+        filter_button.grid(row=2, column=0, sticky="w", pady=(0, px(6)))
+        if not deltas:
+            filter_button.state(["disabled"])
+        rows = tk.Listbox(panel, height=10, width=24, activestyle="none", background=FIELD,
+                          foreground=INK, selectbackground=ACCENT, selectforeground=PANEL)
+        rows.grid(row=3, column=0, sticky="nsew")
+        bar = ttk.Scrollbar(panel, orient="vertical", command=rows.yview, style="Mesh.Vertical.TScrollbar")
+        bar.grid(row=3, column=1, sticky="ns")
+        rows.configure(yscrollcommand=bar.set)
+        panel.rowconfigure(3, weight=1)
+        empty = "Нет сохранённых прошивок для выбранного подключения." if data["total"] else (
+            "Скачайте набор заранее, чтобы прошивать без интернета.")
+        description = tk.StringVar(value=empty)
+        ttk.Label(panel, textvariable=description, style="Surface.TLabel", wraplength=px(555), justify="left").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=px(10))
+        footer = ttk.Frame(panel, style="Surface.TFrame")
+        footer.grid(row=5, column=0, columnspan=2, sticky="ew")
+
+        def start(op, value=None):
+            dialog.destroy()
+            self.launch(op, self.method.get(), value, "")
+
+        def choose():
+            selection = rows.curselection()
+            if selection and visible[selection[0]]["enabled"]:
+                start("library-check", visible[selection[0]])
+
+        use = ttk.Button(footer, text="Выбрать", style="Primary.TButton", command=choose, state="disabled")
+        use.pack(side="right")
+        ttk.Button(footer, text="Закрыть", style="Link.TButton", command=dialog.destroy).pack(side="right", padx=px(6))
+        ttk.Button(footer, text="Скачать набор…", style="Secondary.TButton",
+                   command=lambda: start("library-index")).pack(side="left")
+
+        def update(_=None):
+            selection = rows.curselection()
+            if selection:
+                asset = visible[selection[0]]
+                details = [asset["name"], f"Выпуск {asset['tag']}"]
+                if asset["issue"]:
+                    details.append(("Только через USB-загрузчик · " if asset["enabled"] else "") + asset["issue"])
+                description.set("\n".join(details))
+                use.configure(state="normal" if asset["enabled"] else "disabled")
+            else:
+                description.set(empty)
+                use.configure(state="disabled")
+
+        def refresh():
+            nonlocal visible
+            selection = rows.curselection()
+            previous = visible[selection[0]] if selection else None
+            visible = deltas if only_delta.get() else assets
+            rows.delete(0, "end")
+            for asset in visible:
+                rows.insert("end", asset["label"])
+            if visible:
+                index = visible.index(previous) if previous in visible else 0
+                rows.selection_set(index)
+                rows.see(index)
+            update()
+
+        filter_button.configure(command=refresh)
+        rows.bind("<<ListboxSelect>>", update)
+        rows.bind("<Double-1>", lambda _: choose())
+        rows.bind("<Return>", lambda _: choose())
+        refresh()
+        height = min(px(470), self.root.winfo_screenheight() - px(75))
+        dialog.geometry(f"{min(px(640), self.root.winfo_screenwidth()-px(36))}x{height}")
+
+    def show_library_index(self, data):
+        dialog, panel = self.library_window("Скачать набор")
+        px = self.appearance.px
+        versions = data["versions"]
+        boards = [(0, "Все платы")] + sorted(data["boards"].items(), key=lambda pair: pair[1])
+        roles = [(0, "Обе роли"), (2, "Компаньон"), (1, "Репитер")]
+        selectors = []
+        for label, values in (
+            ("Выпуск", [v["tag"] + (" · предварительный" if v["prerelease"] else "") for v in versions]),
+            ("Модель", [label for _, label in boards]),
+            ("Роль", [label for _, label in roles]),
+        ):
+            ttk.Label(panel, text=label, style="FieldTitle.TLabel").pack(anchor="w")
+            box = ttk.Combobox(panel, values=values, state="readonly", style="Mesh.TCombobox", width=1)
+            box.pack(fill="x", pady=(px(3), px(10)))
+            box.current(0)
+            selectors.append(box)
+        version, model, role = selectors
+        summary = tk.StringVar()
+        ttk.Label(panel, textvariable=summary, style="Surface.TLabel").pack(anchor="w", pady=(px(3), px(12)))
+        footer = ttk.Frame(panel, style="Surface.TFrame")
+        footer.pack(fill="x")
+
+        def selection():
+            return versions[version.current()], int(boards[model.current()][0]), roles[role.current()][0]
+
+        def refresh(_=None):
+            release, board_id, role_id = selection()
+            plan = [a for a in release["assets"] if (not board_id or a["board"] == board_id)
+                    and (not role_id or a["role"] == role_id)]
+            size = sum(a["size"] for a in plan) / (1024 * 1024)
+            summary.set(f"Файлов: {len(plan)} · {size:.1f} МиБ" if plan else "Для выбранной модели и роли файлов нет.")
+            download.configure(state="normal" if plan else "disabled")
+
+        def download_set():
+            release, board_id, role_id = selection()
+            dialog.destroy()
+            self.launch("library-sync", self.method.get(), (release["tag"], board_id, role_id), self.library_context())
+
+        download = ttk.Button(footer, text="Скачать", style="Primary.TButton", command=download_set)
+        download.pack(side="right")
+        ttk.Button(footer, text="Назад", style="Link.TButton",
+                   command=lambda: (dialog.destroy(), self.open_library())).pack(side="right", padx=px(6))
+        for box in selectors:
+            box.bind("<<ComboboxSelected>>", refresh)
+        refresh()
+        dialog.minsize(px(420), 1)
 
     def show_catalog(self, catalog):
         assets = catalog["assets"]

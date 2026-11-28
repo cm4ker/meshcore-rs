@@ -196,7 +196,7 @@ def validate_firmware(asset, data):
         raise ValueError("Размер или контрольная сумма образа не совпадает с манифестом.")
 
 
-def download(asset, directory, *, progress=None):
+def download_data(asset, *, progress=None):
     url = asset_url(asset)
     if not 0 < asset["size"] <= MAX_SIZE:
         raise ValueError("Недопустимый размер файла выпуска.")
@@ -207,6 +207,11 @@ def download(asset, directory, *, progress=None):
     if digest and digest.lower() != "sha256:" + hashlib.sha256(data).hexdigest():
         raise ValueError("Контрольная сумма загрузки не совпадает.")
     validate_firmware(asset, data)
+    return data
+
+
+def download(asset, directory, *, progress=None):
+    data = download_data(asset, progress=progress)
     directory = Path(directory).expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True)
     folder = Path(tempfile.mkdtemp(prefix="release-", dir=directory))

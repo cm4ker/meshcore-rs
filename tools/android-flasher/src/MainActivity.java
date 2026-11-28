@@ -25,11 +25,12 @@ public class MainActivity extends Activity {
     static final String BLUETOOTH_UPDATE_MODE="Обновление по Bluetooth";
     static final String NRF52_BOOTLOADER_MODE="Загрузчик nRF52 (UF2)";
     static final int SELECT_FIRMWARE=1, EXPORT_DFU=2, CHECK_UF2_DRIVE=3, INSTALL_UF2=4, CATALOG_UF2=5;
+    private static final int ENABLE_BLUETOOTH_FOR_SCAN = 6;
     UsbManager usb;
     Spinner devices;
     TextView fileName, fileHint, report, previousStatus, status, deviceLabel, deviceDetails, modelLabel;
     JournalPanel journal;
-    Button scan, selectFile, clearFile, info, update, releases;
+    Button scan, selectFile, clearFile, info, update, releases, offline;
     final List<UsbSerialDriver> drivers=new ArrayList<>();
     boolean usbDiskPresent;
     Uf2Drive uf2Drive;
@@ -195,6 +196,7 @@ public class MainActivity extends Activity {
             line("Выбор файла снят.");
         });
         releases=view("releases");releases.setOnClickListener(v->chooseRelease());
+        offline=view("offline");offline.setOnClickListener(v->openLibrary());
         exportDfu=view("export_dfu");exportDfu.setOnClickListener(v->prepareExport());
         info=view("info");info.setOnClickListener(v->{
             if(usesUf2Drive())selectUf2Drive(CHECK_UF2_DRIVE);
@@ -279,6 +281,7 @@ public class MainActivity extends Activity {
         clearFile.setEnabled(!busy);
         clearFile.setVisibility(file==null?View.GONE:View.VISIBLE);
         releases.setEnabled(!busy&&(dfu?board!=null:(connected||checkDrive)));
+        offline.setEnabled(!busy);
         String mismatch=dfu?dfuFirmwareIssue(board):
             usbUf2&&uf2Drive!=null?dfuFirmwareIssue(uf2Drive.info.board):"";
         fileHint.setText(mismatch);
@@ -395,6 +398,10 @@ public class MainActivity extends Activity {
     }
     @Override protected void onActivityResult(int request,int result,Intent data){
         super.onActivityResult(request,result,data);
+        if (request == ENABLE_BLUETOOTH_FOR_SCAN) {
+            if (result == RESULT_OK && mode() >= 2) scanBle();
+            return;
+        }
         if(request==CHECK_UF2_DRIVE||request==INSTALL_UF2||request==CATALOG_UF2){
             if(result==RESULT_OK&&data!=null&&data.getData()!=null&&mode()==0)inspectUf2Drive(data.getData(),request);
             else idle();
@@ -535,9 +542,22 @@ public class MainActivity extends Activity {
         stopScan();
         clearProgress();
         try{
-            BluetoothManager m=(BluetoothManager)getSystemService(BLUETOOTH_SERVICE);
-            if(m==null||m.getAdapter()==null||!m.getAdapter().isEnabled()){line("Включите Bluetooth и повторите поиск.");return;}
-            scanner=m.getAdapter().getBluetoothLeScanner();if(scanner==null){line("Сканирование Bluetooth недоступно.");return;}
+            BluetoothManager manager = getSystemService(BluetoothManager.class);
+            BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+            if (adapter == null) {
+                line("Адаптер Bluetooth недоступен на этом устройстве.");
+                return;
+            }
+            if (!adapter.isEnabled()) {
+                line("Bluetooth выключен. Включите его для поиска.");
+                try {
+                    startActivityForResult(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE), ENABLE_BLUETOOTH_FOR_SCAN);
+                } catch (ActivityNotFoundException e) {
+                    line("Включите Bluetooth в настройках телефона и повторите поиск.");
+                }
+                return;
+            }
+            scanner=adapter.getBluetoothLeScanner();if(scanner==null){line("Сканирование Bluetooth недоступно.");return;}
             found.clear();showBle();
             callback=new ScanCallback(){
                 public void onScanResult(int type,ScanResult r){
@@ -763,7 +783,7 @@ public class MainActivity extends Activity {
             try{
                 LegacyPackage pkg=LegacyPackage.fromUf2(readFile(selected));
                 line("Подготовлен образ приложения: "+pkg.image.length+" байт.");
-                try(BlePort port=new BlePort(this,device,true)){
+                try(BlePort port=BlePort.open(this,device,true,this::line)){
                     LegacyDfu.send(port,pkg,this::line,reportProgress());
                     installed=true;
                 }
@@ -784,7 +804,7 @@ public class MainActivity extends Activity {
             boolean installed=false;
             try{
                 byte[] image=flashing?readOtaFirmware(selected,format):null;
-                Ota.Port transport=dev==null?new TcpPort(address):new BlePort(this,dev);
+                Ota.Port transport=dev==null?new TcpPort(address):BlePort.open(this,dev,false,this::line);
                 try(Closeable session=(Closeable)transport){
                     Ota ota=new Ota(transport,this::line);
                     if(flashing){
@@ -888,17 +908,17 @@ public class MainActivity extends Activity {
                     boolean changed=target.uf2?mode()==0&&usbDiskGeneration!=diskGeneration:
                         !Objects.equals(selectedEndpoint,endpoint());
                     if(changed){line("Устройство сменилось. Снова нажмите «Из GitHub».");return;}
-                    new ReleasePicker(this,target,assets,asset->downloadRelease(asset,target)).show();
+                    new ReleasePicker(this,target,assets,this::downloadRelease).show();
                 });
             }catch(Exception e){line("Каталог GitHub: "+e.getMessage());runOnUiThread(()->{if(!isDestroyed()){failProgress();idle();}});}
         },"Firmware-releases").start();
     }
-    void downloadRelease(FirmwareReleases.Asset asset,FirmwareReleases.Target target){
+    void downloadRelease(FirmwareReleases.Asset asset){
         busy=true;controls();line("Загрузка "+asset.name+"…");
         beginProgress("Подключение к GitHub");
         new Thread(()->{
             try{
-                File downloaded=FirmwareReleases.download(asset,new File(getFilesDir(),"firmware"),target,reportProgress());
+                File downloaded=FirmwareLibrary.store(asset,firmwareDirectory(),reportProgress()).file;
                 runOnUiThread(()->{
                     if(isDestroyed())return;
                     file=Uri.fromFile(downloaded);showFile();
@@ -908,6 +928,62 @@ public class MainActivity extends Activity {
             }catch(Exception e){line("Ошибка загрузки: "+e.getMessage());runOnUiThread(()->{if(!isDestroyed()){failProgress();idle();}});}
         },"Firmware-download").start();
     }
+
+    private File firmwareDirectory(){return new File(getFilesDir(),"firmware");}
+
+    private interface LibraryResult<T>{void accept(T result);}
+
+    private <T> void libraryWork(String caption,boolean transfer,java.util.concurrent.Callable<T> task,LibraryResult<T> result){
+        if(busy)return;
+        stopScan();busy=true;controls();startReport(caption);
+        if(transfer)beginProgress(caption);
+        new Thread(()->{
+            try{
+                T value=task.call();
+                runOnUiThread(()->{
+                    if(isDestroyed())return;
+                    if(transfer)finishProgress("Набор сохранён");
+                    idle();
+                    result.accept(value);
+                });
+            }catch(Exception error){
+                line("Библиотека прошивок. "+(error.getMessage()==null?error.toString():error.getMessage()));
+                runOnUiThread(()->{if(!isDestroyed()){failProgress();idle();}});
+            }
+        },"Firmware-library").start();
+    }
+
+    void openLibrary(){
+        int mode=mode();
+        boolean disk=mode==0&&uf2Drive!=null&&usesUf2Drive();
+        DfuBoard model=mode==3?selectedDfuBoard():disk?uf2Drive.info.board:null;
+        int board=model==null?0:Arrays.asList(FirmwareReleases.BOARDS).indexOf(model.releaseName);
+        Ota.Device device=mode!=3&&!disk&&Objects.equals(checkedEndpoint,endpoint())?checkedDevice:null;
+        libraryWork("Чтение сохранённых прошивок…",false,
+            ()->FirmwareLibrary.saved(firmwareDirectory(),mode,disk,Math.max(0,board),device),
+            saved->FirmwareLibraryDialogs.showSaved(this,saved));
+    }
+
+    void loadLibraryVersions(){
+        libraryWork("Загрузка списка выпусков…",false,FirmwareLibrary::versions,
+            versions->FirmwareLibraryDialogs.showVersions(this,versions));
+    }
+
+    void downloadLibrary(List<FirmwareReleases.Asset> files){
+        if(files.isEmpty())return;
+        libraryWork("Загрузка офлайн-набора",true,
+            ()->FirmwareLibrary.sync(files,firmwareDirectory(),reportProgress()),
+            downloaded->line("Скачано: "+downloaded+". Уже в библиотеке: "+(files.size()-downloaded)+"."));
+    }
+
+    void chooseSavedFirmware(FirmwareLibrary.Entry entry){
+        if(!entry.enabled)return;
+        libraryWork("Проверка сохранённого файла…",false,()->FirmwareLibrary.verify(entry,firmwareDirectory()),saved->{
+            file=Uri.fromFile(saved);showFile();controls();
+            line("Выбрана сохранённая прошивка "+entry.file.getName()+".");
+        });
+    }
+
     @Override public void onBackPressed(){
         if(journal.isExpanded())journal.setExpanded(false);
         else if(busy)Toast.makeText(this,"Дождитесь завершения операции.",Toast.LENGTH_SHORT).show();

@@ -104,8 +104,12 @@
                         android:layout_weight="1" android:layout_marginEnd="8dp" android:text="Выбрать файл" />
                     <Button android:id="@+id/releases" style="@style/SoftAction"
                         android:layout_width="0dp" android:layout_height="match_parent"
-                        android:layout_weight="1" android:text="Из GitHub"
+                        android:layout_weight="1" android:layout_marginEnd="8dp" android:text="Из GitHub"
                         android:contentDescription="Скачать прошивку с GitHub" />
+                    <Button android:id="@+id/offline" style="@style/SoftAction"
+                        android:layout_width="0dp" android:layout_height="match_parent"
+                        android:layout_weight="1" android:text="Офлайн"
+                        android:contentDescription="Офлайн-библиотека прошивок" />
                 </LinearLayout>
 
                 <Button android:id="@+id/update" style="@style/PrimaryAction"

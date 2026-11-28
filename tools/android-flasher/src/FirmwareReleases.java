@@ -10,12 +10,15 @@ import java.util.regex.Pattern;
 
 final class FirmwareReleases {
     static final String[] BOARDS={"", "heltec-v4", "heltec-v3", "xiao-c6",
-        "t-echo", "promicro", "heltec-paper", "heltec-t114", "t3s3", "heltec-t096"};
+        "t-echo", "promicro", "heltec-paper", "heltec-t114", "t3s3", "heltec-t096", "heltec-mesh-pocket"};
+    static final String API="https://api.github.com/repos/cm4ker/meshcore-rs/releases?per_page=20";
     static final int REPEATER=1, COMPANION=2;
     static final int MAX_IMAGE=8*1024*1024;
     private static final int MAX_MCFW_ENVELOPE=54+31+8*96;
-    private static final Pattern RELEASE_BUILD=Pattern.compile("-r([0-9]+)$");
-    private static final Pattern DELTA_BASE=Pattern.compile("\\.from-r([0-9]+)\\.mcfd$");
+    static final Pattern RELEASE_BUILD=Pattern.compile("-r([0-9]+)$");
+    static final Pattern DELTA_BASE=Pattern.compile("\\.from-r([0-9]+)\\.mcfd$");
+    static final Pattern FILENAME=Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,254}");
+    static final Pattern RELEASE_TAG=Pattern.compile("[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?");
 
     static final class Target {
         final String board, model;
@@ -50,14 +53,18 @@ final class FirmwareReleases {
         }
 
         String updateIssue(Asset asset) {
+            return updateIssue(asset.format,asset.size,asset.build);
+        }
+
+        String updateIssue(FirmwareFormat format,int size,long build) {
             if(uf2)return "";
-            if(installed==0||asset.build==0)return "Номер сборки неизвестен";
-            if(asset.build==installed)return "Эта сборка уже на плате";
-            if(asset.build<installed)return "Старее установленной сборки";
-            if(asset.format==FirmwareFormat.MCFD)
+            if(installed==0||build==0)return "Номер сборки неизвестен";
+            if(build==installed)return "Эта сборка уже на плате";
+            if(build<installed)return "Старее установленной сборки";
+            if(format==FirmwareFormat.MCFD)
                 return hasBaseImage?"":"Плата не сообщила данные исходной прошивки";
             if(deltaOnly)return "Для обновления этой платы нужна дельта .mcfd";
-            if(asset.size-MAX_MCFW_ENVELOPE>capacity)return "Образ больше слота обновления";
+            if(size-MAX_MCFW_ENVELOPE>capacity)return "Образ больше слота обновления";
             return "";
         }
     }
@@ -66,12 +73,12 @@ final class FirmwareReleases {
         final String name, url, digest, tag;
         final FirmwareFormat format;
         final long build, base;
-        final int size, role;
+        final int size, board, role;
         final boolean prerelease;
 
-        Asset(JSONObject metadata,String name,String tag,FirmwareFormat format,int role,long base,
+        Asset(JSONObject metadata,String name,String tag,FirmwareFormat format,int board,int role,long base,
               boolean prerelease)throws JSONException {
-            this.name=name;this.tag=tag;this.format=format;this.role=role;this.base=base;this.prerelease=prerelease;
+            this.name=name;this.tag=tag;this.format=format;this.board=board;this.role=role;this.base=base;this.prerelease=prerelease;
             url=metadata.getString("browser_download_url");
             digest=metadata.optString("digest","");
             size=metadata.getInt("size");
@@ -88,19 +95,44 @@ final class FirmwareReleases {
         return role==REPEATER?"Репитер":"Компаньон";
     }
 
-    private static int fileRole(String name,String board) {
+    static int fileRole(String name,String board) {
         if(name.startsWith(board+"-repeater-")||name.startsWith(board+"-repeater."))return REPEATER;
         if(name.startsWith(board+"-companion-")||name.startsWith(board+"-companion."))return COMPANION;
         return 0;
     }
 
-    private static long buildNumber(Pattern pattern,String text) {
+    static long buildNumber(Pattern pattern,String text) {
         Matcher matcher=pattern.matcher(text);
         if(!matcher.find())return 0;
         try{
             long number=Long.parseLong(matcher.group(1));
             return number<=0xffffffffL?number:0;
         }catch(NumberFormatException ignored){return 0;}
+    }
+
+    static int fileBoard(String name){
+        if(!FILENAME.matcher(name).matches())return 0;
+        for(int id=1;id<BOARDS.length;id++)if(fileRole(name,BOARDS[id])!=0)return id;
+        return 0;
+    }
+
+    static boolean bundledUf2(String name,int board,int role){
+        return (board==4||board==5||board==7||board==9)
+            && name.equals(BOARDS[board]+(role==REPEATER?"-repeater.uf2":"-companion.uf2"));
+    }
+
+    static Asset releaseAsset(JSONObject metadata,String tag,boolean prerelease)throws JSONException {
+        String name=metadata.getString("name");
+        int board=fileBoard(name);
+        if(board==0)return null;
+        int role=fileRole(name,BOARDS[board]);
+        FirmwareFormat format=FirmwareFormat.fromName(name);
+        long base=buildNumber(DELTA_BASE,name);
+        if(format==FirmwareFormat.UF2&&!bundledUf2(name,board,role))return null;
+        if(format!=FirmwareFormat.MCFW&&format!=FirmwareFormat.UF2&&
+                (format!=FirmwareFormat.MCFD||base==0))return null;
+        Asset asset=new Asset(metadata,name,tag,format,board,role,base,prerelease);
+        return asset.size>0&&asset.size<=MAX_IMAGE?asset:null;
     }
 
     static List<Asset> parse(String json,Target target)throws JSONException {
@@ -110,22 +142,15 @@ final class FirmwareReleases {
             JSONObject release=releases.getJSONObject(i);
             if(release.optBoolean("draft"))continue;
             String tag=release.getString("tag_name");
+            if(!RELEASE_TAG.matcher(tag).matches())continue;
             boolean prerelease=release.optBoolean("prerelease");
             JSONArray assets=release.getJSONArray("assets");
             for(int j=0;j<assets.length();j++){
-                JSONObject metadata=assets.getJSONObject(j);
-                String name=metadata.getString("name");
-                int role=fileRole(name,target.board);
-                if(role==0||(!target.uf2&&role!=target.role))continue;
-                FirmwareFormat format=FirmwareFormat.fromName(name);
-                long base=buildNumber(DELTA_BASE,name);
-                if(target.uf2){
-                    String expected=target.board+(role==REPEATER?"-repeater.uf2":"-companion.uf2");
-                    if(!name.equals(expected))continue;
-                }else if(format!=FirmwareFormat.MCFW&&
-                    (format!=FirmwareFormat.MCFD||base==0||base!=target.installed))continue;
-                Asset asset=new Asset(metadata,name,tag,format,role,base,prerelease);
-                if(asset.size>0&&asset.size<=MAX_IMAGE)result.add(asset);
+                Asset asset=releaseAsset(assets.getJSONObject(j),tag,prerelease);
+                if(asset==null||!BOARDS[asset.board].equals(target.board))continue;
+                if(target.uf2?asset.format==FirmwareFormat.UF2:
+                        asset.role==target.role&&(asset.format==FirmwareFormat.MCFW||
+                        asset.format==FirmwareFormat.MCFD&&asset.base==target.installed))result.add(asset);
             }
         }
         Collections.sort(result,(first,second)->{
@@ -142,8 +167,7 @@ final class FirmwareReleases {
     }
 
     static List<Asset> load(Target target)throws Exception {
-        String url="https://api.github.com/repos/cm4ker/meshcore-rs/releases?per_page=20";
-        return parse(new String(fetch(url,8*1024*1024),StandardCharsets.UTF_8),target);
+        return parse(new String(fetch(API,8*1024*1024),StandardCharsets.UTF_8),target);
     }
     static byte[] fetch(String address,int limit)throws IOException {
         return fetch(address,limit,0,Ota.Progress.NONE);
@@ -151,7 +175,10 @@ final class FirmwareReleases {
     static byte[] fetch(String address,int limit,int expectedSize,Ota.Progress progress)throws IOException {
         URL url=new URL(address);
         for(int redirect=0;redirect<6;redirect++){
-            Ota.need("https".equals(url.getProtocol()),"Загрузка требует HTTPS.");
+            String host=url.getHost();
+            Ota.need("https".equals(url.getProtocol())&&("api.github.com".equals(host)||"github.com".equals(host)||
+                "release-assets.githubusercontent.com".equals(host)||"objects.githubusercontent.com".equals(host)),
+                "GitHub перенаправил загрузку на неожиданный адрес.");
             HttpURLConnection c=(HttpURLConnection)url.openConnection();
             c.setConnectTimeout(15000);c.setReadTimeout(30000);c.setInstanceFollowRedirects(false);
             c.setRequestProperty("User-Agent","ota-app-Android");
@@ -178,35 +205,55 @@ final class FirmwareReleases {
         }
         throw new IOException("Слишком много перенаправлений.");
     }
-    static File download(Asset asset,File directory,Target target)throws Exception {
-        return download(asset,directory,target,Ota.Progress.NONE);
+    static boolean validAssetUrl(Asset asset){
+        return RELEASE_TAG.matcher(asset.tag).matches()&&FILENAME.matcher(asset.name).matches()&&
+            asset.url.equals("https://github.com/cm4ker/meshcore-rs/releases/download/"+asset.tag+"/"+asset.name);
     }
-    static File download(Asset asset,File directory,Target target,Ota.Progress progress)throws Exception {
-        Ota.need(asset.name.matches("[a-zA-Z0-9._-]+") &&
-            asset.url.startsWith("https://github.com/cm4ker/meshcore-rs/releases/download/"),"Неверный адрес файла выпуска.");
+
+    static byte[] downloadBytes(Asset asset,Ota.Progress progress)throws Exception {
+        Ota.need(validAssetUrl(asset),"Неверный адрес файла выпуска.");
         Ota.need(asset.size>0 && asset.size<=MAX_IMAGE,"Недопустимый размер файла выпуска.");
         byte[] bytes=fetch(asset.url,MAX_IMAGE,asset.size,progress);
         Ota.need(bytes.length==asset.size,"Файл загружен не полностью.");
         progress.update("Проверка загруженного файла",bytes.length,asset.size);
-        if(asset.digest.startsWith("sha256:")){
-            StringBuilder hash=new StringBuilder();
-            for(byte b:Ota.digest(bytes))hash.append(String.format(Locale.ROOT,"%02x",b&255));
-            Ota.need(asset.digest.substring(7).equalsIgnoreCase(hash.toString()),"Контрольная сумма загрузки не совпадает.");
+        if(!asset.digest.isEmpty())
+            Ota.need(asset.digest.equalsIgnoreCase("sha256:"+hex(Ota.digest(bytes))),"Контрольная сумма загрузки не совпадает.");
+        validateFirmware(asset.format,asset.board,asset.role,asset.build,bytes);
+        return bytes;
+    }
+
+    static String hex(byte[] bytes){
+        StringBuilder hash=new StringBuilder(bytes.length*2);
+        for(byte b:bytes){
+            hash.append(Character.forDigit((b>>4)&15,16)).append(Character.forDigit(b&15,16));
         }
-        if(target.uf2)LegacyPackage.fromUf2(bytes);
-        else{
-            Ota.need(bytes.length>=16 && bytes[0]=='M' && bytes[1]=='C' && bytes[2]=='F' &&
-                (bytes[3]=='W'||bytes[3]=='D'),"Неверный формат прошивки в выпуске.");
-            Ota.need(target.board.equals(board(bytes[5]&255)) && (bytes[6]&255)==asset.role,
-                "Файл предназначен для другой платы или роли.");
+        return hash.toString();
+    }
+
+    static int envelopeEnd(byte[] data)throws IOException{
+        Ota.need(data.length>=54&&data[0]=='M'&&data[1]=='C'&&data[2]=='F'&&data[3]=='W'&&data[4]==1&&(data[52]&255)<=31,
+            "Неверный заголовок прошивки.");
+        int index=53+(data[52]&255);
+        Ota.need(index<data.length&&(data[index]&255)>0&&(data[index]&255)<=8,"Неверный конверт выпуска.");
+        int end=index+1+96*(data[index]&255);
+        Ota.need(end<data.length,"Неверная длина конверта выпуска.");
+        return end;
+    }
+
+    static void validateFirmware(FirmwareFormat format,int board,int role,long build,byte[] data)throws Exception{
+        if(format==FirmwareFormat.UF2){
+            LegacyPackage.fromUf2(data);
+            return;
         }
-        Ota.need(directory.isDirectory()||directory.mkdirs(),"Не удалось создать папку загрузок.");
-        File folder=new File(directory,UUID.randomUUID().toString());
-        Ota.need(folder.mkdir(),"Не удалось создать папку выпуска.");
-        File downloaded=new File(folder,asset.name);
-        try{
-            try(OutputStream out=new FileOutputStream(downloaded)){out.write(bytes);}
-            return downloaded;
-        }catch(Exception e){downloaded.delete();folder.delete();throw e;}
+        int end=envelopeEnd(data);
+        Ota.need((data[5]&255)==board&&(data[6]&255)==role&&(Ota.i32(data,8)&0xffffffffL)==build,
+            "Сборка, модель платы или роль файла не соответствуют выпуску.");
+        int imageSize=Ota.i32(data,12);
+        Ota.need(imageSize>0,"Неверный размер образа.");
+        if(format==FirmwareFormat.MCFD)
+            Ota.need(data.length>=end+38&&Ota.i32(data,end)>0,"Неверная длина дельты MCFD.");
+        else
+            Ota.need(data.length-end==imageSize&&Arrays.equals(Arrays.copyOfRange(data,16,48),
+                Ota.digest(Arrays.copyOfRange(data,end,data.length))),"Контрольная сумма образа не совпадает.");
     }
 }

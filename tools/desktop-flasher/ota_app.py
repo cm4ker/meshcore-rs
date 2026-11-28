@@ -44,6 +44,8 @@ import time
 import zlib
 
 import firmware_catalog
+import firmware_library
+from ble_scan import BluetoothScanUnavailable, discover_ble
 
 from meshcore_ota import (  # noqa: E402
     DEFAULT_DELTA_TOOL, ERRORS, REPO, cli_progress, describe_device, describe_envelope, envelope_pieces, find_base,
@@ -60,6 +62,7 @@ CMD_DEVICE_QUERY, RESP_DEVICE_INFO = 22, 13
 # CRC-32 of index and data, so a frame the link mangled is dropped and sent again
 CHUNK = 168
 FLAG_ZLIB, FLAG_DELTA, FLAG_CRC = 1, 2, 4
+NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 
@@ -208,6 +211,10 @@ class TcpLink(StreamLink):
         return cls(reader, writer)
 
 
+class BluetoothLinkError(OSError):
+    """A Bluetooth setup error that can be shown directly in the app."""
+
+
 async def pair_windows(address, pin):
     """Pair this Windows PC with the device by passkey entry (bleak only does Just Works), dropping
     an earlier bond first: a repeater forgets its bonds when it restarts (the Pro Micro), and
@@ -215,29 +222,40 @@ async def pair_windows(address, pin):
     from bleak import BleakScanner
     from winrt.windows.devices.bluetooth import BluetoothAddressType, BluetoothLEDevice
     from winrt.windows.devices.enumeration import (
-        DevicePairingKinds, DevicePairingProtectionLevel, DevicePairingResultStatus,
+        DevicePairingKinds, DevicePairingProtectionLevel, DevicePairingResultStatus, DeviceUnpairingResultStatus,
     )
     if await BleakScanner.find_device_by_address(address, timeout=20) is None:
-        sys.exit(f"{address} is not advertising: is its update window open (`fw ble`)?")
+        raise BluetoothLinkError("Bluetooth. Плата не найдена для сопряжения.\nОткройте Bluetooth на плате и повторите проверку.")
     raw = int(address.replace(":", ""), 16)
     dev = await BluetoothLEDevice.from_bluetooth_address_async(raw)
     if dev is None:  # a static random address, as the nRF52 boards have
         dev = await BluetoothLEDevice.from_bluetooth_address_with_bluetooth_address_type_async(raw, BluetoothAddressType.RANDOM)
     if dev is None:
-        sys.exit(f"Windows does not find {address}")
-    pairing = dev.device_information.pairing
-    if pairing.is_paired:
-        await pairing.unpair_async()
-    custom = pairing.custom
-    token = custom.add_pairing_requested(lambda _, req: req.accept_with_pin(pin))
+        raise BluetoothLinkError("Bluetooth. Windows не нашла плату для сопряжения.")
     try:
-        result = await custom.pair_with_protection_level_async(
-            DevicePairingKinds.PROVIDE_PIN, DevicePairingProtectionLevel.ENCRYPTION_AND_AUTHENTICATION)
+        pairing = dev.device_information.pairing
+        if pairing.is_paired:
+            unpair = await pairing.unpair_async()
+            if unpair.status not in (DeviceUnpairingResultStatus.UNPAIRED, DeviceUnpairingResultStatus.ALREADY_UNPAIRED):
+                raise BluetoothLinkError(
+                    f"Bluetooth. Windows не смогла обновить сопряжение.\nСтатус Windows — {unpair.status.name}."
+                )
+        custom = pairing.custom
+        token = custom.add_pairing_requested(lambda _, req: req.accept_with_pin(pin))
+        try:
+            result = await custom.pair_with_protection_level_async(
+                DevicePairingKinds.PROVIDE_PIN, DevicePairingProtectionLevel.ENCRYPTION_AND_AUTHENTICATION)
+        finally:
+            custom.remove_pairing_requested(token)
     finally:
-        custom.remove_pairing_requested(token)
+        with contextlib.suppress(OSError):
+            dev.close()
     if result.status not in (DevicePairingResultStatus.PAIRED, DevicePairingResultStatus.ALREADY_PAIRED):
-        sys.exit(f"pairing failed: {result.status.name}")
-    log("paired with the PIN")
+        raise BluetoothLinkError(
+            "Bluetooth. Сопряжение с платой не удалось.\n"
+            f"Проверьте текущий PIN на экране платы. Статус Windows — {result.status.name}."
+        )
+    log("Bluetooth · сопряжение по PIN завершено.")
 
 
 class BleLink(Link):
@@ -245,20 +263,58 @@ class BleLink(Link):
 
     @classmethod
     async def open(cls, address):
-        from bleak import BleakClient
-        from bleak.exc import BleakError
-        self = cls()
-        self.client = BleakClient(address)
-        for attempt in range(3):  # a device that has just rebooted may not be advertising yet
+        from bleak import BleakClient, BleakScanner
+        from bleak.exc import BleakBluetoothNotAvailableError, BleakCharacteristicNotFoundError, BleakError
+
+        windows = sys.platform == "win32"
+        subscription_error = None
+        for attempt in range(3):
+            action = "найти плату"
+            link = cls()
+            client = None
+            ready = False
             try:
-                await self.client.connect()
-                break
-            except (OSError, BleakError, asyncio.TimeoutError):
+                device = await BleakScanner.find_device_by_address(address, timeout=7)
+                if device is None:
+                    raise BleakError("Плата не появилась в Bluetooth-поиске.")
+                action = "подключиться к плате"
+                # Windows can return a stale GATT session after a disconnect or firmware change.
+                winrt = {"use_cached_services": False} if windows and attempt else {}
+                client = link.client = BleakClient(device, services=(NUS_SERVICE,), timeout=12, winrt=winrt)
+                await asyncio.wait_for(client.connect(), timeout=15)
+                action = "включить уведомления от платы"
+                await asyncio.wait_for(
+                    client.start_notify(NUS_TX, lambda _, data, frames=link.frames: frames.put_nowait(bytes(data))),
+                    timeout=12,
+                )
+                if not client.is_connected:
+                    raise BleakError("Связь прервалась после подписки.")
+                ready = True
+                return link
+            except BleakBluetoothNotAvailableError as exc:
+                raise BluetoothLinkError(
+                    "Bluetooth. Адаптер недоступен.\nПроверьте, что Bluetooth включён и приложению разрешён доступ."
+                ) from exc
+            except (OSError, BleakError, asyncio.TimeoutError) as exc:
+                detail = str(exc) or "Истекло время ожидания."
+                log(f"Bluetooth · попытка {attempt + 1}/3 · не удалось {action}. {detail}")
+                if action == "включить уведомления от платы":
+                    subscription_error = exc
                 if attempt == 2:
-                    raise
-                await asyncio.sleep(3)
-        await self.client.start_notify(NUS_TX, lambda _, data: self.frames.put_nowait(bytes(data)))
-        return self
+                    if isinstance(subscription_error, BleakCharacteristicNotFoundError):
+                        action = "найти службу обновления MeshCore"
+                    elif subscription_error is not None:
+                        action = "включить уведомления от платы"
+                    message = f"Bluetooth. Не удалось {action}."
+                    message += "\nОткройте Bluetooth на плате и закройте другие приложения, подключённые к ней."
+                    if windows:
+                        message += " Если на экране платы есть PIN, введите его в поле «PIN Bluetooth»."
+                    raise BluetoothLinkError(message) from exc
+            finally:
+                if client is not None and not ready:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(client.disconnect(), timeout=3)
+            await asyncio.sleep(1.5)
 
     async def send(self, frame, confirm=True):
         await self.client.write_gatt_char(NUS_RX, frame, response=confirm)
@@ -276,7 +332,15 @@ async def open_link(args):
                 sys.exit("--pin pairs on Windows only. On macOS leave it out: the system asks for the PIN when it "
                          "connects. On Linux pair first (bluetoothctl, `pair <address>`, type the PIN), then "
                          "run without --pin.")
-            await pair_windows(args.ble, args.pin)
+            if len(args.pin) != 6 or not args.pin.isascii() or not args.pin.isdecimal():
+                raise BluetoothLinkError("Bluetooth. Введите шестизначный PIN с экрана платы.")
+            from bleak.exc import BleakError
+            try:
+                await pair_windows(args.ble, args.pin)
+            except BluetoothLinkError:
+                raise
+            except (OSError, BleakError) as exc:
+                raise BluetoothLinkError(f"Bluetooth. Не удалось выполнить сопряжение.\n{exc}") from exc
             args.paired = True
         return await BleLink.open(args.ble)
     return await TcpLink.open(args.tcp)
@@ -333,13 +397,15 @@ async def list_devices():
     for p in ports:
         usb = f"  USB {p.vid:04X}:{p.pid:04X}" if p.vid is not None else ""
         print(f"  {p.device}  {p.description}{usb}")
-    log("MeshCore devices advertising over BLE (--ble), 10 s:")
     try:
-        from bleak import BleakScanner
-        found = await BleakScanner.discover(timeout=10, return_adv=True)
+        await list_ble_devices()
     except Exception as e:  # no adapter, or Bluetooth off
         log(f"no BLE: {e or type(e).__name__}")
-        return
+
+
+async def list_ble_devices():
+    log("MeshCore devices advertising over BLE (--ble), 10 s:")
+    found = await discover_ble()
     devices = sorted(((adv.rssi, d.address, adv.local_name or d.name or "") for d, adv in found.values()
                       if (adv.local_name or d.name or "").startswith("MeshCore")), reverse=True)
     for rssi, address, name in devices:
@@ -365,6 +431,7 @@ async def main(argv=None, *, progress=None):
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--info", action="store_true", help="only show the device and the image it runs")
     mode.add_argument("--list", action="store_true", help="list the serial ports and the MeshCore devices on BLE")
+    mode.add_argument("--scan-ble", action="store_true", help="scan for MeshCore devices on BLE")
     mode.add_argument("--device-json", action="store_true", help="show the device information as JSON")
     mode.add_argument("--catalog", action="store_true", help="show releases for the selected device as JSON")
     mode.add_argument("--download-release", help="download a catalog asset (base64-encoded JSON)")
@@ -374,12 +441,14 @@ async def main(argv=None, *, progress=None):
     args = ap.parse_args(argv)
     if args.list:
         return await list_devices()
+    if args.scan_ble:
+        return await list_ble_devices()
     if args.download_release:
         if not args.download_dir:
             ap.error("--download-release requires --download-dir")
         try:
             asset = json.loads(base64.b64decode(args.download_release, validate=True))
-            path = await asyncio.to_thread(firmware_catalog.download, asset, args.download_dir, progress=progress)
+            path, _ = await asyncio.to_thread(firmware_library.store, asset, args.download_dir, progress=progress)
         except (OSError, TypeError, ValueError, KeyError) as exc:
             sys.exit(str(exc))
         print(json.dumps({"path": str(path)}, ensure_ascii=False))
@@ -563,5 +632,8 @@ async def main(argv=None, *, progress=None):
 
 
 if __name__ == "__main__":
-    asyncio.run(main(progress=cli_progress()))
+    try:
+        asyncio.run(main(progress=cli_progress()))
+    except (BluetoothLinkError, BluetoothScanUnavailable) as exc:
+        sys.exit(str(exc))
 

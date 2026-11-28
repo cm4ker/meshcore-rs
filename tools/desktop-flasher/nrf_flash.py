@@ -12,6 +12,7 @@ import struct
 import sys
 import zipfile
 
+from ble_scan import BluetoothScanUnavailable, discover_ble
 from meshcore_ota import cli_progress
 
 
@@ -230,9 +231,7 @@ def write_uf2(path, root, board=None, log=print, *, progress=None):
 
 
 async def scan_dfu(timeout=10):
-    from bleak import BleakScanner
-
-    found = await BleakScanner.discover(timeout=timeout, return_adv=True)
+    found = await discover_ble(timeout)
     items = []
     for device, advertisement in found.values():
         name = advertisement.local_name or device.name
@@ -401,6 +400,9 @@ def main():
         elif args.command == "export":
             export_dfu_zip(args.path, args.output)
             print("DFU ZIP сохранён.")
+    except BluetoothScanUnavailable as error:
+        print(error, file=sys.stderr)
+        return 1
     except Exception as error:
         print(f"Ошибка: {error or type(error).__name__}", file=sys.stderr)
         return 1
