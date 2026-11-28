@@ -8,9 +8,11 @@
 
 use alloc::vec::Vec;
 
-use embassy_time::{Duration, with_timeout};
+use embassy_time::{Duration, Instant};
 use embedded_hal_async::i2c::I2c;
 use meshcore::lpp;
+
+use super::ina::{register, wait_ready, write};
 
 /// Upstream `TELEM_INA219_ADDRESS`.
 pub const ADDRESS: u8 = 0x40;
@@ -20,16 +22,17 @@ const REG_BUS_VOLTAGE: u8 = 0x02;
 const REG_POWER: u8 = 0x03;
 const REG_CURRENT: u8 = 0x04;
 const REG_CALIBRATION: u8 = 0x05;
-/// 32 V bus range, ±320 mV across the shunt, 12-bit samples of both, continuous (upstream default;
-/// 128-sample averaging `0x39FF` breaks some INA219 clones).
-const CONFIG_32V_2A: u16 = 0x399F;
+/// 32 V bus range, ±320 mV across the shunt, 12-bit samples of both (0x39FF's
+/// 128-sample averaging breaks some INA219 clones).
+const CONFIG_POWER_DOWN: u16 = 0x3998;
+const CONFIG_TRIGGERED: u16 = CONFIG_POWER_DOWN | 0b011;
+const CONVERSION_READY: u16 = 1 << 1; // in the bus voltage register
+// Two 12-bit conversions (586 µs max each) and 40 µs to recover from power-down.
+const CONVERSION_TIME: Duration = Duration::from_micros(1_250);
 /// 0.1 mA per current step and 2 mW per power step with a 0.1 Ω shunt.
 const CALIBRATION_32V_2A: u16 = 4096;
 const CURRENT_STEPS_PER_MA: f32 = 10.0;
 const POWER_MW_PER_STEP: f32 = 2.0;
-
-/// A transfer on a stuck bus must not hold up the repeater.
-const TIMEOUT: Duration = Duration::from_millis(50);
 
 pub struct Reading {
     pub bus_v: f32,
@@ -53,33 +56,31 @@ pub struct Ina219;
 impl Ina219 {
     /// The sensor set up, or `None` if nothing answers at its address.
     pub async fn probe<I: I2c>(i2c: &mut I) -> Option<Self> {
-        (write(i2c, REG_CALIBRATION, CALIBRATION_32V_2A).await && write(i2c, REG_CONFIG, CONFIG_32V_2A).await)
+        (write(i2c, ADDRESS, REG_CONFIG, CONFIG_POWER_DOWN).await
+            && write(i2c, ADDRESS, REG_CALIBRATION, CALIBRATION_32V_2A).await)
             .then_some(Self)
     }
 
     pub async fn read<I: I2c>(&self, i2c: &mut I) -> Option<Reading> {
-        // Read current first, before other I2C traffic wakes the board for >1 ms, so the 532 µs
-        // continuous conversion still reflects idle sleep current. Refresh calibration afterwards
-        // in case a sharp load reset the chip (as Adafruit's driver does).
-        let current = register(i2c, REG_CURRENT).await? as i16;
-        let bus = register(i2c, REG_BUS_VOLTAGE).await?;
-        let power = register(i2c, REG_POWER).await? as i16;
-        write(i2c, REG_CALIBRATION, CALIBRATION_32V_2A).await;
-        Some(Reading {
-            bus_v: (bus >> 3) as f32 * 0.004,
-            current_ma: current as f32 / CURRENT_STEPS_PER_MA,
-            power_mw: power as f32 * POWER_MW_PER_STEP,
-        })
+        let reading = async {
+            // Restore calibration before the trigger in case the chip reset since the last poll.
+            if !write(i2c, ADDRESS, REG_CALIBRATION, CALIBRATION_32V_2A).await
+                || !write(i2c, ADDRESS, REG_CONFIG, CONFIG_TRIGGERED).await
+            {
+                return None;
+            }
+            let ready_at = Instant::now() + CONVERSION_TIME;
+            let bus = wait_ready(i2c, ADDRESS, REG_BUS_VOLTAGE, CONVERSION_READY, ready_at).await?;
+            let current = register(i2c, ADDRESS, REG_CURRENT).await? as i16;
+            let power = register(i2c, ADDRESS, REG_POWER).await? as i16;
+            Some(Reading {
+                bus_v: (bus >> 3) as f32 * 0.004,
+                current_ma: current as f32 / CURRENT_STEPS_PER_MA,
+                power_mw: power as f32 * POWER_MW_PER_STEP,
+            })
+        }.await;
+        // Best effort even on timeout or I2C error, including an ambiguous trigger write.
+        write(i2c, ADDRESS, REG_CONFIG, CONFIG_POWER_DOWN).await;
+        reading
     }
-}
-
-async fn write<I: I2c>(i2c: &mut I, reg: u8, value: u16) -> bool {
-    let [hi, lo] = value.to_be_bytes();
-    matches!(with_timeout(TIMEOUT, i2c.write(ADDRESS, &[reg, hi, lo])).await, Ok(Ok(())))
-}
-
-async fn register<I: I2c>(i2c: &mut I, reg: u8) -> Option<u16> {
-    let mut buf = [0u8; 2];
-    matches!(with_timeout(TIMEOUT, i2c.write_read(ADDRESS, &[reg], &mut buf)).await, Ok(Ok(())))
-        .then(|| u16::from_be_bytes(buf))
 }
