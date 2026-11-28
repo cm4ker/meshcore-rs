@@ -17,6 +17,7 @@ pub mod links;
 pub mod lr2021;
 pub mod noise;
 pub mod radio;
+pub mod repeater_sleep;
 pub mod sensors;
 pub mod storage;
 pub mod sx1262;
