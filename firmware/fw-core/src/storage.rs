@@ -4,6 +4,7 @@
 //! Small blobs: each owns two 4 KiB sectors. A record is `magic | seq | len | crc32 | data`;
 //! writes go to the sector not holding the newest valid record, so an interrupted write never
 //! loses the previous value.
+//! The clock on each role appends to its active sector between compatible checkpoints.
 //!
 //! The companion partition also holds a ring log (contact list snapshots, which can be tens of
 //! KiB and change often: appending spreads the wear over the whole log) and a table of raw
@@ -15,6 +16,7 @@
 //!
 //! Data always passes through a small stack buffer, so heap buffers may live anywhere.
 
+mod clock;
 mod lend;
 
 pub use lend::{Before, Mount};
@@ -121,6 +123,15 @@ fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
 
 fn crc32(data: &[u8]) -> u32 {
     !crc32_update(0xFFFF_FFFF, data)
+}
+
+fn slot_header(seq: u32, data: &[u8]) -> [u8; HEADER] {
+    let mut hdr = [0u8; HEADER];
+    hdr[..4].copy_from_slice(&MAGIC.to_le_bytes());
+    hdr[4..8].copy_from_slice(&seq.to_le_bytes());
+    hdr[8..12].copy_from_slice(&(data.len() as u32).to_le_bytes());
+    hdr[12..].copy_from_slice(&crc32(data).to_le_bytes());
+    hdr
 }
 
 /// The store, shared between the main loop and what writes beside it (firmware slots, adverts).
@@ -269,11 +280,7 @@ impl<F: NorFlash> Store<F> {
         let (cur, cur_slot) = self.newest(addr);
         let seq = cur.map(|(s, _)| s.wrapping_add(1)).unwrap_or(1);
         let target = addr[1 - cur_slot as usize];
-        let mut hdr = [0u8; HEADER];
-        hdr[..4].copy_from_slice(&MAGIC.to_le_bytes());
-        hdr[4..8].copy_from_slice(&seq.to_le_bytes());
-        hdr[8..12].copy_from_slice(&(data.len() as u32).to_le_bytes());
-        hdr[12..].copy_from_slice(&crc32(data).to_le_bytes());
+        let hdr = slot_header(seq, data);
         // data first, header last: a record is only valid once complete
         self.erase_sector(target) && self.write_chunked(target + HEADER as u32, data) && self.write_chunked(target, &hdr)
     }
@@ -292,6 +299,9 @@ impl<F: NorFlash> Store<F> {
     /// Newest value of a blob; an empty record counts as absent.
     pub fn load(&mut self, blob: Blob) -> Option<Vec<u8>> {
         let addr = self.blob_addr(blob)?;
+        if matches!(blob, Blob::Clock) {
+            return self.load_clock(addr);
+        }
         self.newest(addr).0.map(|(_, d)| d).filter(|d| !d.is_empty())
     }
 
@@ -302,6 +312,7 @@ impl<F: NorFlash> Store<F> {
 
     pub fn save(&mut self, blob: Blob, data: &[u8]) -> bool {
         match self.blob_addr(blob) {
+            Some(addr) if matches!(blob, Blob::Clock) => self.save_clock(addr, data),
             Some(addr) => self.save_pair(addr, data),
             None => false,
         }
@@ -333,6 +344,9 @@ impl<F: NorFlash> Store<F> {
             return self.lent_load(lend::TAG_BLOB, blob as u8).filter(|d| !d.is_empty());
         }
         let addr = self.comp_blob_addr(blob)?;
+        if matches!(blob, CompBlob::Clock) {
+            return self.load_clock(addr);
+        }
         self.newest(addr).0.map(|(_, d)| d).filter(|d| !d.is_empty())
     }
 
@@ -341,6 +355,7 @@ impl<F: NorFlash> Store<F> {
             return self.lent_append(lend::TAG_BLOB, blob as u8, &[data], false);
         }
         match self.comp_blob_addr(blob) {
+            Some(addr) if matches!(blob, CompBlob::Clock) => self.save_clock(addr, data),
             Some(addr) => self.save_pair(addr, data),
             None => false,
         }
@@ -740,7 +755,7 @@ mod tests {
     use super::*;
 
     /// A NOR flash in RAM: erase sets 0xFF, a write only clears bits.
-    struct RamFlash(Vec<u8>);
+    pub(super) struct RamFlash(pub(super) Vec<u8>);
 
     impl ErrorType for RamFlash {
         type Error = NorFlashErrorKind;
@@ -1037,6 +1052,19 @@ mod tests {
         let mut store = lending(core::mem::replace(store.flash(), RamFlash(Vec::new())));
         assert_eq!(store.mount(), Mount::Ready);
         assert_eq!(store.comp_log_latest(), Some(contacts(305)));
+    }
+
+    #[test]
+    fn companion_clock_follows_the_lent_partition() {
+        let mut store = lending(lending_flash());
+        assert_eq!(store.mount(), Mount::Fresh);
+        assert!(store.comp_save(CompBlob::Clock, &100u32.to_le_bytes()));
+        assert!(store.comp_save(CompBlob::Clock, &101u32.to_le_bytes()));
+        assert!(store.lend());
+        assert_eq!(store.comp_load(CompBlob::Clock).as_deref(), Some(101u32.to_le_bytes().as_slice()));
+        assert!(store.comp_save(CompBlob::Clock, &102u32.to_le_bytes()));
+        assert!(store.take_back());
+        assert_eq!(store.comp_load(CompBlob::Clock).as_deref(), Some(102u32.to_le_bytes().as_slice()));
     }
 
     #[test]
