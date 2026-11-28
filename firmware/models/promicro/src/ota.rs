@@ -37,7 +37,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_nrf::pac;
 use embedded_storage::nor_flash::NorFlash;
-use meshcore::ota::{FirmwareTarget, ImageFormat, NRF_CHIP_NRF52840, NRF_TRAILER_LEN, NRF_TRAILER_MAGIC};
+use meshcore::ota::{FirmwareTarget, ImageFormat, NRF_CHIP_NRF52840, NRF_TRAILER_LEN, NRF_TRAILER_MAGIC, OtaError};
 use meshcore_fw_core::storage::{Blob, SharedStore, Store};
 use meshcore_inplace::{Header, PAGE, Rebuilt, make_page, request_words};
 use sha2::{Digest, Sha256};
@@ -490,40 +490,36 @@ impl<const LENDS: bool> FirmwareTarget for InPlaceTarget<LENDS> {
     }
 
     fn activate(&mut self, size: u32) -> bool {
+        self.activate_checked(size).is_ok()
+    }
+
+    fn activate_checked(&mut self, size: u32) -> Result<(), OtaError> {
         let Some((plan, trial_hash)) = self.check_plan(size) else {
             log::warn!("OTA: the plan does not make the image it should");
-            return false;
+            return Err(OtaError::FlashError);
         };
-        let has_back = match self.plan_back(&plan) {
-            PlanBack::Ready => true,
-            PlanBack::NoRoom => {
-                log::warn!("OTA: no room for rollback plan beside update; installing without rollback");
-                false
-            }
+        match self.plan_back(&plan) {
+            PlanBack::Ready => {}
+            PlanBack::NoRoom => return Err(OtaError::NoRollbackSpace),
             PlanBack::Failed => {
                 log::warn!("OTA: rollback plan failed: not installed");
-                return false;
+                return Err(OtaError::FlashError);
             }
-        };
+        }
         let own = own();
         let mut store = self.store.borrow_mut();
         let skip = FwRecord::load(&mut store).skip;
-        let record = if has_back {
-            // the update runs on trial; the plan back is the way to this firmware, should it fail
-            FwRecord { trial: Some(0), skip, trial_hash, ..FwRecord::left(own) }
-        } else {
-            // large jump whose forward plan filled staging: SHA-256 verified, no rollback plan fits
-            FwRecord { skip, ..FwRecord::default() }
-        };
+        // the update runs on trial; the verified plan back is the way to this firmware
+        let record = FwRecord { trial: Some(0), skip, trial_hash, ..FwRecord::left(own) };
         if !record.save(&mut store) {
             log::warn!("OTA: no room to record the update");
-            return false;
+            return Err(OtaError::FlashError);
         }
         if !plan_request(&mut store, 0, plan.len, plan.old_len) {
             log::warn!("OTA: the install request could not be written");
-            return false;
+            return Err(OtaError::FlashError);
         }
-        true
+        Ok(())
     }
 }
 
