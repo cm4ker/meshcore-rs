@@ -91,7 +91,8 @@ impl RepeaterUi {
             }
         } else {
             self.ui.tick(now);
-            let _ = self.button.poll(down, now);
+            // A press while forced off must not turn into a gesture on re-enable.
+            self.button = if down { Button::held() } else { Button::default() };
         }
         if mode == ScreenMode::Off || !self.ui.screen_on(now) {
             if self.lit {
@@ -211,6 +212,14 @@ impl crate::repeater_app::Extras for Extras {
 
     fn has_screen(&self) -> bool {
         self.ui.is_some()
+    }
+
+    fn screen_wait(&self, now: u64) -> (Option<u64>, bool) {
+        let Some(panel) = self.ui.as_ref() else {
+            return (None, false);
+        };
+        let poll_at = panel.ui.screen_poll_at(now, panel.mode != Some(ScreenMode::Off), panel.lit, 50);
+        (poll_at, poll_at.is_none())
     }
 
     fn boot_sound(&mut self, on: bool) {

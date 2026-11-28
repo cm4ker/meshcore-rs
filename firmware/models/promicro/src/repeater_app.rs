@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either4, select4};
+use embassy_futures::select::{Either5, select5};
 use embassy_nrf::Peri;
 use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::peripherals;
@@ -93,6 +93,11 @@ pub trait Extras {
     /// A screen is wired (`set screen` is offered).
     fn has_screen(&self) -> bool {
         false
+    }
+
+    /// The next display poll and whether the button should wake the wait.
+    fn screen_wait(&self, now: u64) -> (Option<u64>, bool) {
+        (self.has_screen().then_some(now + 50), false)
     }
 
     /// The firmware started: a boot chirp if the node is not muted (`on`), and a board with a
@@ -280,7 +285,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
         .unwrap_or_else(|| NodePrefs { tx_power_dbm: DEFAULT_TX_DBM, ..Default::default() });
 
     // ---- the radio: its supply, the receive side of the antenna switch, the chip
-    let Parts { mut radio, mut led, mut rxen, button, mut battery, i2c, hold: _hold } = parts;
+    let Parts { mut radio, mut led, mut rxen, mut button, mut battery, i2c, hold: _hold } = parts;
     Timer::after_millis(10).await; // the radio powers up
     if let Err(e) = radio.init(prefs.radio, prefs.tx_power_dbm, prefs.rx_boosted_gain).await {
         println!("ERROR: radio init failed: {e:?}");
@@ -423,6 +428,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
     let mut ble_until: Option<u64> = None;
     let confirm_at = now_ms() + TRIAL_HEALTHY_MS;
     mesh.app.board.fw_trial_until = in_trial.then_some(confirm_at);
+    let mut button_down = button.is_low();
     loop {
         if let Some(w) = &mut watchdog {
             w.pet();
@@ -485,10 +491,8 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
             continue;
         }
 
-        // sleep until a frame arrives, a CLI line or a BLE frame comes in, or a timer is due.
-        // Without a screen or GPS there is no button/NMEA polling to service at 20 Hz, so wake
-        // only for the next scheduled event (capped by the noise-floor cadence, well under WDT).
-        let idle_step = if extras.has_screen() || extras.has_gps() { 50 } else { NoiseFloor::INTERVAL_MS };
+        // Keep the GPS polling cadence. The display asks for its own deadlines only when needed.
+        let (screen_poll_at, wake_on_button) = extras.screen_wait(now);
         let mut wake = room
             .as_ref()
             .map_or(u64::MAX, |r| r.next_wakeup())
@@ -496,7 +500,16 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
             .min(next_noise)
             .min(next_batt)
             .min(next_sensors)
-            .min(now + idle_step);
+            .min(next_clock_save);
+        if extras.has_gps() {
+            wake = wake.min(now + 50);
+        }
+        if let Some(at) = screen_poll_at {
+            wake = wake.min(at);
+        }
+        if mesh.app.prefs.agc_reset_interval > 0 {
+            wake = wake.min(next_agc_reset);
+        }
         if let Some(t) = ble_until {
             wake = wake.min(t);
         }
@@ -507,9 +520,28 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
             wake = wake.min(confirm_at);
         }
         let wake = wake.max(now + 1);
-        let woke = select4(radio.wait_irq(), console::LINES.receive(), Timer::at(Instant::from_millis(wake)), ble::FRAMES_IN.receive());
-        match woke.await {
-            Either4::First(()) => match radio.read_rx() {
+        // A level wait also catches changes that happened before the GPIO was armed.
+        let button_changed = async {
+            if !wake_on_button {
+                core::future::pending::<()>().await;
+            } else if button_down {
+                button.wait_for_high().await;
+            } else {
+                button.wait_for_low().await;
+            }
+        };
+        let woke = select5(
+            radio.wait_irq(),
+            console::LINES.receive(),
+            Timer::at(Instant::from_millis(wake)),
+            ble::FRAMES_IN.receive(),
+            button_changed,
+        )
+        .await;
+        // Sample on return, before servicing anything that may await or take time.
+        button_down = button.is_low();
+        match woke {
+            Either5::First(()) => match radio.read_rx() {
                 Ok(RxEvent::Frame(f)) => {
                     let t = now_ms();
                     mesh.on_rx_frame(t, &f.data[..f.len], f.snr, f.rssi);
@@ -521,7 +553,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
                 Ok(RxEvent::Nothing) => {}
                 Err(e) => warn!("rx: {e:?}"),
             },
-            Either4::Second(line) => {
+            Either5::Second(line) => {
                 let cmd = String::from_utf8_lossy(&line);
                 let line = cmd.trim_end();
                 if line.trim() == "wdt test" {
@@ -540,8 +572,8 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
                     println!("  -> {reply}");
                 }
             }
-            Either4::Third(()) => {}
-            Either4::Fourth(frame) => {
+            Either5::Third(()) | Either5::Fifth(()) => {}
+            Either5::Fourth(frame) => {
                 if let Some(reply) = mesh.app.handle_link_frame(&frame) {
                     let _ = BLE_OUT.try_send(reply);
                 }
@@ -608,7 +640,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
 
         // the screen and the button
         let window = ble_pin.zip(ble_until).map(|(pin, until)| (pin, ota_name(&mesh.app.prefs.node_name), until));
-        if extras.poll(&mut mesh, button.is_low(), window, now) {
+        if extras.poll(&mut mesh, button_down, window, now) {
             if ble_until.is_none() {
                 let _ = mesh.app.handle_command(&mut mesh.ctx, 0, "start ota ble");
             } else if !BLE_CONNECTED.load(core::sync::atomic::Ordering::Relaxed) {
