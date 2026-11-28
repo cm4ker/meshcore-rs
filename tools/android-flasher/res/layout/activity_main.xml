@@ -147,6 +147,11 @@
                     android:layout_width="wrap_content" android:layout_marginStart="4dp"
                     android:text="Развернуть" android:contentDescription="Открыть весь журнал" />
             </LinearLayout>
+            <CheckBox android:id="@+id/save_journal" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:minHeight="42dp"
+                android:layout_marginStart="18dp" android:layout_marginEnd="18dp"
+                android:text="Сохранять журнал в Загрузки" android:textColor="@color/ink"
+                android:buttonTint="@color/accent" android:visibility="gone" />
         </LinearLayout>
         <LinearLayout android:id="@+id/operation_progress"
             android:layout_width="match_parent" android:layout_height="wrap_content"

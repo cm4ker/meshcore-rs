@@ -20,6 +20,7 @@ public final class JournalPanel extends LinearLayout {
     private View header;
     private View body;
     private View preview;
+    private View saveJournal;
     private ScrollView log;
     private Button toggle;
     private ValueAnimator animation;
@@ -55,6 +56,7 @@ public final class JournalPanel extends LinearLayout {
         preview=findViewById(id("journal_preview"));
         log=findViewById(id("journal_scroll"));
         toggle=findViewById(id("journal"));
+        saveJournal=findViewById(id("save_journal"));
         toggle.setOnClickListener(view->setExpanded(!expanded));
         header.setOnClickListener(view->setExpanded(!expanded));
         preview.setOnClickListener(view->setExpanded(true));
@@ -106,6 +108,7 @@ public final class JournalPanel extends LinearLayout {
         cancelAnimation();
         dragging=false;
         expanded=open;
+        saveJournal.setVisibility(open ? VISIBLE : GONE);
         toggle.setText(open?"Свернуть":"Развернуть");
         toggle.setContentDescription(open?"Свернуть журнал":"Открыть весь журнал");
         int from=bodyHeight();

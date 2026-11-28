@@ -26,10 +26,12 @@ public class MainActivity extends Activity {
     static final String NRF52_BOOTLOADER_MODE="Загрузчик nRF52 (UF2)";
     static final int SELECT_FIRMWARE=1, EXPORT_DFU=2, CHECK_UF2_DRIVE=3, INSTALL_UF2=4, CATALOG_UF2=5;
     private static final int ENABLE_BLUETOOTH_FOR_SCAN = 6;
+    private static final int LOG_STORAGE_PERMISSION = 43;
     UsbManager usb;
     Spinner devices;
     TextView fileName, fileHint, report, previousStatus, status, deviceLabel, deviceDetails, modelLabel;
     JournalPanel journal;
+    CheckBox saveLogs;
     Button scan, selectFile, clearFile, info, update, releases, offline;
     final List<UsbSerialDriver> drivers=new ArrayList<>();
     boolean usbDiskPresent;
@@ -38,6 +40,7 @@ public class MainActivity extends Activity {
     String checkedEndpoint;
     Ota.Device checkedDevice;
     String lastMessage="";
+    private String reportFile = "";
     Uri file;
     UsbDevice pending;
     String requested="info";
@@ -170,6 +173,12 @@ public class MainActivity extends Activity {
         operationProgress=view("operation_progress");
         progressStage=view("progress_stage");progressPercent=view("progress_percent");
         previousStatus=view("previous_status");
+        saveLogs = view("save_journal");
+        saveLogs.setOnCheckedChangeListener((button, checked) -> {
+            if (checked && !OperationLog.canSave(this)) {
+                requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, LOG_STORAGE_PERMISSION);
+            }
+        });
         host=view("host");
         host.setText(getPreferences(0).getString("host",""));
         host.addTextChangedListener(new TextWatcher(){
@@ -182,8 +191,10 @@ public class MainActivity extends Activity {
             if(mode()>=2)scanBle();
             else{
                 refresh();
+                if(saveLogs.isChecked())startReport("Поиск USB-устройств…");
                 if(usbDiskPresent&&usesUf2Drive())line("Обнаружен USB-диск. Нажмите «Проверить устройство», чтобы прочитать данные загрузчика.");
                 else line(drivers.isEmpty()?"USB-устройства не найдены.":"Найдено USB-устройств: "+drivers.size());
+                saveJournal();
             }
         });
         view("help").setOnClickListener(v->showHelp());
@@ -451,6 +462,7 @@ public class MainActivity extends Activity {
 
     void startReport(String message){
         report.setText("");
+        reportFile = file == null ? "" : displayName;
         resetStatus();
         line(message);
         if(journal.isExpanded())journal.scrollToLatest();
@@ -525,6 +537,29 @@ public class MainActivity extends Activity {
         });
     }
 
+    void saveJournal() {
+        if (saveLogs == null || !saveLogs.isChecked() || lastMessage.isEmpty() || !OperationLog.canSave(this)) return;
+        StringBuilder snapshot = new StringBuilder(String.valueOf(method.getSelectedItem())).append('\n');
+        if (!reportFile.isEmpty()) snapshot.append("Файл · ").append(reportFile).append('\n');
+        if (operationProgress.getVisibility() == View.VISIBLE) {
+            snapshot.append(progressStage.getText()).append(' ').append(progressPercent.getText()).append('\n');
+        }
+        snapshot.append('\n').append(report.getText());
+        String transcript = snapshot.toString();
+        Context context = getApplicationContext();
+        new Thread(() -> {
+            String message;
+            try {
+                OperationLog.save(context, transcript);
+                message = "Журнал сохранён в Загрузки";
+            } catch (IOException | RuntimeException e) {
+                message = "Не удалось сохранить журнал в Загрузки";
+            }
+            String result = message;
+            runOnUiThread(() -> Toast.makeText(context, result, Toast.LENGTH_SHORT).show());
+        }, "Save-operation-log").start();
+    }
+
     void showBle(){
         int previous=Math.max(devices.getSelectedItemPosition(),0);
         List<String> labels=new ArrayList<>();
@@ -541,11 +576,13 @@ public class MainActivity extends Activity {
         for(String perm:blePermissions())if(checkSelfPermission(perm)!=PackageManager.PERMISSION_GRANTED){requestPermissions(blePermissions(),42);return;}
         stopScan();
         clearProgress();
+        if(saveLogs.isChecked())startReport("Поиск устройств Bluetooth…");
         try{
             BluetoothManager manager = getSystemService(BluetoothManager.class);
             BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
             if (adapter == null) {
                 line("Адаптер Bluetooth недоступен на этом устройстве.");
+                saveJournal();
                 return;
             }
             if (!adapter.isEnabled()) {
@@ -555,9 +592,10 @@ public class MainActivity extends Activity {
                 } catch (ActivityNotFoundException e) {
                     line("Включите Bluetooth в настройках телефона и повторите поиск.");
                 }
+                saveJournal();
                 return;
             }
-            scanner=adapter.getBluetoothLeScanner();if(scanner==null){line("Сканирование Bluetooth недоступно.");return;}
+            scanner=adapter.getBluetoothLeScanner();if(scanner==null){line("Сканирование Bluetooth недоступно.");saveJournal();return;}
             found.clear();showBle();
             callback=new ScanCallback(){
                 public void onScanResult(int type,ScanResult r){
@@ -576,6 +614,7 @@ public class MainActivity extends Activity {
                     scanning=false;
                     controls();
                     line("Ошибка поиска Bluetooth: "+e);
+                    saveJournal();
                 }
             };
             final boolean bootloader=mode()==3;
@@ -587,8 +626,9 @@ public class MainActivity extends Activity {
             line("Поиск BLE в течение "+seconds+" секунд…");
             final ScanCallback started=callback;
             handler.postDelayed(()->{if(scanning&&callback==started){stopScan();line("Устройств BLE найдено: "+found.size());
-                if(bootloader&&found.isEmpty())line("Откройте BLE OTA на плате и нажмите «Найти загрузчик» ещё раз.");}},seconds*1000L);
-        }catch(RuntimeException e){stopScan();line("Bluetooth: "+e.getMessage());}
+                if(bootloader&&found.isEmpty())line("Откройте BLE OTA на плате и нажмите «Найти загрузчик» ещё раз.");
+                saveJournal();}},seconds*1000L);
+        }catch(RuntimeException e){stopScan();line("Bluetooth: "+e.getMessage());saveJournal();}
     }
     void recordBleTarget(BluetoothDevice device,String name){
         for(int i=0;i<found.size();i++){
@@ -611,6 +651,13 @@ public class MainActivity extends Activity {
     }
     @Override public void onRequestPermissionsResult(int req,String[] perms,int[] results){
         super.onRequestPermissionsResult(req,perms,results);
+        if(req==LOG_STORAGE_PERMISSION){
+            if(!OperationLog.canSave(this)){
+                saveLogs.setChecked(false);
+                line("Разрешите доступ к памяти, чтобы сохранять журнал в Загрузки.");
+            }
+            return;
+        }
         if(req==42&&mode()>=2){for(String p:blePermissions())if(checkSelfPermission(p)!=PackageManager.PERMISSION_GRANTED){line("Для поиска требуется разрешение Bluetooth (на старых Android — местоположение).");return;}scanBle();}
     }
     void ask(String op){
@@ -620,6 +667,16 @@ public class MainActivity extends Activity {
         FirmwareFormat format=FirmwareFormat.fromName(displayName);
         if((op.equals("flash")||op.equals("reset"))&&format==FirmwareFormat.MCFD){
             line("Для дельты нажмите «Обновить прошивку».");return;
+        }
+        boolean merged = flashing && EspInstall.isMergedName(displayName);
+        boolean direct = flashing && EspInstall.isDirectName(displayName);
+        if (direct && op.equals("update")) {
+            line("Для этого образа ESP выберите USB и нажмите «Прошить через USB».");
+            return;
+        }
+        if (direct && !merged && op.equals("reset")) {
+            line("Для полной очистки Heltec V3 выберите *-merged.bin для своей модели.");
+            return;
         }
         if(mode()==3){
             askDfu();
@@ -643,11 +700,35 @@ public class MainActivity extends Activity {
         }
         UsbDevice target=selectedUsbDevice();
         if(target==null||isUsbDisk(target))return;
-        if(flashing)new AlertDialog.Builder(this).setTitle(op.equals("flash") ? "Прошить через USB?" :
-                op.equals("reset") ? "Создать новую ноду со сбросом данных?" : "Обновить прошивку?")
-                .setMessage(displayName+"\n"+devices.getSelectedItem()+"\n\nУбедитесь, что файл подходит плате. Не отключайте USB."+ (op.equals("reset")?"\n\nБудут удалены прежний ключ, настройки, каналы, контакты и сопряжения обеих ролей.":""))
-                .setNegativeButton("Отмена",null).setPositiveButton("Начать",(d,w)->permission(target,op)).show();
-        else permission(target,op);
+        if (!flashing) {
+            permission(target, op);
+            return;
+        }
+        boolean reset = op.equals("reset");
+        String message = displayName + "\n" + devices.getSelectedItem()
+            + "\n\nСверьте модель платы и файл. Оставьте USB подключённым до окончания записи.";
+        if (reset && format == FirmwareFormat.MCFW) {
+            byte[] header = new byte[7];
+            try (InputStream input = getContentResolver().openInputStream(file)) {
+                Ota.need(input != null, "Не удалось открыть .mcfw.");
+                new DataInputStream(input).readFully(header);
+                message += "\n\n" + EspInstall.factoryDescription(header);
+            } catch (IOException e) {
+                line(e.getMessage() == null ? "Не удалось прочитать заголовок .mcfw." : e.getMessage());
+                return;
+            }
+            message += "\n\nВся флеш-память будет очищена. Ключ, настройки и данные будут удалены.";
+        } else if (merged) {
+            message += "\n\nПолный образ содержит загрузчик и таблицу разделов.";
+            message += reset ? " Вся флеш-память будет очищена перед записью."
+                : " Образ перезапишет данные в занимаемой области флеш-памяти.";
+        } else if (reset) {
+            message += "\n\nБудут удалены прежний ключ, настройки, каналы, контакты и сопряжения обеих ролей.";
+        }
+        String title = op.equals("flash") ? "Прошить через USB?"
+            : reset ? "Создать новую ноду со сбросом данных?" : "Обновить прошивку?";
+        new AlertDialog.Builder(this).setTitle(title).setMessage(message)
+            .setNegativeButton("Отмена", null).setPositiveButton("Начать", (d,w)->permission(target,op)).show();
     }
     void askDfu(){
         BleTarget target=selectedBleTarget();
@@ -767,10 +848,13 @@ public class MainActivity extends Activity {
         }catch(RuntimeException e){pending=null;line(e.toString());failProgress();idle();}
     }
     byte[] readFile(Uri selected)throws IOException{
+        return readFile(selected, 8);
+    }
+    byte[] readFile(Uri selected, int limitMiB)throws IOException{
         try(InputStream in=getContentResolver().openInputStream(selected);ByteArrayOutputStream out=new ByteArrayOutputStream()){
             if(in==null)throw new IOException("Не удалось открыть файл.");
             byte[] b=new byte[16384];int n;
-            while((n=in.read(b))!=-1){if(out.size()+n>8*1024*1024)throw new IOException("Файл больше 8 МиБ.");out.write(b,0,n);}
+            while((n=in.read(b))!=-1){if(out.size()+n>limitMiB*1024*1024)throw new IOException("Файл больше "+limitMiB+" МиБ.");out.write(b,0,n);}
             return out.toByteArray();
         }
     }
@@ -820,12 +904,16 @@ public class MainActivity extends Activity {
         boolean flashing=!(op.equals("info")||op.equals("catalog"));
         final Uri selected=file;
         final FirmwareFormat format=FirmwareFormat.fromName(displayName);
+        final boolean bootloader = op.equals("flash") || op.equals("reset");
+        final boolean reset = op.equals("reset");
+        final boolean merged = bootloader && EspInstall.isMergedName(displayName);
+        final boolean direct = bootloader && EspInstall.isDirectName(displayName);
         new Thread(()->{
             UsbDeviceConnection connection=null;
             Ota.Device detected=null;
             boolean installed=false;
             try{
-                byte[] bytes=flashing?readOtaFirmware(selected,format):null;
+                byte[] bytes=flashing?(merged?readFile(selected,16):readOtaFirmware(selected,format)):null;
                 UsbSerialDriver driver=UsbSerialProber.getDefaultProber().probeDevice(target);
                 if(driver==null||driver.getPorts().isEmpty())throw new IOException("Драйвер этого USB-устройства не найден.");
                 connection=usb.openDevice(target);
@@ -839,10 +927,22 @@ public class MainActivity extends Activity {
                         public int read(byte[] buffer,int ms)throws IOException{return p.read(buffer,ms);}
                     };
                     Ota session=new Ota(w,this::line);
-                    if(op.equals("flash")||op.equals("reset")){
-                        Ota.Device device=session.info();
-                        new EspInstall(w,n->getAssets().open("esp/"+n),this::line,target.getVendorId()==0x303a&&target.getProductId()==0x1001)
-                            .install(bytes,device,op.equals("reset"),reportProgress());
+                    if(bootloader){
+                        EspInstall installer = new EspInstall(w, getAssets()::open, this::line,
+                            target.getVendorId() == 0x303a && target.getProductId() == 0x1001);
+                        Ota.Progress progress = reportProgress();
+                        if (reset && format == FirmwareFormat.MCFW) installer.installFactory(bytes, progress);
+                        else if (merged) installer.installMerged(bytes, reset, progress);
+                        else if (direct) installer.installStockV3(bytes, progress);
+                        else {
+                            Ota.Device device;
+                            try { device = session.info(); }
+                            catch (java.net.SocketTimeoutException e) {
+                                throw new IOException("Плата не ответила на запрос MeshCore-RS. Для первой установки .mcfw "
+                                    + "выберите «Новая нода со сбросом».", e);
+                            }
+                            installer.install(bytes, device, reset, progress);
+                        }
                         installed=true;
                     }else if(flashing){
                         session.update(bytes,format==FirmwareFormat.MCFD,reportProgress());
@@ -861,7 +961,11 @@ public class MainActivity extends Activity {
                 "Файл не содержит заголовок прошивки MeshCore-RS.");
         return firmware;
     }
-    void idle(){busy=false;getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);refresh();}
+    void idle(){
+        if (busy) saveJournal();
+        reportFile = "";
+        busy=false;getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);refresh();
+    }
     void finishOperation(String targetEndpoint,Ota.Device detected,boolean catalog,Uri installedFile){
         runOnUiThread(()->{
             if(isDestroyed())return;
