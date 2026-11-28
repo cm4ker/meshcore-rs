@@ -282,22 +282,18 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
     // ---- the radio: its supply, the receive side of the antenna switch, the chip
     let Parts { mut radio, mut led, mut rxen, button, mut battery, i2c, hold: _hold } = parts;
     Timer::after_millis(10).await; // the radio powers up
-    if let Err(e) = radio.init(prefs.radio, prefs.tx_power_dbm, prefs.rx_boosted_gain).await {
-        println!("ERROR: radio init failed: {e:?}");
-        // a firmware on trial that cannot use the radio counts as one that did not start
-        let give_up = in_trial.then(|| now_ms() + 10_000);
-        loop {
+    if let Err(e) = radio.init_with_retry(prefs.radio, prefs.tx_power_dbm, prefs.rx_boosted_gain).await {
+        println!("ERROR: radio init failed after retries: {e:?}; restarting");
+        // Leave time to see the error on USB and avoid rapid reboot loops.
+        // A trial that cannot start the radio still counts as a failed boot.
+        let restart_at = now_ms() + 10_000;
+        while now_ms() < restart_at {
             if prefs.led_enabled {
                 led.toggle();
             }
             Timer::after_millis(200).await;
-            if let Some(w) = &mut watchdog {
-                w.pet();
-            }
-            if give_up.is_some_and(|t| now_ms() >= t) {
-                cortex_m::peripheral::SCB::sys_reset();
-            }
         }
+        cortex_m::peripheral::SCB::sys_reset();
     }
     info!(
         "radio: {} MHz BW{} SF{} CR{} tx {} dBm",
@@ -460,22 +456,22 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
                     led.on();
                 }
                 let res = radio.transmit(frame.bytes(), frame.timeout_ms).await;
+                let tx_finished_at = now_ms();
                 led.off();
                 if let Some(r) = &mut rxen {
                     r.set_high();
                 }
-                if frame.cr.is_some() {
-                    let _ = radio.set_frame_cr(None);
-                }
-                if let Err(e) = radio.start_rx() {
-                    warn!("start_rx: {e:?}");
-                }
+                let rx = radio.resume_rx_after_tx(frame.cr.is_some()).await;
                 match res {
-                    Ok(()) => m.tx_done(now_ms()),
+                    Ok(()) => m.tx_done(tx_finished_at),
                     Err(e) => {
                         warn!("tx failed: {e:?}");
-                        m.tx_failed(now_ms());
+                        m.tx_failed(tx_finished_at);
                     }
+                }
+                if let Err(e) = rx {
+                    warn!("radio RX recovery failed: {e:?}, restarting");
+                    cortex_m::peripheral::SCB::sys_reset();
                 }
                 transmitted = true;
             }

@@ -74,6 +74,9 @@ const PA_RAMP_200U: u8 = 0x04;
 const SYNC_WORD_PRIVATE: [u8; 2] = [0x14, 0x24];
 const RX_GAIN_BOOSTED: u8 = 0x96;
 const RX_GAIN_POWER_SAVING: u8 = 0x94;
+
+const INIT_ATTEMPTS: u8 = 3;
+const INIT_RETRY_MS: u64 = 200;
 /// 140 mA over-current limit (`SX126X_CURRENT_LIMIT`), 2.5 mA steps.
 const OCP_140MA: u8 = 56;
 
@@ -151,6 +154,34 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> Sx1262<SPI, OUT, IN
     pub fn without_rx_patch(mut self) -> Self {
         self.rx_patch = false;
         self
+    }
+
+    /// Reset the modem and start RX, allowing a transient startup failure to clear.
+    pub async fn init_with_retry(&mut self, params: RadioParams, tx_power: i8, rx_boost: bool) -> Result<(), Error> {
+        let mut attempt = 1;
+        loop {
+            match self.init(params, tx_power, rx_boost).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt == INIT_ATTEMPTS => return Err(e),
+                Err(e) => log::warn!("SX1262: init attempt {attempt}/{INIT_ATTEMPTS} failed: {e:?}"),
+            }
+            attempt += 1;
+            Timer::after_millis(INIT_RETRY_MS).await;
+        }
+    }
+
+    /// Restore continuous RX after TX. If that fails, reset the modem with its active settings.
+    pub async fn resume_rx_after_tx(&mut self, restore_cr: bool) -> Result<(), Error> {
+        let rx = if restore_cr {
+            self.set_frame_cr(None).and_then(|()| self.start_rx())
+        } else {
+            self.start_rx()
+        };
+        if let Err(e) = rx {
+            log::warn!("SX1262: could not resume RX: {e:?}, reinitialising");
+            return self.init_with_retry(self.params, self.tx_power, self.rx_boost).await;
+        }
+        Ok(())
     }
 
     fn apply_rx_patch(&mut self) -> Result<(), Error> {
@@ -534,3 +565,6 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Sx126
         self.params
     }
 }
+
+#[cfg(test)]
+mod tests;
