@@ -6,6 +6,7 @@ Expand-Archive python.zip engine
 python -m pip install --no-compile --target engine -r requirements.txt
 if($LASTEXITCODE){exit $LASTEXITCODE}
 Copy-Item usb_flash.py,ota_app.py,meshcore_ota.py,firmware_catalog.py,firmware_library.py,nrf_flash.py,ble_scan.py,*.csv engine
+Copy-Item -LiteralPath '../android-flasher/assets/esp-factory' -Destination engine -Recurse
 & .\engine\python.exe -X utf8 .\engine\ota_app.py --help
 if($LASTEXITCODE){exit $LASTEXITCODE}
 & .\engine\python.exe -c "import usb_flash,firmware_catalog,nrf_flash,bleak.backends.winrt.client,struct; assert struct.calcsize('P')==4"

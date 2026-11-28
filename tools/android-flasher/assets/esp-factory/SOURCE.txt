@@ -1,0 +1,10 @@
+The ESP32-S3 and ESP32-C6 bootloaders come from espflash v4.6.0.
+https://github.com/esp-rs/espflash/tree/c1fb39939c1b5880b2aec7f43063f19689d5b00a/espflash/resources/bootloaders
+The upstream files are licensed under Apache-2.0. See LICENSE-APACHE.
+
+esp32s3-bootloader.bin SHA-256 4791f1794791adf79795e098a2ff70137db56fd49164bc5923e09c0fffc8ca6f
+esp32c6-bootloader.bin SHA-256 bfe7a8a539d06d8da984d42ce02bf985f97d363f03b1513adce8277da11532ee
+
+Each image sets the board's flash size in the bootloader header and updates its SHA-256.
+The partition table at 0x8000 comes from the matching board CSV in tools/desktop-flasher.
+The app image comes from the selected .mcfw file at installation time.

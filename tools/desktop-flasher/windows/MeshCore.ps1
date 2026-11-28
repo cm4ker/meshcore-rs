@@ -453,7 +453,7 @@ function Show-DetailsDialog([string]$title,[string]$message) {
 
 $help.Add_Click({
     $modeIntro = switch ($method.SelectedIndex) {
-        0 { 'Подключите плату кабелем с передачей данных. Выберите COM-порт. Если порт один, программа подставит его сама.', '', 'Для установки .uf2 переведите плату в USB-загрузчик. Нажмите «USB-диск UF2…» и выберите диск платы. Выберите .uf2 для её модели и роли, затем нажмите «Прошить UF2 по USB».', '', '«Прошить через USB» записывает полный образ на поддерживаемую ESP. «Новая нода со сбросом…» дополнительно удаляет ключ, настройки, каналы и контакты.' }
+        0 { 'Подключите плату кабелем с передачей данных. Выберите COM-порт. Если порт один, программа подставит его сама.', '', 'Для первой установки MeshCore-RS выберите .mcfw для своей платы и нажмите «Новая нода со сбросом…». Программа сама войдёт в загрузчик и очистит память после подтверждения.', '', 'Для установки .uf2 переведите плату в USB-загрузчик. Нажмите «USB-диск UF2…», выберите диск и файл для своей платы и нажмите «Прошить UF2 по USB».', '', 'Полный *-merged.bin для ESP32-S3 и ESP32-C6 записывается через «Прошить через USB». Для Heltec V3 со штатной разметкой MeshCore подходит обычный Heltec_v3_*.bin с flasher.meshcore.io.' }
         1 { 'Включите Bluetooth и откройте окно обновления на плате. Для репитера MeshCore-RS его можно открыть командой fw ble в консоли.', '', 'Нажмите «Найти устройства» и выберите плату. Если устройство показывает PIN, введите его.' }
         2 { 'Подключите компьютер и плату к одной сети. Введите адрес устройства. Если порт отличается от 5000, добавьте его через двоеточие.', '', 'Для Wi-Fi / TCP нужен подписанный .mcfw или .mcfd.' }
         3 { 'Переведите плату в BLE OTA и нажмите «Найти загрузчик». Если модель не распозналась, укажите её вручную.', '', 'Нажмите «Из GitHub» и выберите роль или откройте локальный .uf2 для вашей платы. Нажмите «Начать» и подтвердите запись. «Сохранить DFU ZIP» сохраняет пакет для отдельного прошивальщика.' }
@@ -1072,6 +1072,16 @@ function Start-Ota([string]$mode) {
             return
         }
         $fileName = [IO.Path]::GetFileName($firmware.Text)
+        $merged = $fileName -like '*-merged.bin'
+        $direct = $merged -or $fileName -like 'Heltec_v3_*.bin'
+        if ($direct -and $mode -eq 'Update') {
+            Show-Notice 'Для этого образа ESP выберите USB и нажмите «Прошить через USB».'
+            return
+        }
+        if ($direct -and -not $merged -and $mode -eq 'NewNode') {
+            Show-Notice 'Для полной очистки Heltec V3 выберите *-merged.bin для своей модели.'
+            return
+        }
     }
     if ($mode -eq 'Export') {
         $dialog = New-Object Windows.Forms.SaveFileDialog
@@ -1110,8 +1120,30 @@ function Start-Ota([string]$mode) {
         if ($transport -ne 0 -or $extension -notin @('.mcfw','.bin')) { Show-Notice 'Для загрузчика ESP выберите полный образ .mcfw или .bin.'; return }
         $message = "Установить $fileName на устройство $target через загрузчик ESP?" + $newline + $newline + 'Сверьте модель и роль. Оставьте USB подключённым до конца записи.'
         $arguments = @('--port',$target,$firmware.Text)
-        if ($mode -eq 'NewNode') {
-            $message += $newline + $newline + 'Будут удалены прежний ключ, настройки, контакты, каналы и сопряжения обеих ролей.'
+        if ($merged) {
+            $message += $newline + $newline + 'Образ содержит загрузчик и таблицу разделов и перезапишет данные в занимаемой области флеш-памяти.'
+        }
+        if ($mode -eq 'NewNode' -and $extension -eq '.mcfw') {
+            $header = New-Object byte[] 7
+            $models = @{1='Heltec V4';2='Heltec V3';3='Seeed XIAO ESP32-C6';6='Heltec Wireless Paper';8='LilyGO T3-S3'}
+            $roles = @{1='Репитер';2='Компаньон'}
+            try {
+                $stream = [IO.File]::OpenRead($firmware.Text)
+                try { $count = $stream.Read($header,0,$header.Length) } finally { $stream.Dispose() }
+            } catch { Show-Notice 'Не удалось прочитать файл .mcfw.'; return }
+            $espModel = $models[[int]$header[5]]
+            $espRole = $roles[[int]$header[6]]
+            if ($count -ne 7 -or [Text.Encoding]::ASCII.GetString($header,0,4) -cne 'MCFW' -or $header[4] -ne 1 -or !$espModel -or !$espRole) {
+                Show-Notice 'Нужен файл .mcfw для поддерживаемой ESP-платы.'
+                return
+            }
+            $message += $newline + $newline + "$espModel · $espRole. Сверьте маркировку платы."
+            $message += $newline + $newline + 'Вся флеш-память будет очищена. Ключ, настройки и данные будут удалены.'
+            $arguments += '--factory'
+        } elseif ($mode -eq 'NewNode') {
+            $message += $newline + $newline + $(if ($merged) {
+                'Вся флеш-память будет очищена перед записью. Настройки и данные будут удалены.'
+            } else { 'Будут удалены прежний ключ, настройки, контакты, каналы и сопряжения обеих ролей.' })
             $arguments += '--new-node'
         }
         if (Confirm-Flash $message -Warning) { Start-Engine $mode 'usb_flash.py' $arguments }

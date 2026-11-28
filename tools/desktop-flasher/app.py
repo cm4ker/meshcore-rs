@@ -20,6 +20,7 @@ import nrf_flash
 import ota_app
 import usb_flash
 from ble_scan import BluetoothScanUnavailable, discover_ble
+from meshcore_ota import is_direct_esp_file, is_merged_esp_file
 
 
 USB = "USB"
@@ -41,7 +42,12 @@ HELP = {
          "Для .uf2 переведите плату в режим USB-загрузчика и через «Диск UF2…» выберите корень её диска. "
          "Выберите файл и нажмите «Прошить UF2 по USB».\n\n"
          "На поддерживаемых ESP можно прошить .mcfw или .bin через загрузчик. Действие «Новая нода со сбросом…» "
-         "также удаляет ключ, настройки, контакты и каналы.",
+         "также удаляет ключ, настройки, контакты и каналы.\n\n"
+         "Чтобы впервые установить MeshCore-RS, выберите .mcfw для своей модели и нажмите «Новая нода со сбросом…». "
+         "После подтверждения программа очистит память, запишет загрузчик и установит прошивку.\n\n"
+         "Для установки с нуля на ESP32-S3 или ESP32-C6 выберите полный *-merged.bin для своей модели. "
+         "«Прошить через USB» запишет полный образ. «Новая нода со сбросом…» сначала очистит всю флеш-память.\n\n"
+         "Обычный .bin Heltec V3 с flasher.meshcore.io можно записать через «Прошить через USB» на плату со штатной разметкой MeshCore.",
     BLE: "Включите Bluetooth и откройте на плате окно подключения. Для репитера MeshCore-RS используйте команду "
          "fw ble. Нажмите «Найти устройства» и выберите плату. Подтвердите сопряжение в системе.\n\n"
          "Нажмите «Проверить устройство». Выберите файл для своей модели и роли или нажмите «Из GitHub». "
@@ -620,6 +626,12 @@ class Flasher:
             path = path or self.choose()
             if not path:
                 return
+            if op == "update" and is_direct_esp_file(path):
+                self.notice("Для этого образа ESP выберите USB и нажмите «Прошить через USB».")
+                return
+            if op == "new" and is_direct_esp_file(path) and not is_merged_esp_file(path):
+                self.notice("Для полной очистки Heltec V3 выберите *-merged.bin для своей модели.")
+                return
             extension = pathlib.Path(path).suffix.lower()
             if extension not in file_formats(transport, self.disk is not None):
                 self.notice("Формат файла не подходит для этого подключения.")
@@ -666,7 +678,22 @@ class Flasher:
                 return
             label = self.board.get() if nrf else self.address.get()
             message = f"Установить {pathlib.Path(path).name} на {label}?"
-            if op == "new":
+            if op == "new" and pathlib.Path(path).suffix.lower() == ".mcfw":
+                try:
+                    with pathlib.Path(path).open("rb") as stream:
+                        esp_board, role = usb_flash.factory_target(stream.read(7))
+                except (OSError, ValueError) as exc:
+                    self.notice(str(exc))
+                    return
+                message += f"\n\n{usb_flash.BOARD_TITLES[esp_board]} · {role}. Сверьте маркировку платы."
+                message += "\n\nВся флеш-память будет очищена. Ключ, настройки и данные будут удалены."
+            elif is_merged_esp_file(path):
+                message += "\n\nСверьте модель на самой плате. Образ содержит загрузчик и таблицу разделов."
+                if op == "new":
+                    message += "\n\nВся флеш-память будет очищена перед записью. Настройки и данные будут удалены."
+                else:
+                    message += "\n\nОбраз перезапишет данные в занимаемой им области флеш-памяти."
+            elif op == "new":
                 message += "\n\nПрежний ключ, контакты, каналы, настройки и сопряжения обеих ролей будут удалены."
             if not messagebox.askyesno("Подтвердите прошивку", message, default="no", parent=self.root):
                 return
@@ -741,7 +768,10 @@ class Flasher:
                 elif op == "update" and transport == DFU:
                     asyncio.run(nrf_flash.install_dfu(target, path, board, progress=progress))
                 elif op in ("usb", "new"):
-                    args = Namespace(port=target, image=pathlib.Path(path), check=False, new_node=op == "new")
+                    image = pathlib.Path(path)
+                    factory = op == "new" and image.suffix.lower() == ".mcfw"
+                    args = Namespace(port=target, image=image, check=False, factory=factory,
+                                     new_node=op == "new" and not factory)
                     usb_flash.install(args, progress=progress)
                 else:
                     flag = {USB: "port", BLE: "ble", TCP: "tcp"}[transport]

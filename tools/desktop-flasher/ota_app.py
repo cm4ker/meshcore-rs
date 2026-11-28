@@ -49,7 +49,7 @@ from ble_scan import BluetoothScanUnavailable, discover_ble
 
 from meshcore_ota import (  # noqa: E402
     DEFAULT_DELTA_TOOL, ERRORS, REPO, cli_progress, describe_device, describe_envelope, envelope_pieces, find_base,
-    load_firmware, log, make_delta, store_image,
+    is_direct_esp_file, load_firmware, log, make_delta, store_image,
 )
 
 # run as the release's program (PyInstaller), away from the repository and its image stores
@@ -474,6 +474,8 @@ async def main(argv=None, *, progress=None):
         return
     if not args.info and not args.image:
         ap.error("an image is required (or --info)")
+    if args.image and is_direct_esp_file(args.image):
+        ap.error("Для этого образа ESP выберите USB и нажмите «Прошить через USB».")
     if args.tcp and args.image and pathlib.Path(args.image).suffix.lower() not in (".mcfw", ".mcfd"):
         ap.error("Через Wi-Fi / TCP можно установить только подписанный .mcfw или .mcfd.")
 

@@ -88,6 +88,15 @@ def airtime_ms(length, sf, bw_khz, cr):
     return (1 << sf) / bw_khz * n
 
 
+def is_merged_esp_file(path):
+    return pathlib.Path(path).name.casefold().endswith("-merged.bin")
+
+
+def is_direct_esp_file(path):
+    name = pathlib.Path(path).name.casefold()
+    return name.endswith("-merged.bin") or (name.startswith("heltec_v3_") and name.endswith(".bin"))
+
+
 def load_firmware(path):
     """The image, and the envelope if the file is a signed release (.mcfw, crates/meshcore/src/release.rs)."""
     data = open(path, "rb").read()
