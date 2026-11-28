@@ -187,7 +187,7 @@ pub async fn run<R: LoraRadio, B: Board>(spawner: Spawner, hw: Hardware<R>, boar
     let Hardware { radio, store, serial, wifi, bt, entropy } = hw;
     let slots = store.as_ref().and_then(|s| ota::slots(&mut s.borrow_mut()));
     let in_trial = match (&store, slots) {
-        (Some(s), Some(sl)) => ota::check_trial(&mut s.borrow_mut(), sl.booted),
+        (Some(s), Some(sl)) => ota::check_trial(s, sl).await,
         _ => false,
     };
     let platform = Esp {
