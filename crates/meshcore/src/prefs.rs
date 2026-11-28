@@ -363,7 +363,8 @@ impl NodePrefs {
         self.rx_delay_base = self.rx_delay_base.clamp(0.0, 20.0);
         self.tx_delay_factor = self.tx_delay_factor.clamp(0.0, 2.0);
         self.direct_tx_delay_factor = self.direct_tx_delay_factor.clamp(0.0, 2.0);
-        self.airtime_factor = self.airtime_factor.clamp(0.0, 9.0);
+        // `set dutycycle 1` stores an airtime factor of 99.
+        self.airtime_factor = self.airtime_factor.clamp(0.0, 99.0);
         self.radio.freq_mhz = self.radio.freq_mhz.clamp(150.0, 2500.0);
         self.radio.bw_khz = self.radio.bw_khz.clamp(7.8, 500.0);
         self.radio.sf = self.radio.sf.clamp(5, 12);

@@ -1200,6 +1200,19 @@ fn gps_cli_on_a_companion() {
     assert!(!a.app.prefs.gps_enabled);
 }
 
+#[test]
+fn dutycycle_survives_reload() {
+    let mut a = companion(1, "Alice");
+    let cli = |m: &mut Mesh<Companion>, command: &str| m.app.handle_command(&mut m.ctx, false, command);
+    for percent in [1, 5, 10, 100] {
+        assert_eq!(cli(&mut a, &format!("set dutycycle {percent}")), format!("OK - {percent}.0%"));
+        assert!(a.app.take_effects().save_prefs);
+
+        a.app.prefs = CompanionPrefs::deserialize(&a.app.prefs.serialize(), 22);
+        assert_eq!(cli(&mut a, "get dutycycle"), format!("> {percent}.0%"));
+    }
+}
+
 /// `adc.multiplier` as on a repeater: only on boards that take one, over the CLI and as a custom
 /// variable, 0 = the board's own, kept in prefs.
 #[test]

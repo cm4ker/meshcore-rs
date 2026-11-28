@@ -715,6 +715,19 @@ fn dynamic_coding_rate_per_hop() {
     }
 }
 
+#[test]
+fn dutycycle_survives_reload() {
+    let mut r = repeater(1);
+    for percent in [1, 5, 10, 100] {
+        let command = format!("set dutycycle {percent}");
+        assert_eq!(r.app.handle_command(&mut r.ctx, 0, &command), format!("OK - {percent}.0%"));
+        assert!(r.app.take_effects().save_prefs);
+
+        r.app.prefs = NodePrefs::deserialize(&r.app.prefs.serialize());
+        assert_eq!(r.app.handle_command(&mut r.ctx, 0, "get dutycycle"), format!("> {percent}.0%"));
+    }
+}
+
 /// `adc.multiplier` as upstream: only on boards that take one, 0 = the board's own, kept in prefs.
 #[test]
 fn adc_multiplier_calibrates_the_battery_reading() {
