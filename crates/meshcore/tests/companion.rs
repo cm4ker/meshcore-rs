@@ -2456,6 +2456,80 @@ fn mcrs_info_on_companion_and_repeater() {
 }
 
 #[test]
+fn binary_requests_get_a_large_repeater_acl_in_pages() {
+    use meshcore::mcrs::{McrsInfo, OPCODE, SUB_ACL_PAGE, SUB_INFO, cap};
+    use meshcore::repeater::{MAX_CLIENTS, PERM_ACL_ADMIN, PERM_ACL_READ_WRITE};
+
+    let mut air = Air::new();
+    air.link(0, 1);
+    let mut a = companion(1, "Alice");
+    let mut r = repeater(2);
+    let rk = pub_key(&r);
+
+    let mut acl = Vec::new();
+    let mut expected = Vec::new();
+    for index in 0..MAX_CLIENTS {
+        let seed = if index == 0 { 1 } else { (index + 2) as u8 };
+        let identity = LocalIdentity::from_seed(&[seed; 32]);
+        let permissions = if index == 0 { PERM_ACL_ADMIN } else { PERM_ACL_READ_WRITE };
+        // The persisted ACL record starts with the public key and permissions.
+        let mut record = [0; 136];
+        record[..32].copy_from_slice(identity.pub_key());
+        record[32] = permissions;
+        acl.extend_from_slice(&record);
+        expected.extend_from_slice(&identity.pub_key()[..6]);
+        expected.push(permissions);
+    }
+    r.app.acl_load(&acl, &r.ctx.self_id);
+
+    r.app.start(&mut r.ctx);
+    air.run(&mut [&mut a, &mut r], 20_000);
+    let mut login = vec![CMD_SEND_LOGIN];
+    login.extend_from_slice(&rk);
+    login.extend_from_slice(b"password");
+    cmd(&mut a, &login);
+    air.run(&mut [&mut a, &mut r], 10_000);
+    let logged_in = only(&frames(&mut a), PUSH_CODE_LOGIN_SUCCESS);
+    assert_eq!(logged_in.len(), 1);
+    assert_eq!(logged_in[0][1] & 1, 1, "admin");
+
+    let mut request = |body: &[u8]| {
+        let mut req = vec![CMD_SEND_BINARY_REQ];
+        req.extend_from_slice(&rk);
+        req.extend_from_slice(body);
+        let sent = cmd(&mut a, &req);
+        assert_eq!(&sent[0][..2], &[RESP_CODE_SENT, 0], "direct request");
+        air.run(&mut [&mut a, &mut r], 10_000);
+        let mut replies = only(&frames(&mut a), PUSH_CODE_BINARY_RESPONSE);
+        assert_eq!(replies.len(), 1, "exactly one app response to {body:?}");
+        let reply = replies.pop().unwrap();
+        assert_eq!(&reply[2..6], &sent[0][2..6], "request tag");
+        assert!(reply.len() <= MAX_FRAME_SIZE);
+        reply[6..].to_vec()
+    };
+
+    let info = request(&[OPCODE, SUB_INFO]);
+    assert_ne!(McrsInfo::decode(&info).unwrap().caps & cap::ACL_PAGES, 0);
+
+    let legacy = request(&[0x05, 0, 0]);
+    let (rows, padding) = legacy.split_at(22 * 7);
+    assert_eq!(rows, &expected[..22 * 7]);
+    assert!(padding.iter().all(|&byte| byte == 0));
+
+    let mut offset = 0;
+    let mut all_rows = Vec::new();
+    for returned in [21, 11] {
+        let page = request(&[OPCODE, SUB_ACL_PAGE, offset]);
+        assert_eq!(&page[..3], &[SUB_ACL_PAGE, MAX_CLIENTS as u8, returned]);
+        let (rows, padding) = page[3..].split_at(usize::from(returned) * 7);
+        all_rows.extend_from_slice(rows);
+        assert!(padding.iter().all(|&byte| byte == 0));
+        offset += returned;
+    }
+    assert_eq!(all_rows, expected);
+}
+
+#[test]
 fn mcrs_peer_data_ack_path_return_retries_and_offline_queue() {
     use meshcore::mcrs::{self, MAX_PEER_DATA_LEN, McrsInfo, SUB_INFO, SUB_PEER_DATA_WAITING, SUB_SEND_PEER_DATA, SUB_SYNC_PEER_DATA, cap};
 

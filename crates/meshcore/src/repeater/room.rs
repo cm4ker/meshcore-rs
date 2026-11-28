@@ -431,7 +431,7 @@ impl Repeater {
                 }
                 return;
             }
-            let reply = self.handle_request(ctx, i, timestamp, &data[4..]);
+            let reply = self.handle_request(ctx, pkt, i, timestamp, &data[4..]);
             if reply.is_empty() {
                 return;
             }

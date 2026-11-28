@@ -36,7 +36,8 @@ const MIN_TX_BUDGET_RESERVE_MS: u32 = 100;
 const MIN_TX_BUDGET_AIRTIME_DIV: u32 = 2;
 const DUTY_CYCLE_WINDOW_MS: u32 = 3_600_000;
 const CAD_FAIL_MAX_DURATION_MS: u64 = 4000;
-const MAX_COMBINED_PATH: usize = MAX_PACKET_PAYLOAD - 2 - CIPHER_BLOCK_SIZE;
+pub(crate) const MAX_DATAGRAM_DATA: usize = MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE - 1);
+const MAX_PATH_RETURN_EXTRA: usize = MAX_PACKET_PAYLOAD - 2 - CIPHER_BLOCK_SIZE - 5;
 
 /// Pool sizes (upstream uses one pool of 32 shared packets).
 const OUTBOUND_CAPACITY: usize = 32;
@@ -411,7 +412,7 @@ impl MeshCtx {
         if !matches!(payload_type, PAYLOAD_TYPE_TXT_MSG | PAYLOAD_TYPE_REQ | PAYLOAD_TYPE_RESPONSE) {
             return None;
         }
-        if data.len() + CIPHER_MAC_SIZE + CIPHER_BLOCK_SIZE - 1 > MAX_PACKET_PAYLOAD {
+        if data.len() > MAX_DATAGRAM_DATA {
             return None;
         }
         let mut pkt = Box::new(Packet::with_type(payload_type));
@@ -450,12 +451,17 @@ impl MeshCtx {
         Some(pkt)
     }
 
+    /// Space for the response attached to a returned path, before encryption.
+    pub(crate) fn path_return_extra_limit(path_len: u8) -> Option<usize> {
+        MAX_PATH_RETURN_EXTRA.checked_sub(Packet::path_bytes_for(path_len))
+    }
+
     /// PATH payload returning `path` to `dest_hash`, optionally carrying an extra payload.
     pub fn create_path_return(
         &mut self, dest_hash: u8, secret: &Secret, path_len: u8, path: &[u8], extra_type: u8, extra: &[u8],
     ) -> Option<Box<Packet>> {
         let path_bytes = Packet::path_bytes_for(path_len);
-        if path_bytes + extra.len() + 5 > MAX_COMBINED_PATH || path_bytes > path.len() {
+        if extra.len() > Self::path_return_extra_limit(path_len)? || path_bytes > path.len() {
             return None;
         }
         let mut pkt = Box::new(Packet::with_type(PAYLOAD_TYPE_PATH));

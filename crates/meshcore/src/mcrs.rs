@@ -25,7 +25,8 @@ use crate::release;
 /// - v1: `SUB_INFO` (`0x00`) on companion link and remote repeater/room LoRa requests.
 /// - v2: Reliable ACKed binary P2P datagrams (`SUB_SEND_PEER_DATA`, `SUB_SYNC_PEER_DATA`,
 ///   `PUSH_OPCODE`, `cap::PEER_DATA`) and `REQ_TYPE_MCRS` `SUB_INFO` replies on companions.
-pub const MCRS_VERSION: u8 = 2;
+/// - v3: Paginated repeater/room ACL requests ([`SUB_ACL_PAGE`]).
+pub const MCRS_VERSION: u8 = 3;
 
 /// Vendor opcode shared by companion frames (`CMD_MCRS` / `RESP_MCRS`) and LoRa binary requests
 /// (`REQ_TYPE_MCRS`).
@@ -47,6 +48,17 @@ pub const SUB_SYNC_PEER_DATA: u8 = 0x02;
 /// Push subcode `0x03` (under [`PUSH_OPCODE`]): at least one incoming binary P2P datagram is
 /// queued and ready for [`SUB_SYNC_PEER_DATA`].
 pub const SUB_PEER_DATA_WAITING: u8 = 0x03;
+
+/// Remote repeater/room subcommand `0x04`: list an ACL page (admin only).
+///
+/// With `CMD_SEND_BINARY_REQ`, send `[OPCODE, SUB_ACL_PAGE, offset:u8]`. The LoRa
+/// plaintext reply is `[tag:u32 LE, SUB_ACL_PAGE, total:u8, returned:u8, rows...]`.
+/// Each row is a six-byte public-key prefix and one permission byte. Read exactly
+/// `returned` rows, ignoring cipher padding. Start at offset 0 and add `returned`
+/// for the next request until the offset reaches `total` (or `returned` is zero).
+/// Offsets count visible entries, and each page is read from the current ACL.
+/// Discover support with [`cap::ACL_PAGES`].
+pub const SUB_ACL_PAGE: u8 = 0x04;
 
 /// Maximum binary payload length of a peer-to-peer datagram (`TXT_TYPE_PEER_DATA`).
 ///
@@ -97,6 +109,8 @@ pub mod cap {
     pub const MQTT: u32 = 1 << 15;
     /// Companion supports ACKed binary P2P datagrams (`SUB_SEND_PEER_DATA` / `SUB_SYNC_PEER_DATA`).
     pub const PEER_DATA: u32 = 1 << 16;
+    /// Repeater or room supports paginated ACL queries.
+    pub const ACL_PAGES: u32 = 1 << 17;
 }
 
 /// Build identity and capability snapshot returned by [`SUB_INFO`].
