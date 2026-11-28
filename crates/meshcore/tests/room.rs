@@ -393,6 +393,7 @@ fn room_hosted_beside_a_repeater() {
         m
     };
     let mut r = room_server(NodePrefs::room_server_defaults());
+    rep.share_tx_budget_with_room(&mut r);
     assert_ne!(rep.ctx.self_id.id.hash(), r.ctx.self_id.id.hash());
     let mut a = Member::new(2, r.ctx.self_id.id);
 
@@ -417,4 +418,86 @@ fn room_hosted_beside_a_repeater() {
     let room_tx = drain_tx(&mut r, 2 * LATER);
     assert_eq!(Packet::parse(&room_tx[0]).unwrap().payload_type(), PAYLOAD_TYPE_ACK);
     assert_eq!(r.app.room_stats(), Some((1, 0)));
+}
+
+#[test]
+fn hosted_room_and_repeater_share_credit_and_overdraft() {
+    let radio = RadioParams { bw_khz: 7.8, sf: 12, cr: 8, ..RadioParams::default() };
+    let id = LocalIdentity::from_seed(&[9; 32]);
+    let ctx = MeshCtx::new(id, [9; 16], radio, T0);
+    let prefs = NodePrefs { airtime_factor: 99.0, ..NodePrefs::default() };
+    let mut rep = Mesh::new(ctx, Repeater::new(prefs, BoardInfo::default()));
+    rep.begin(0);
+    let mut room = room_server(NodePrefs::room_server_defaults());
+    room.ctx.radio = radio;
+    rep.share_tx_budget_with_room(&mut room);
+
+    let credit = rep.ctx.remaining_tx_budget_ms();
+    assert_eq!(credit, 36_000);
+    room.begin(0);
+    assert_eq!(room.ctx.remaining_tx_budget_ms(), credit);
+    assert_eq!(room.app.handle_command(&mut room.ctx, 0, "get dutycycle"), "> 1.0%");
+    assert_eq!(
+        room.app.handle_command(&mut room.ctx, 0, "set dutycycle 100"),
+        "ERROR: set the duty cycle on the host repeater",
+    );
+
+    let pkt = rep.ctx.create_raw_data(&[0xAA; meshcore::MAX_PACKET_PAYLOAD]).unwrap();
+    rep.ctx.send_packet(pkt, 0, 0);
+    let ack = room.ctx.create_ack(&[0; 4]);
+    room.ctx.send_packet(ack, 0, 0);
+    assert!(rep.tx_pending(0));
+    let tx = rep.tx_take(0).unwrap();
+    let airtime = radio.time_on_air_us(tx.len).div_ceil(1000);
+    assert!(airtime > credit);
+    assert!(!room.tx_pending(0));
+    assert!(room.tx_take(0).is_none(), "the physical radio already has a frame");
+
+    let timed_out_at = u64::from(tx.timeout_ms);
+    rep.tx_failed(timed_out_at);
+    assert!(!room.tx_pending(timed_out_at));
+    assert!(room.tx_take(timed_out_at).is_none(), "the queued room packet must wait for shared credit");
+    let next = room.next_deadline().unwrap();
+    assert!(next > timed_out_at + u64::from(credit) * 100, "refill also pays the overdraft");
+
+    let ready = next + 1000;
+    assert!(room.tx_pending(ready));
+    assert!(room.tx_take(ready).is_some());
+    room.tx_done(ready + 5000);
+    rep.poll(ready + 5000);
+    assert_eq!(rep.ctx.remaining_tx_budget_ms(), credit - 5000);
+    assert_eq!(rep.ctx.stats.n_packets_sent, 0);
+    assert_eq!(room.ctx.stats.n_packets_sent, 1);
+
+    assert_eq!(rep.app.handle_command(&mut rep.ctx, 0, "set dutycycle 5"), "OK - 5.0%");
+    rep.poll(ready + 5000);
+    assert_eq!(room.app.handle_command(&mut room.ctx, 0, "get dutycycle"), "> 5.0%");
+}
+
+#[test]
+fn failed_tx_charges_the_selected_frame_airtime_once() {
+    struct PerFrameCr;
+    impl MeshApp for PerFrameCr {
+        fn tx_coding_rate(&self, _: &MeshCtx, _: &Packet) -> Option<u8> {
+            Some(8)
+        }
+    }
+
+    let mut mesh = Mesh::new(room_server(NodePrefs::room_server_defaults()).ctx, PerFrameCr);
+    mesh.begin(0);
+    let pkt = mesh.ctx.create_raw_data(&[0x55; 84]).unwrap();
+    mesh.ctx.send_packet(pkt, 0, 0);
+    let credit = mesh.ctx.remaining_tx_budget_ms();
+    let frame = mesh.tx_take(0).unwrap();
+    assert_eq!(frame.cr, Some(8));
+    let airtime = mesh.ctx.radio.with_cr(8).time_on_air_us(frame.len).div_ceil(1000);
+    let now = u64::from(frame.timeout_ms);
+    assert!(now > u64::from(airtime));
+    mesh.tx_failed(now);
+    mesh.tx_failed(now);
+    mesh.tx_done(now);
+    assert_eq!(mesh.ctx.remaining_tx_budget_ms(), credit - airtime);
+    assert_eq!(mesh.ctx.stats.total_air_time_ms, u64::from(airtime));
+    assert_eq!(mesh.ctx.stats.n_packets_sent, 0);
+    assert_eq!(mesh.ctx.stats.n_sent_direct + mesh.ctx.stats.n_sent_flood, 0);
 }

@@ -653,6 +653,7 @@ where
         seed[0] ^= 0x5A;
         let mut room = start_room(&store, &mesh, &entropy, seed);
         room.begin(now_ms());
+        mesh.share_tx_budget_with_room(&mut room);
         room.app.start(&mut room.ctx);
         room
     });

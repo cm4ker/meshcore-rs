@@ -9,8 +9,10 @@
 
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 #[cfg(feature = "net")]
 use crate::bridge::Bridge;
@@ -22,7 +24,7 @@ use crate::fwshare::{self, FwStore};
 use crate::fwstate::{self, FwState};
 use crate::gps::GpsReading;
 use crate::identity::{Identity, LocalIdentity};
-use crate::mesh::{MeshApp, MeshCtx};
+use crate::mesh::{Mesh, MeshApp, MeshCtx, TxBudget};
 use crate::ota::{OtaEndpoint, OtaOutcome};
 use crate::release;
 use crate::packet::*;
@@ -386,6 +388,8 @@ pub struct Repeater {
     pub uplink_enabled: bool,
     /// Room server state: `Some` when this node is a room server.
     room: Option<Box<room::Room>>,
+    /// The physical LoRa radio's budget, shared by the repeater and its hosted room.
+    shared_tx_budget: Option<Rc<Cell<TxBudget>>>,
     #[cfg(feature = "net")]
     bridge: Bridge,
     /// Frames for the bridge's medium, taken by the firmware.
@@ -398,6 +402,15 @@ pub struct Repeater {
     bad_logins: RateLimiter,
     /// An admin's last timestamp moved since the ACL was last saved.
     stamps_dirty: bool,
+}
+
+impl Mesh<Repeater> {
+    /// Attach a hosted room to the repeater's physical radio after both nodes have begun.
+    pub fn share_tx_budget_with_room(&mut self, room: &mut Self) {
+        let budget = self.app.shared_tx_budget.get_or_insert_with(|| Rc::new(Cell::new(self.ctx.tx_budget)));
+        room.ctx.tx_budget = budget.get();
+        room.app.shared_tx_budget = Some(budget.clone());
+    }
 }
 
 fn read_u32(b: &[u8], at: usize) -> u32 {
@@ -472,6 +485,7 @@ impl Repeater {
             #[cfg(feature = "net")]
             uplink_enabled: false,
             room: None,
+            shared_tx_budget: None,
             #[cfg(feature = "net")]
             bridge,
             #[cfg(feature = "net")]
@@ -1210,7 +1224,11 @@ impl MeshApp for Repeater {
     }
 
     fn airtime_budget_factor(&self) -> f32 {
-        self.prefs.airtime_factor
+        self.hosted_tx_budget_factor().unwrap_or(self.prefs.airtime_factor)
+    }
+
+    fn shared_tx_budget(&self) -> Option<&Cell<TxBudget>> {
+        self.shared_tx_budget.as_deref()
     }
 
     fn calc_rx_delay(&self, score: f32, air_time: u32) -> i32 {
@@ -2104,8 +2122,14 @@ impl Repeater {
         }
     }
 
+    fn hosted_tx_budget_factor(&self) -> Option<f32> {
+        self.room.as_ref()?;
+        self.shared_tx_budget.as_ref().map(|budget| budget.get().airtime_factor())
+    }
+
     /// `CommonRadioPrefs::handleCommand`.
     fn handle_radio_command(&mut self, cmd: &str) -> Option<String> {
+        let hosted_factor = self.hosted_tx_budget_factor();
         let p = &mut self.prefs;
         let r: String = if cmd == "get radio" {
             format!("> {},{},{},{}", ftoa(p.radio.freq_mhz as f64, 3), ftoa(p.radio.bw_khz as f64, 3), p.radio.sf, p.radio.cr)
@@ -2127,8 +2151,10 @@ impl Repeater {
             }
         } else if cmd == "get freq" {
             format!("> {}", ftoa(p.radio.freq_mhz as f64, 3))
+        } else if hosted_factor.is_some() && (cmd.starts_with("set af ") || cmd.starts_with("set dutycycle ")) {
+            "ERROR: set the duty cycle on the host repeater".into()
         } else if cmd == "get af" {
-            format!("> {}", ftoa(p.airtime_factor as f64, 3))
+            format!("> {}", ftoa(hosted_factor.unwrap_or(p.airtime_factor) as f64, 3))
         } else if let Some(v) = cmd.strip_prefix("set af ") {
             let af = atof(v) as f32;
             if v.trim().is_empty() || !(0.0..=9.0).contains(&af) {
@@ -2139,7 +2165,8 @@ impl Repeater {
                 "OK".into()
             }
         } else if cmd == "get dutycycle" {
-            format!("> {}%", Fixed((100.0 / (p.airtime_factor + 1.0)) as f64, 1))
+            let factor = hosted_factor.unwrap_or(p.airtime_factor);
+            format!("> {}%", Fixed((100.0 / (factor + 1.0)) as f64, 1))
         } else if let Some(v) = cmd.strip_prefix("set dutycycle ") {
             let dc = atof(v) as f32;
             if !(1.0..=100.0).contains(&dc) {

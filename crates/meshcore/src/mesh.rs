@@ -13,6 +13,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use crate::crypto::{self, Secret};
 use crate::identity::{Identity, LocalIdentity};
@@ -64,6 +65,7 @@ pub struct Stats {
     pub n_packets_recv: u32,
     pub n_packets_sent: u32,
     pub n_recv_errors: u32,
+    /// Measured completed TX time plus estimated airtime for failed attempts.
     pub total_air_time_ms: u64,
     pub rx_air_time_ms: u64,
     pub err_flags: u16,
@@ -94,6 +96,68 @@ struct InFlight {
     /// The packet on the air, for the app's TX hook.
     pkt: Box<Packet>,
     len: usize,
+    airtime_ms: u32,
+}
+
+/// TX credit for one physical radio. A frame may overdraw it; refill pays that debt first.
+#[derive(Clone, Copy)]
+pub struct TxBudget {
+    balance_ms: i64,
+    updated_at: u64,
+    airtime_factor: f32,
+    in_flight: bool,
+}
+
+impl TxBudget {
+    fn empty() -> Self {
+        Self { balance_ms: 0, updated_at: 0, airtime_factor: 1.0, in_flight: false }
+    }
+
+    pub(crate) fn airtime_factor(self) -> f32 {
+        self.airtime_factor
+    }
+
+    fn duty_cycle(self) -> f32 {
+        1.0 / (1.0 + self.airtime_factor)
+    }
+
+    fn capacity(self) -> u32 {
+        (DUTY_CYCLE_WINDOW_MS as f32 * self.duty_cycle()) as u32
+    }
+
+    fn refill(&mut self, now: u64) {
+        let elapsed = now.saturating_sub(self.updated_at);
+        let refill = (elapsed as f32 * self.duty_cycle()) as u32;
+        if refill > 0 {
+            self.balance_ms = (self.balance_ms + i64::from(refill)).min(i64::from(self.capacity()));
+            self.updated_at = now;
+        }
+    }
+
+    fn set_factor(&mut self, now: u64, airtime_factor: f32) {
+        if self.airtime_factor != airtime_factor {
+            self.refill(now);
+            self.airtime_factor = airtime_factor;
+            self.balance_ms = self.balance_ms.min(i64::from(self.capacity()));
+            self.updated_at = self.updated_at.max(now);
+        }
+    }
+
+    fn minimum_credit(self, radio: RadioParams) -> i64 {
+        i64::from((radio.est_airtime_ms(MAX_TRANS_UNIT) / MIN_TX_BUDGET_AIRTIME_DIV)
+            .max(MIN_TX_BUDGET_RESERVE_MS)
+            .min(self.capacity()))
+    }
+
+    fn ready_at(self, radio: RadioParams) -> u64 {
+        let missing = (self.minimum_credit(radio) - self.balance_ms).max(0);
+        if missing == 0 {
+            return self.updated_at;
+        }
+        let wait = missing as f32 / self.duty_cycle();
+        let whole = wait as u64;
+        self.updated_at.saturating_add(whole).saturating_add(u64::from((whole as f32) < wait))
+    }
 }
 
 /// Everything except the application: shared state the app hooks may use.
@@ -108,12 +172,10 @@ pub struct MeshCtx {
     pub stats: Stats,
     outbound: PacketQueue,
     inbound: PacketQueue,
-    tx_budget_ms: u32,
-    last_budget_update: u64,
+    pub(crate) tx_budget: TxBudget,
     next_tx_time: u64,
     cad_busy_start: Option<u64>,
     in_flight: Option<InFlight>,
-    airtime_factor: f32,
 }
 
 /// Application layer hooks (the virtual methods of upstream `Mesh`).
@@ -147,6 +209,11 @@ pub trait MeshApp {
 
     fn airtime_budget_factor(&self) -> f32 {
         1.0
+    }
+
+    /// The physical radio's budget, when more than one app uses that radio.
+    fn shared_tx_budget(&self) -> Option<&Cell<TxBudget>> {
+        None
     }
 
     /// Delay before processing a received flood packet, from its reception score.
@@ -250,12 +317,10 @@ impl MeshCtx {
             stats: Stats::default(),
             outbound: PacketQueue::new(OUTBOUND_CAPACITY),
             inbound: PacketQueue::new(INBOUND_CAPACITY),
-            tx_budget_ms: 0,
-            last_budget_update: 0,
+            tx_budget: TxBudget::empty(),
             next_tx_time: 0,
             cad_busy_start: None,
             in_flight: None,
-            airtime_factor: 1.0,
         }
     }
 
@@ -287,18 +352,15 @@ impl MeshCtx {
         self.outbound.iter()
     }
 
+    /// Credit as of this node's most recent call into the mesh.
     pub fn remaining_tx_budget_ms(&self) -> u32 {
-        self.tx_budget_ms
+        self.tx_budget.balance_ms.max(0) as u32
     }
 
     pub fn reset_stats(&mut self) {
         let floor = self.stats.noise_floor;
         self.stats = Stats { noise_floor: floor, ..Stats::default() };
         self.tables.reset_stats();
-    }
-
-    fn duty_cycle(&self) -> f32 {
-        1.0 / (1.0 + self.airtime_factor)
     }
 
     // ---------------------------------------------------------------- sending
@@ -519,18 +581,6 @@ impl MeshCtx {
         pkt.set_payload(data).then_some(pkt)
     }
 
-    // ------------------------------------------------------------ TX budget
-
-    fn update_tx_budget(&mut self) {
-        let elapsed = self.now.saturating_sub(self.last_budget_update);
-        let dc = self.duty_cycle();
-        let max_budget = (DUTY_CYCLE_WINDOW_MS as f32 * dc) as u32;
-        let refill = (elapsed as f32 * dc) as u32;
-        if refill > 0 {
-            self.tx_budget_ms = self.tx_budget_ms.saturating_add(refill).min(max_budget);
-            self.last_budget_update = self.now;
-        }
-    }
 }
 
 /// The routing node: core context plus application.
@@ -546,15 +596,42 @@ impl<A: MeshApp> Mesh<A> {
 
     pub fn begin(&mut self, now: u64) {
         self.ctx.now = now;
-        self.ctx.airtime_factor = self.app.airtime_budget_factor();
-        self.ctx.tx_budget_ms = (DUTY_CYCLE_WINDOW_MS as f32 * self.ctx.duty_cycle()) as u32;
-        self.ctx.last_budget_update = now;
+        self.ctx.tx_budget = if let Some(shared) = self.app.shared_tx_budget() {
+            shared.get()
+        } else {
+            let mut budget = TxBudget { updated_at: now, airtime_factor: self.app.airtime_budget_factor(), ..TxBudget::empty() };
+            budget.balance_ms = i64::from(budget.capacity());
+            budget
+        };
         self.ctx.next_tx_time = now;
     }
 
     fn enter(&mut self, now: u64) {
         self.ctx.now = now;
-        self.ctx.airtime_factor = self.app.airtime_budget_factor();
+        let mut budget = self.tx_budget();
+        budget.set_factor(now, self.app.airtime_budget_factor());
+        self.set_tx_budget(budget);
+    }
+
+    fn tx_budget(&self) -> TxBudget {
+        self.app.shared_tx_budget().map_or(self.ctx.tx_budget, Cell::get)
+    }
+
+    fn set_tx_budget(&mut self, budget: TxBudget) {
+        self.ctx.tx_budget = budget;
+        if let Some(shared) = self.app.shared_tx_budget() {
+            shared.set(budget);
+        }
+    }
+
+    fn charge_tx(&mut self, now: u64, airtime_ms: u32) {
+        let mut budget = self.ctx.tx_budget;
+        budget.refill(now);
+        budget.balance_ms -= i64::from(airtime_ms);
+        budget.in_flight = false;
+        self.set_tx_budget(budget);
+        self.ctx.stats.total_air_time_ms += u64::from(airtime_ms);
+        self.ctx.next_tx_time = now;
     }
 
     // -------------------------------------------------------------- receive
@@ -620,7 +697,9 @@ impl<A: MeshApp> Mesh<A> {
     /// The earliest scheduled event (a queued packet, an app timer), without the once-a-second
     /// poll of [`Self::next_wakeup`]: how long a sleeping board may stay asleep.
     pub fn next_deadline(&self) -> Option<u64> {
-        let outbound = self.ctx.outbound.next_due().map(|d| d.max(self.ctx.next_tx_time));
+        let outbound = self.ctx.outbound.next_due().map(|d| {
+            d.max(self.ctx.next_tx_time).max(self.tx_budget().ready_at(self.ctx.radio))
+        });
         [self.ctx.inbound.next_due(), outbound, self.app.next_timer()].into_iter().flatten().min()
     }
 
@@ -920,18 +999,13 @@ impl<A: MeshApp> Mesh<A> {
     /// Is a packet due, with enough TX budget and the inter-packet gap respected?
     pub fn tx_pending(&mut self, now: u64) -> bool {
         self.enter(now);
-        let ctx = &mut self.ctx;
-        if ctx.in_flight.is_some() || ctx.outbound.count_due(now) == 0 {
+        let mut budget = self.ctx.tx_budget;
+        if budget.in_flight || self.ctx.outbound.count_due(now) == 0 {
             return false;
         }
-        ctx.update_tx_budget();
-        let est = ctx.radio.est_airtime_ms(MAX_TRANS_UNIT);
-        if ctx.tx_budget_ms < est / MIN_TX_BUDGET_AIRTIME_DIV {
-            let needed = est / MIN_TX_BUDGET_AIRTIME_DIV - ctx.tx_budget_ms;
-            ctx.next_tx_time = now + (needed as f32 / ctx.duty_cycle()) as u64;
-            return false;
-        }
-        now >= ctx.next_tx_time
+        budget.refill(now);
+        self.set_tx_budget(budget);
+        now >= self.ctx.next_tx_time && budget.balance_ms >= budget.minimum_credit(self.ctx.radio)
     }
 
     /// The radio reports channel activity. Returns `true` to defer, `false` to transmit anyway
@@ -952,7 +1026,15 @@ impl<A: MeshApp> Mesh<A> {
     /// Pop the next packet and serialize it; the caller must transmit it and then call
     /// [`Self::tx_done`] or [`Self::tx_failed`].
     pub fn tx_take(&mut self, now: u64) -> Option<TxFrame> {
+        // Another role may have used the radio since this one last checked readiness.
+        if self.app.shared_tx_budget().is_some() && !self.tx_pending(now) {
+            return None;
+        }
         self.enter(now);
+        let mut budget = self.ctx.tx_budget;
+        if budget.in_flight {
+            return None;
+        }
         let ctx = &mut self.ctx;
         ctx.cad_busy_start = None;
         loop {
@@ -965,27 +1047,22 @@ impl<A: MeshApp> Mesh<A> {
             frame.cr = self.app.tx_coding_rate(ctx, &pkt).filter(|&cr| cr != ctx.radio.cr);
             let params = frame.cr.map_or(ctx.radio, |cr| ctx.radio.with_cr(cr));
             frame.timeout_ms = params.est_airtime_ms(len) * 3 / 2 + 100;
-            ctx.in_flight = Some(InFlight { start: now, flood: pkt.is_route_flood(), pkt, len });
+            let airtime_ms = params.time_on_air_us(len).div_ceil(1000);
+            ctx.in_flight = Some(InFlight { start: now, flood: pkt.is_route_flood(), pkt, len, airtime_ms });
+            budget.in_flight = true;
+            self.set_tx_budget(budget);
             return Some(frame);
         }
     }
 
     pub fn tx_done(&mut self, now: u64) {
         self.enter(now);
-        let ctx = &mut self.ctx;
-        let Some(f) = ctx.in_flight.take() else {
+        let Some(f) = self.ctx.in_flight.take() else {
             return;
         };
-        let t = (now - f.start) as u32;
-        ctx.stats.total_air_time_ms += t as u64;
-        ctx.update_tx_budget();
-        ctx.tx_budget_ms = ctx.tx_budget_ms.saturating_sub(t);
-        if ctx.tx_budget_ms < MIN_TX_BUDGET_RESERVE_MS {
-            let needed = MIN_TX_BUDGET_RESERVE_MS - ctx.tx_budget_ms;
-            ctx.next_tx_time = now + (needed as f32 / ctx.duty_cycle()) as u64;
-        } else {
-            ctx.next_tx_time = now;
-        }
+        let t = now.saturating_sub(f.start).min(u64::from(u32::MAX)) as u32;
+        self.charge_tx(now, t);
+        let ctx = &mut self.ctx;
         ctx.stats.n_packets_sent += 1;
         if f.flood {
             ctx.stats.n_sent_flood += 1;
@@ -997,7 +1074,10 @@ impl<A: MeshApp> Mesh<A> {
 
     pub fn tx_failed(&mut self, now: u64) {
         self.enter(now);
-        self.ctx.in_flight = None;
+        if let Some(f) = self.ctx.in_flight.take() {
+            // A missing TX_DONE can mean the whole frame was sent. Debit its estimate once.
+            self.charge_tx(now, f.airtime_ms);
+        }
         self.app.log_tx_fail(&self.ctx);
     }
 
