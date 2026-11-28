@@ -528,7 +528,7 @@ where
     }
     let slots = store.as_ref().and_then(|s| ota::slots(&mut s.borrow_mut()));
     let mut in_trial = match (&store, slots) {
-        (Some(s), Some(sl)) => ota::check_trial(&mut s.borrow_mut(), sl.booted),
+        (Some(s), Some(sl)) => ota::check_trial(s, sl).await,
         _ => false,
     };
     match slots {
@@ -1424,7 +1424,6 @@ where
             }
             in_trial = false;
             mesh.app.board.fw_trial_until = None;
-            info!("OTA: new firmware confirmed");
         }
 
         if reboot_at.is_some_and(|t| now >= t) {

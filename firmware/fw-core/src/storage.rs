@@ -782,6 +782,94 @@ mod tests {
     }
 
     #[test]
+    fn esp_rollback_record_survives_slot_errors_until_destination_boots() {
+        use crate::esp_ota_trial::{FwRecord, MAX_TRIAL_BOOTS, Rollback, TrialBoot};
+
+        let mount = |flash| Store::with_regions(flash, DATA, None);
+        for booted_after_error in [0, 1] {
+            let mut store = mount(flash());
+            let trial = FwRecord { trial: Some([1, 0, MAX_TRIAL_BOOTS]), skip: 0, prev: "previous".into() };
+            assert!(trial.save(&mut store));
+            assert!(matches!(FwRecord::load(&mut store).on_boot(&mut store, 1), TrialBoot::Rollback));
+
+            let result = FwRecord::load(&mut store).request_rollback(
+                &mut store,
+                1,
+                0,
+                || (69, "failed image".into()),
+                |store, slot| {
+                    assert_eq!(slot, 0);
+                    assert!(FwRecord::load(store).rollback_pending());
+                    false
+                },
+            );
+            assert_eq!(result, Rollback::SlotError);
+
+            // An OTA-data error may leave the original slot selected or occur after the switch.
+            let mut store = mount(core::mem::replace(store.flash(), RamFlash(Vec::new())));
+            let mut pending = FwRecord::load(&mut store);
+            assert!(pending.rollback_pending());
+            if booted_after_error == 1 {
+                assert!(matches!(pending.on_boot(&mut store, 1), TrialBoot::Rollback));
+                let result = pending.request_rollback(
+                    &mut store,
+                    1,
+                    0,
+                    || panic!("the retry must reuse the saved record"),
+                    |_, slot| slot == 0,
+                );
+                assert_eq!(result, Rollback::Selected);
+                assert!(FwRecord::load(&mut store).rollback_pending());
+                store = mount(core::mem::replace(store.flash(), RamFlash(Vec::new())));
+                pending = FwRecord::load(&mut store);
+                assert!(matches!(pending.on_boot(&mut store, 1), TrialBoot::RollbackRejected));
+                assert!(FwRecord::load(&mut store).rollback_pending());
+            }
+            assert!(matches!(pending.on_boot(&mut store, 0), TrialBoot::RolledBack));
+            let completed = FwRecord::load(&mut store);
+            assert_eq!(completed.trial, None);
+            assert_eq!(completed.skip, 69);
+            assert_eq!(completed.prev, "failed image");
+        }
+    }
+
+    #[test]
+    fn esp_rollback_keeps_trial_and_avoids_selecting_on_record_write_error() {
+        use crate::esp_ota_trial::{FwRecord, MAX_TRIAL_BOOTS, Rollback};
+
+        let mut store = Store::with_regions(flash(), DATA, None);
+        let trial = Some([1, 0, MAX_TRIAL_BOOTS]);
+        assert!(FwRecord { trial, skip: 0, prev: "previous".into() }.save(&mut store));
+        // The first journal record is readable, but erasing the alternate sector fails.
+        let alternate = store.blob_addr(Blob::OtaTrial).unwrap()[1];
+        store.flash().0.truncate(alternate as usize);
+        let result = FwRecord::load(&mut store).request_rollback(
+            &mut store,
+            1,
+            0,
+            || (69, "failed image".into()),
+            |_, _| panic!("the boot slot must not change before the rollback is recorded"),
+        );
+        assert_eq!(result, Rollback::RecordError);
+        assert_eq!(FwRecord::load(&mut store).trial, trial);
+    }
+
+    #[test]
+    fn esp_last_trial_boot_is_still_a_trial() {
+        use crate::esp_ota_trial::{FwRecord, MAX_TRIAL_BOOTS, TrialBoot};
+
+        let mut store = Store::with_regions(flash(), DATA, None);
+        assert!(store.save(Blob::OtaTrial, &[1, 0, MAX_TRIAL_BOOTS - 1]));
+        assert!(matches!(
+            FwRecord::load(&mut store).on_boot(&mut store, 1),
+            TrialBoot::Trial(MAX_TRIAL_BOOTS)
+        ));
+        let trial = FwRecord::load(&mut store);
+        assert_eq!(trial.trial, Some([1, 0, MAX_TRIAL_BOOTS]));
+        assert!(!trial.rollback_pending());
+    }
+
+    #[test]
     fn a_blob_past_the_data_region_goes_to_the_overflow() {
         let mut store = Store::with_regions(flash(), DATA, None).with_overflow(OVERFLOW);
         assert!(store.save(Blob::RoomAcl, b"acl"));
