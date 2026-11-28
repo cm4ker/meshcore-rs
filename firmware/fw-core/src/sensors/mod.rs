@@ -15,11 +15,15 @@ pub mod ahtx0;
 pub mod bme280;
 pub mod bmp280;
 pub mod descriptor;
+mod ina;
 pub mod ina219;
 pub mod ina226;
 pub mod sht3x;
 pub mod sht4x;
 pub mod shtc3;
+
+#[cfg(test)]
+mod ina_tests;
 
 use core::fmt::Write as _;
 use alloc::string::String;
@@ -175,10 +179,13 @@ impl<I: I2c> Sensors<I> {
     /// not answer this time keeps its channel, so the others' do not move.
     pub async fn read_lpp(&mut self, lpp: &mut Vec<u8>) -> u8 {
         let i2c = &mut self.i2c;
-        // Sample INA219 first (before BMP/BME/AHT I2C traffic keeps the MCU awake past its 532 µs
-        // conversion window), while keeping the upstream channel order below.
+        // Sample INA219 first and overlap INA226's longer conversion with other sensor reads.
         let ina_reading = match self.ina.as_ref() {
             Some(s) => s.read(i2c).await,
+            None => None,
+        };
+        let ina226_ready_at = match self.ina226.as_ref() {
+            Some(s) => s.start_conversion(i2c).await,
             None => None,
         };
         let mut channel = meshcore::lpp::CHANNEL_SELF + 1;
@@ -221,7 +228,9 @@ impl<I: I2c> Sensors<I> {
             channel += 1;
         }
         if let Some(s) = self.ina226.as_ref() {
-            if let Some(r) = s.read(i2c).await {
+            if let Some(ready_at) = ina226_ready_at
+                && let Some(r) = s.read_conversion(i2c, ready_at).await
+            {
                 r.lpp(channel, lpp);
             }
             channel += 1;

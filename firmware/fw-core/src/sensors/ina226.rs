@@ -12,9 +12,11 @@
 
 use alloc::vec::Vec;
 
-use embassy_time::{Duration, with_timeout};
+use embassy_time::{Duration, Instant};
 use embedded_hal_async::i2c::I2c;
 use meshcore::lpp;
+
+use super::ina::{register, wait_ready, write};
 
 /// Upstream `TELEM_INA226_ADDRESS`.
 pub const ADDRESS: u8 = 0x44;
@@ -24,11 +26,16 @@ const REG_BUS_VOLTAGE: u8 = 0x02;
 const REG_POWER: u8 = 0x03;
 const REG_CURRENT: u8 = 0x04;
 const REG_CALIBRATION: u8 = 0x05;
+const REG_MASK_ENABLE: u8 = 0x06;
 const REG_DIE_ID: u8 = 0xFF;
 /// The INA226's answer in [`REG_DIE_ID`], which an INA219 at the same address does not give.
 const DIE_ID: u16 = 0x2260;
-/// 16 averages of both bus and shunt, 1.1 ms each, continuous.
-const CONFIG: u16 = 0x4527;
+/// 16 averages of both bus and shunt, 1.1 ms each.
+const CONFIG_POWER_DOWN: u16 = 0x4520;
+const CONFIG_TRIGGERED: u16 = CONFIG_POWER_DOWN | 0b011;
+const CONVERSION_READY: u16 = 1 << 3; // in the mask/enable register
+// 16 pairs at up to 1.21 ms per conversion, plus 40 µs to recover from power-down.
+const CONVERSION_TIME: Duration = Duration::from_millis(39);
 /// 0.8 A full scale, 0.1 Ω shunt: `trunc(0.00512 / (current_lsb * 0.1))` with
 /// `current_lsb = 0.8 / 2^15`.
 const CALIBRATION: u16 = 2097;
@@ -36,9 +43,6 @@ const CALIBRATION: u16 = 2097;
 const CURRENT_LSB: f32 = 0.8 / 32768.0;
 /// Power per step, in watts: 25 times the current's.
 const POWER_LSB: f32 = 25.0 * CURRENT_LSB;
-
-/// A transfer on a stuck bus must not hold up the repeater.
-const TIMEOUT: Duration = Duration::from_millis(50);
 
 pub struct Reading {
     pub bus_v: f32,
@@ -62,29 +66,41 @@ pub struct Ina226;
 impl Ina226 {
     /// The sensor set up, or `None` if nothing answers at its address or it is not an INA226.
     pub async fn probe<I: I2c>(i2c: &mut I) -> Option<Self> {
-        (register(i2c, REG_DIE_ID).await? == DIE_ID && write(i2c, REG_CONFIG, CONFIG).await && write(i2c, REG_CALIBRATION, CALIBRATION).await)
+        (register(i2c, ADDRESS, REG_DIE_ID).await? == DIE_ID
+            && write(i2c, ADDRESS, REG_CONFIG, CONFIG_POWER_DOWN).await
+            && write(i2c, ADDRESS, REG_CALIBRATION, CALIBRATION).await)
             .then_some(Self)
     }
 
     pub async fn read<I: I2c>(&self, i2c: &mut I) -> Option<Reading> {
-        let bus = register(i2c, REG_BUS_VOLTAGE).await?;
-        let current = register(i2c, REG_CURRENT).await? as i16;
-        let power = register(i2c, REG_POWER).await? as i16;
-        Some(Reading {
-            bus_v: bus as f32 * 0.00125,
-            current_ma: current as f32 * CURRENT_LSB * 1000.0,
-            power_mw: power.max(0) as f32 * POWER_LSB * 1000.0,
-        })
+        let ready_at = self.start_conversion(i2c).await?;
+        self.read_conversion(i2c, ready_at).await
     }
-}
 
-async fn write<I: I2c>(i2c: &mut I, reg: u8, value: u16) -> bool {
-    let [hi, lo] = value.to_be_bytes();
-    matches!(with_timeout(TIMEOUT, i2c.write(ADDRESS, &[reg, hi, lo])).await, Ok(Ok(())))
-}
+    pub(super) async fn start_conversion<I: I2c>(&self, i2c: &mut I) -> Option<Instant> {
+        if write(i2c, ADDRESS, REG_CALIBRATION, CALIBRATION).await
+            && write(i2c, ADDRESS, REG_CONFIG, CONFIG_TRIGGERED).await
+        {
+            Some(Instant::now() + CONVERSION_TIME)
+        } else {
+            write(i2c, ADDRESS, REG_CONFIG, CONFIG_POWER_DOWN).await;
+            None
+        }
+    }
 
-async fn register<I: I2c>(i2c: &mut I, reg: u8) -> Option<u16> {
-    let mut buf = [0u8; 2];
-    matches!(with_timeout(TIMEOUT, i2c.write_read(ADDRESS, &[reg], &mut buf)).await, Ok(Ok(())))
-        .then(|| u16::from_be_bytes(buf))
+    pub(super) async fn read_conversion<I: I2c>(&self, i2c: &mut I, ready_at: Instant) -> Option<Reading> {
+        let reading = async {
+            wait_ready(i2c, ADDRESS, REG_MASK_ENABLE, CONVERSION_READY, ready_at).await?;
+            let bus = register(i2c, ADDRESS, REG_BUS_VOLTAGE).await?;
+            let current = register(i2c, ADDRESS, REG_CURRENT).await? as i16;
+            let power = register(i2c, ADDRESS, REG_POWER).await? as i16;
+            Some(Reading {
+                bus_v: bus as f32 * 0.00125,
+                current_ma: current as f32 * CURRENT_LSB * 1000.0,
+                power_mw: power.max(0) as f32 * POWER_LSB * 1000.0,
+            })
+        }.await;
+        write(i2c, ADDRESS, REG_CONFIG, CONFIG_POWER_DOWN).await;
+        reading
+    }
 }
