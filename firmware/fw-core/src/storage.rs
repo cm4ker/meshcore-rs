@@ -543,30 +543,39 @@ impl<F: NorFlash> Store<F> {
         RING_SECTORS * SLOTS_PER_SECTOR
     }
 
-    /// The slot the next advert goes to: the first blank one after a written one. The ring
-    /// erases the sector it enters as soon as it enters it, so the blank slots run from there;
-    /// a ring found without one (the power went before that erase) starts over at its start.
+    /// The next slot, reconstructed from the blank run or an interrupted boundary append.
+    /// A full ring read never erases a sector. Reclaiming space is left to the next writer.
     fn ring_head(&mut self) -> u32 {
         if let Some(h) = self.ring_head {
             return h;
         }
         let n = self.ring_slots();
+        let mut after_interrupted = None;
         let blank: Vec<bool> = (0..n)
             .map(|i| {
-                let addr = self.slot_addr(i).unwrap_or(0);
-                self.read_chunked(addr, SLOT as usize).is_some_and(|r| r.iter().all(|&b| b == 0xFF))
+                self.ring_slot(i).is_some_and(|record| {
+                    let blank = record.iter().all(|&b| b == SLOT_FREE);
+                    if !blank && record[..4] == [SLOT_FREE; 4] && (i + 1).is_multiple_of(SLOTS_PER_SECTOR) {
+                        after_interrupted = Some((i + 1) % n);
+                    }
+                    blank
+                })
             })
             .collect();
-        let head = match (0..n).find(|&i| blank[i as usize] && !blank[((i + n - 1) % n) as usize]) {
-            Some(i) => i,
-            None if blank.iter().all(|&b| b) => 0,
-            None => {
-                self.erase_ring_sector(0);
-                0
-            }
-        };
+        let head = (0..n)
+            .find(|&i| blank[i as usize] && !blank[((i + n - 1) % n) as usize])
+            .or(after_interrupted)
+            .unwrap_or(0);
         self.ring_head = Some(head);
         head
+    }
+
+    fn ring_slot(&mut self, i: u32) -> Option<[u8; SLOT as usize]> {
+        self.read_words::<{ SLOT as usize }>(self.slot_addr(i)?)
+    }
+
+    fn slot_is_blank(&mut self, i: u32) -> Option<bool> {
+        self.ring_slot(i).map(|record| record.iter().all(|&b| b == SLOT_FREE))
     }
 
     fn erase_ring_sector(&mut self, slot: u32) -> bool {
@@ -591,25 +600,64 @@ impl<F: NorFlash> Store<F> {
         {
             return true; // unchanged: no flash wear
         }
-        let (n, i) = (self.ring_slots(), self.ring_head());
+        let n = self.ring_slots();
+        let mut i = self.ring_head();
+        // A failed rollover may leave the next sector occupied. Never reclaim the one
+        // holding the advert being replaced before the new copy is committed.
+        loop {
+            let Some(blank) = self.slot_is_blank(i) else {
+                return false;
+            };
+            if blank {
+                break;
+            }
+            if i.is_multiple_of(SLOTS_PER_SECTOR) {
+                if old.is_some_and(|old| old / SLOTS_PER_SECTOR == i / SLOTS_PER_SECTOR)
+                    || !self.erase_ring_sector(i)
+                {
+                    return false;
+                }
+                break;
+            }
+            i = (i + 1) % n;
+        }
+        if i.is_multiple_of(SLOTS_PER_SECTOR) {
+            let previous = (i + n - 1) % n;
+            let Some(record) = self.ring_slot(previous) else {
+                return false;
+            };
+            // The next sector has space now. Retire the old incomplete-tail marker
+            // before moving on so a later recovery only finds the current marker.
+            if record[..4] == [SLOT_FREE; 4]
+                && record[4..].iter().any(|&b| b != SLOT_FREE)
+                && !self.mark_deleted(previous)
+            {
+                return false;
+            }
+        }
         let Some(addr) = self.slot_addr(i) else {
             return false;
         };
         let mut rec = vec![0xFFu8; SLOT as usize];
-        rec[1] = data.len() as u8;
-        rec[2..34].copy_from_slice(key);
+        rec[..4].copy_from_slice(&[SLOT_USED, data.len() as u8, key[0], key[1]]);
+        rec[4..34].copy_from_slice(&key[2..]);
         rec[34..34 + data.len()].copy_from_slice(data);
-        // the record, then its state: a slot cut short stays unused
-        let mut ok = self.write_chunked(addr, &rec) && self.write_chunked(addr, &[SLOT_USED, rec[1], key[0], key[1]]);
-        if let Some(old) = old {
-            ok &= self.mark_deleted(old);
-        }
-        // the next sector is erased on entering it: the oldest adverts go
         let next = (i + 1) % n;
+        // Write the entire first word only at commit, so deleting a new slot is
+        // the second program of that word.
+        if !self.write_chunked(addr + 4, &rec[4..]) || !self.write_chunked(addr, &rec[..4]) {
+            // Retry a still-blank slot, or skip a partially programmed one. Neither
+            // the prior copy nor the next sector is touched on this path.
+            self.ring_head = Some(if self.slot_is_blank(i) == Some(true) { i } else { next });
+            return false;
+        }
+
+        self.ring_head = Some(next);
+        let mut ok = old.is_none_or(|old| self.mark_deleted(old));
+        // The next sector can now be cleared, even if it held the old copy.
         if next.is_multiple_of(SLOTS_PER_SECTOR) {
             ok &= self.erase_ring_sector(next);
         }
-        self.ring_head = Some(next);
         ok
     }
 
@@ -773,6 +821,56 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum WriteFault {
+        Body { slot: u32, written: usize },
+        Commit { slot: u32 },
+    }
+
+    struct FaultFlash {
+        ram: RamFlash,
+        fail: Option<WriteFault>,
+    }
+
+    impl ErrorType for FaultFlash {
+        type Error = NorFlashErrorKind;
+    }
+
+    impl ReadNorFlash for FaultFlash {
+        const READ_SIZE: usize = RamFlash::READ_SIZE;
+
+        fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+            self.ram.read(offset, bytes)
+        }
+
+        fn capacity(&self) -> usize {
+            self.ram.capacity()
+        }
+    }
+
+    impl NorFlash for FaultFlash {
+        const WRITE_SIZE: usize = RamFlash::WRITE_SIZE;
+        const ERASE_SIZE: usize = RamFlash::ERASE_SIZE;
+
+        fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+            self.ram.erase(from, to)
+        }
+
+        fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+            let end = offset + bytes.len() as u32;
+            let written = match self.fail {
+                Some(WriteFault::Body { slot, written }) if (offset..end).contains(&(slot + 4)) => written,
+                Some(WriteFault::Commit { slot }) if offset == slot && bytes.len() == 4 => 0,
+                _ => return self.ram.write(offset, bytes),
+            };
+            self.fail = None;
+            if written != 0 {
+                self.ram.write(offset, &bytes[..written])?;
+            }
+            Err(NorFlashErrorKind::Other)
+        }
+    }
+
     // the Pro Micro's layout, from 0: overflow 2 sectors, a sector between, data 64 KiB
     const OVERFLOW: (u32, u32) = (0, 2 * SECTOR);
     const DATA: (u32, u32) = (3 * SECTOR, 16 * SECTOR);
@@ -901,6 +999,94 @@ mod tests {
         assert_eq!(updated.comp_log_latest(), Some(contacts(350)));
         assert_eq!(updated.advert_get(&key(1)).as_deref(), Some(&b"advert"[..]));
         assert_eq!(updated.load(Blob::OtaTrial).as_deref(), Some(&b"trial"[..]));
+    }
+
+    fn fault_ring(flash: FaultFlash) -> Store<FaultFlash> {
+        let mut store = Store::with_regions(flash, (0, COMP_AT), Some(COMP)).with_lending(AREA, Some(BEFORE));
+        assert!(matches!(store.mount(), Mount::Fresh | Mount::Ready));
+        store
+    }
+
+    #[test]
+    fn a_failed_advert_update_keeps_the_previous_copy() {
+        for reopen in [false, true] {
+            for stage in 0..3 {
+                let mut store = fault_ring(FaultFlash { ram: lending_flash(), fail: None });
+                let k = key(1);
+                assert!(store.advert_put(&k, b"old advert"));
+                let slot = store.slot_addr(1).unwrap();
+                let failure = match stage {
+                    0 => WriteFault::Body { slot, written: 0 },
+                    1 => WriteFault::Body { slot, written: 4 },
+                    _ => WriteFault::Commit { slot },
+                };
+                store.flash().fail = Some(failure);
+                assert!(!store.advert_put(&k, b"new advert"));
+                assert!(store.flash().fail.is_none());
+                assert_eq!(store.advert_get(&k).as_deref(), Some(&b"old advert"[..]));
+
+                if reopen {
+                    store = fault_ring(store.flash);
+                    assert_eq!(store.advert_get(&k).as_deref(), Some(&b"old advert"[..]));
+                }
+                // Change the retry data so a torn slot cannot safely be programmed in place.
+                assert!(store.advert_put(&k, b"different advert"));
+                let mut store = fault_ring(store.flash);
+                assert_eq!(store.advert_get(&k).as_deref(), Some(&b"different advert"[..]));
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_advert_commit_does_not_erase_the_sector_holding_the_previous_copy() {
+        let mut store = fault_ring(FaultFlash { ram: lending_flash(), fail: None });
+        let old_slot = SLOTS_PER_SECTOR;
+        let old_key = key(old_slot);
+        // Fill to the last slot before the sector containing old_key, after wrapping.
+        for i in 0..store.ring_slots() + old_slot - 1 {
+            assert!(store.advert_put(&key(i), &i.to_le_bytes()));
+        }
+        let slot = store.slot_addr(old_slot - 1).unwrap();
+        store.flash().fail = Some(WriteFault::Commit { slot });
+        assert!(!store.advert_put(&old_key, b"new advert"));
+        assert!(store.flash().fail.is_none());
+        assert_eq!(store.advert_get(&old_key).as_deref(), Some(&old_slot.to_le_bytes()[..]));
+
+        let mut store = fault_ring(store.flash);
+        assert_eq!(store.advert_get(&old_key).as_deref(), Some(&old_slot.to_le_bytes()[..]));
+        let newer_key = store.ring_slots();
+        assert_eq!(store.advert_get(&key(newer_key)).as_deref(), Some(&newer_key.to_le_bytes()[..]));
+        assert_eq!(store.ring_head(), old_slot);
+        // The next sector can only be reclaimed without risking an update to old_key.
+        assert!(!store.advert_put(&old_key, b"retry"));
+        assert_eq!(store.advert_get(&old_key).as_deref(), Some(&old_slot.to_le_bytes()[..]));
+        assert!(store.advert_put(&key(1_000), b"another key"));
+        assert!(store.advert_put(&old_key, b"retry"));
+        assert_eq!(store.advert_get(&old_key).as_deref(), Some(&b"retry"[..]));
+    }
+
+    #[test]
+    fn reopening_uses_the_latest_failed_ring_boundary() {
+        let mut store = fault_ring(FaultFlash { ram: lending_flash(), fail: None });
+        let n = store.ring_slots();
+        for i in 0..n - 1 {
+            assert!(store.advert_put(&key(i), &i.to_le_bytes()));
+        }
+        let slot = store.slot_addr(n - 1).unwrap();
+        store.flash().fail = Some(WriteFault::Commit { slot });
+        assert!(!store.advert_put(&key(0), b"first failed update"));
+
+        for i in n..n + SLOTS_PER_SECTOR - 1 {
+            assert!(store.advert_put(&key(i), &i.to_le_bytes()));
+        }
+        let slot = store.slot_addr(SLOTS_PER_SECTOR - 1).unwrap();
+        store.flash().fail = Some(WriteFault::Commit { slot });
+        assert!(!store.advert_put(&key(SLOTS_PER_SECTOR), b"second failed update"));
+
+        let mut store = fault_ring(store.flash);
+        assert_eq!(store.ring_head(), SLOTS_PER_SECTOR);
+        assert!(store.advert_put(&key(1_000), b"another key"));
+        assert_eq!(store.advert_get(&key(n)).as_deref(), Some(&n.to_le_bytes()[..]));
     }
 
     #[test]
