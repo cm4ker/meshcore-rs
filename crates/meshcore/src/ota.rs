@@ -103,6 +103,10 @@ pub trait FirmwareTarget {
     /// Select the verified `size`-byte image for the next boot (on trial, where the platform can
     /// roll back).
     fn activate(&mut self, size: u32) -> bool;
+    /// Select the verified image, with a specific refusal if the platform can report one.
+    fn activate_checked(&mut self, size: u32) -> Result<(), OtaError> {
+        if self.activate(size) { Ok(()) } else { Err(OtaError::FlashError) }
+    }
     /// A target that applies deltas in place, over the running image, which its installer first
     /// moves up by this many bytes: a delta comes into it as a plan (`meshcore_inplace`), and
     /// [`Self::capacity`] is the plan's room. Full images it does not take.
@@ -156,6 +160,8 @@ pub enum OtaError {
     /// An update is committed and the device is about to restart into it: nothing more is taken
     /// until then (the slot holds the verified image).
     Installed = 17,
+    /// The update fits, but its rollback plan does not fit beside it.
+    NoRollbackSpace = 18,
 }
 
 impl From<Refusal> for OtaError {
@@ -454,7 +460,7 @@ impl OtaSession {
         if let Some(Out::Plan(plan)) = self.stream.as_deref().map(|s| &s.patcher.out) {
             let raw = self.raw_size.unwrap_or(0);
             verify_planned(&*target, raw, self.sha256, plan)?;
-            return if target.activate(raw) { Ok(()) } else { Err(OtaError::FlashError) };
+            return target.activate_checked(raw);
         }
         let image_size = match (self.raw_size, self.base_len) {
             // applied as it came: complete, it is in the slot already
@@ -470,10 +476,7 @@ impl OtaSession {
             (None, _) => self.size,
         };
         verify_image(target, image_size, self.sha256)?;
-        if !target.activate(image_size) {
-            return Err(OtaError::FlashError);
-        }
-        Ok(())
+        target.activate_checked(image_size)
     }
 }
 
@@ -851,6 +854,8 @@ pub struct OtaEndpoint {
     release: Option<Manifest>,
     /// An update was committed: the slot is selected and must stay as verified until the restart.
     committed: bool,
+    /// Keep a terminal refusal available for a retransmitted COMMIT after releasing the session.
+    commit_refusal: Option<OtaError>,
 }
 
 impl OtaEndpoint {
@@ -936,6 +941,7 @@ impl OtaEndpoint {
         if payload.first() == Some(&REQ_TYPE_OTA_BEGIN) && self.roots.is_empty() {
             self.requests = self.requests.wrapping_add(1);
             self.session = None;
+            self.commit_refusal = None;
             return (Some(vec![OtaError::NoRoot as u8, 0, 0]), OtaOutcome::None);
         }
         self.handle(payload, firmware_version)
@@ -1017,6 +1023,7 @@ impl OtaEndpoint {
                 let base_len = read_u32(44);
                 let base_sha: Option<[u8; 32]> = payload.get(48..80).and_then(|b| b.try_into().ok());
                 self.session = None;
+                self.commit_refusal = None;
                 let image_len = if flags & 1 != 0 { raw_size } else { size };
                 let res = self.check_release(sha, image_len).and_then(|()| match (self.target.as_deref_mut(), sha) {
                     (None, _) => Err(OtaError::NoTarget),
@@ -1076,7 +1083,7 @@ impl OtaEndpoint {
             }
             REQ_TYPE_OTA_COMMIT => {
                 let res = match (self.session.as_ref(), self.target.as_deref_mut()) {
-                    (None, _) => Err(OtaError::NoSession),
+                    (None, _) => Err(self.commit_refusal.unwrap_or(OtaError::NoSession)),
                     (_, None) => Err(OtaError::NoTarget),
                     (Some(s), Some(t)) => s.commit(t),
                 };
@@ -1086,6 +1093,13 @@ impl OtaEndpoint {
                         self.release = None;
                         self.committed = true;
                         OtaOutcome::Committed
+                    }
+                    (Err(OtaError::NoRollbackSpace), ..) => {
+                        self.session = None;
+                        self.envelope.clear();
+                        self.release = None;
+                        self.commit_refusal = Some(OtaError::NoRollbackSpace);
+                        OtaOutcome::CommitFailed("OTA: not enough staging space for the rollback plan".into())
                     }
                     (Err(e), Some(s), Some(t)) => {
                         let staged = s.staged_sha256(t).map(|h| crate::util::to_hex(&h[..8]));
@@ -1104,6 +1118,7 @@ impl OtaEndpoint {
                 self.session = None;
                 self.envelope.clear();
                 self.release = None;
+                self.commit_refusal = None;
                 (Some(vec![0]), OtaOutcome::None)
             }
             _ => (None, OtaOutcome::None),
@@ -1410,6 +1425,7 @@ mod tests {
         mem: Vec<u8>,
         erases: usize,
         activated: bool,
+        activation_error: Option<OtaError>,
         /// The running slot (base of delta updates).
         running: Vec<u8>,
         format: ImageFormat,
@@ -1419,7 +1435,10 @@ mod tests {
 
     impl RamTarget {
         fn new(size: usize, fill: u8, running: Vec<u8>) -> Self {
-            Self { mem: vec![fill; size], erases: 0, activated: false, running, format: ImageFormat::Esp(9), shift: None }
+            Self {
+                mem: vec![fill; size], erases: 0, activated: false, activation_error: None,
+                running, format: ImageFormat::Esp(9), shift: None,
+            }
         }
     }
 
@@ -1446,9 +1465,15 @@ mod tests {
             buf.copy_from_slice(&self.mem[offset as usize..offset as usize + buf.len()]);
             true
         }
-        fn activate(&mut self, _size: u32) -> bool {
+        fn activate(&mut self, size: u32) -> bool {
+            self.activate_checked(size).is_ok()
+        }
+        fn activate_checked(&mut self, _size: u32) -> Result<(), OtaError> {
+            if let Some(err) = self.activation_error {
+                return Err(err);
+            }
             self.activated = true;
-            true
+            Ok(())
         }
         fn format(&self) -> ImageFormat {
             self.format
@@ -1511,6 +1536,44 @@ mod tests {
         let t = RamTarget::new(1 << 20, 0, Vec::new());
         assert_eq!(OtaSession::begin(&t, 65_535 * 4 + 4, None, 4).err(), Some(OtaError::BadParams));
         assert!(OtaSession::begin(&t, 65_535 * 4, None, 4).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "inplace")]
+    fn in_place_commit_reports_no_rollback_space() {
+        let mut app = vec![0x55; 4096];
+        let old = nrf_image(&app);
+        app[256] = 0xAA;
+        let new = nrf_image(&app);
+        let mut running = old.clone();
+        running.resize(16 * 1024, 0xFF);
+        let mut target = RamTarget::new(16 * 1024, 0xFF, running);
+        target.format = ImageFormat::Nrf { chip: NRF_CHIP_NRF52840, load: 0x26000 };
+        target.shift = Some(4096);
+        target.activation_error = Some(OtaError::NoRollbackSpace);
+
+        let (base_len, base_sha) = running_image(&mut target).unwrap();
+        let mut patch = Vec::new();
+        bsdiff::diff(&old, &new, &mut patch).unwrap();
+        let packed = miniz_oxide::deflate::compress_to_vec_zlib(&patch, 9);
+        let mut session = OtaSession::begin_delta(
+            &mut target, packed.len() as u32, new.len() as u32, Sha256::digest(&new).into(), 152, base_len, base_sha,
+        )
+        .unwrap();
+        send_all(&mut session, &mut target, &packed);
+        assert!(session.is_complete());
+
+        let mut ep = OtaEndpoint { target: Some(Box::new(target)), session: Some(session), ..Default::default() };
+        // A repeated COMMIT must return the same reason even after releasing the session.
+        for _ in 0..2 {
+            let (reply, outcome) = ep.handle(&[REQ_TYPE_OTA_COMMIT], "v");
+            assert_eq!(reply.unwrap(), [18]);
+            assert_eq!(outcome, OtaOutcome::CommitFailed("OTA: not enough staging space for the rollback plan".into()));
+            assert!(!ep.busy());
+            assert!(!ep.committed);
+        }
+        ep.handle(&[REQ_TYPE_OTA_ABORT], "v");
+        assert_eq!(ep.handle(&[REQ_TYPE_OTA_COMMIT], "v").0.unwrap(), [OtaError::NoSession as u8]);
     }
 
     #[test]
