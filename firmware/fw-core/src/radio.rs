@@ -1,8 +1,49 @@
 //! The LoRa transceiver interface the firmware drives (SX1262, LR2021).
 
+use core::future::Future;
+use core::pin::pin;
+
+use embassy_futures::select::{Either, select};
+use embassy_time::{Duration, Ticker};
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
 use meshcore::radio::RadioParams;
+
+/// Wait for one transmission with the driver's deadline while feeding the board watchdog.
+/// A long packet can outlast the board's watchdog even when the radio is healthy.
+pub async fn with_tx_watchdog<T>(tx: impl Future<Output = T>, mut feed: impl FnMut()) -> T {
+    let mut tx = pin!(tx);
+    let mut tick = Ticker::every(Duration::from_secs(5));
+    loop {
+        match select(tx.as_mut(), tick.next()).await {
+            Either::First(result) => return result,
+            Either::Second(()) => feed(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+    use core::cell::Cell;
+    use core::future::poll_fn;
+    use core::task::Poll;
+    use embassy_futures::block_on;
+    use embassy_time::with_timeout;
+
+    #[test]
+    fn feeds_the_watchdog_without_restarting_the_transmission() {
+        let starts = Cell::new(0);
+        let fed = Cell::new(false);
+        let tx = async {
+            starts.set(starts.get() + 1);
+            poll_fn(|_| if fed.get() { Poll::Ready(Err::<(), _>(Error::TxTimeout)) } else { Poll::Pending }).await
+        };
+        let result = block_on(with_timeout(Duration::from_secs(10), with_tx_watchdog(tx, || fed.set(true))));
+        assert_eq!(result, Ok(Err(Error::TxTimeout)));
+        assert_eq!(starts.get(), 1);
+    }
+}
 
 /// The radio's interrupt line.
 // Only used generically (never as `dyn`), so the futures' `Send`-ness does not matter.

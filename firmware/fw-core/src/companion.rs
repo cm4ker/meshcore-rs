@@ -36,7 +36,7 @@ use crate::frames::{FRAMES_IN, Link, TCP_CONNECTED, TCP_OUT};
 use crate::gps;
 use crate::links::{BLE_CONNECTED, BLE_ENABLED, BLE_OUT, BLE_PASSKEY, BONDS_CHANGED};
 use crate::noise::NoiseFloor;
-use crate::radio::{LoraRadio, RxEvent};
+use crate::radio::{LoraRadio, RxEvent, with_tx_watchdog};
 use crate::storage::{Blob, CompBlob, SharedStore};
 use meshcore_ui::{self as ui, Action, Alert, Bar, BleState, Body, Button, GpsInfo, Node, Page, PullInfo, RadioInfo, Ui, View};
 
@@ -502,7 +502,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
     let epoch = cfg.build_epoch.max(saved_epoch.saturating_add(1)).max(ram_epoch);
     platform.set_ram_clock(epoch);
 
-    let ctx = MeshCtx::new(self_id.clone(), rng_seed, prefs.radio, epoch);
+    let ctx = MeshCtx::new(self_id.clone(), rng_seed, radio.params(), epoch);
     let info = BoardInfo {
         manufacturer: board.manufacturer().into(),
         build_date: cfg.build_date.into(),
@@ -624,6 +624,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             if !busy && mesh.app.prefs.cad_enabled {
                 busy = radio.channel_activity().await.unwrap_or(false);
             }
+            let now = now_ms();
             if !(busy && mesh.tx_defer_busy(now))
                 && let Some(frame) = mesh.tx_take(now)
             {
@@ -631,7 +632,7 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
                 if mesh.app.prefs.led_enabled {
                     board.tx_led(true);
                 }
-                let res = radio.transmit(frame.bytes(), frame.timeout_ms).await;
+                let res = with_tx_watchdog(radio.transmit(frame.bytes(), frame.timeout_ms), || platform.feed_watchdog()).await;
                 board.tx_led(false);
                 board.on_tx_end();
                 let _ = radio.start_rx();
@@ -929,9 +930,10 @@ pub async fn run<P: Platform, R: LoraRadio, B: Board>(
             }
         }
         if let Some(params) = fx.apply_radio
-            && radio.apply_params(params).and_then(|_| radio.start_rx()).is_ok()
+            && radio.apply_params(params).is_ok()
         {
-            mesh.ctx.radio = params;
+            mesh.ctx.radio = radio.params();
+            let _ = radio.start_rx();
         }
         if let Some(dbm) = fx.tx_power {
             let _ = radio.set_tx_power(dbm);

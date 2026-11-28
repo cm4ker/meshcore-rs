@@ -511,7 +511,7 @@ where
     R: crate::radio::LoraRadio,
     B: RepeaterBoard,
 {
-    use crate::radio::RxEvent;
+    use crate::radio::{RxEvent, with_tx_watchdog};
 
     let Hardware { mut radio, store, wifi, bt, entropy: trng_entropy } = hw;
     let build_date = cfg.build_date;
@@ -600,7 +600,7 @@ where
         .unwrap_or(0);
     let epoch: u32 = cfg.build_epoch.max(saved_epoch.saturating_add(1)).max(ram_epoch);
     clock_cell::store(epoch);
-    let ctx = MeshCtx::new(self_id.clone(), rng_seed, prefs.radio, epoch);
+    let ctx = MeshCtx::new(self_id.clone(), rng_seed, radio.params(), epoch);
     let model = String::from(board.name());
     let board_info = BoardInfo {
         manufacturer: model.clone(),
@@ -833,6 +833,7 @@ where
             if !busy && cad {
                 busy = radio.channel_activity().await.unwrap_or(false);
             }
+            let now = now_ms();
             if !(busy && m.tx_defer_busy(now))
                 && let Some(frame) = m.tx_take(now)
             {
@@ -843,7 +844,7 @@ where
                 if led {
                     board.tx_led(true);
                 }
-                let res = radio.transmit(frame.bytes(), frame.timeout_ms).await;
+                let res = with_tx_watchdog(radio.transmit(frame.bytes(), frame.timeout_ms), reset::feed).await;
                 board.tx_led(false);
                 board.fem_rx_mode();
                 if frame.cr.is_some() {
@@ -1263,10 +1264,16 @@ where
             warn!("identity save failed");
         }
         if let Some(params) = fx.apply_radio {
-            if radio.apply_params(params).and_then(|_| radio.start_rx()).is_err() {
-                warn!("radio reconfigure failed");
+            let result = radio.apply_params(params).and_then(|()| {
+                mesh.ctx.radio = radio.params();
+                if let Some(room) = room.as_mut() {
+                    room.ctx.radio = mesh.ctx.radio;
+                }
+                radio.start_rx()
+            });
+            if let Err(e) = result {
+                warn!("radio reconfigure failed: {e:?}");
             }
-            mesh.ctx.radio = params;
         }
         if let Some(dbm) = fx.tx_power {
             let _ = radio.set_tx_power(dbm);

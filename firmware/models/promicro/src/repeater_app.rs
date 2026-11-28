@@ -33,7 +33,7 @@ use meshcore::util::{Shortest, to_hex};
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE};
 use meshcore_fw_core::links::{BLE_CONNECTED, BLE_OUT};
 use meshcore_fw_core::noise::NoiseFloor;
-use meshcore_fw_core::radio::{LoraRadio, RxEvent};
+use meshcore_fw_core::radio::{LoraRadio, RxEvent, with_tx_watchdog};
 use meshcore_fw_core::sensors::Sensors;
 use meshcore_fw_core::storage::{Blob, SharedStore, Store};
 use static_cell::StaticCell;
@@ -43,8 +43,8 @@ use crate::console::UsbDriver;
 use crate::flash::Flash;
 use crate::{DATA_OVERFLOW, DATA_REGION, Spec, ble, console, println, sd};
 
-/// Without a pass of the main loop for this long, the watchdog restarts the board. The longest
-/// legitimate stall is one max-length SF12 transmission (~10 s); long anyway, as the watchdog
+/// Without a pass of the main loop or a TX watchdog feed for this long, the watchdog restarts the
+/// board. This leaves time for a firmware copy, as the watchdog
 /// keeps running into the UF2 bootloader (the 1200 baud touch is a soft reset), which does not
 /// feed it: copying the next firmware has to fit in.
 pub const WATCHDOG_SECS: u32 = 60;
@@ -351,7 +351,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
         .unwrap_or(0);
     let epoch: u32 = spec.build_epoch.parse::<u32>().unwrap_or(0).max(saved_epoch.saturating_add(1)).max(ram_epoch);
     board::clock_store(epoch);
-    let ctx = MeshCtx::new(self_id.clone(), rng_seed, prefs.radio, epoch);
+    let ctx = MeshCtx::new(self_id.clone(), rng_seed, radio.params(), epoch);
     let board_info = BoardInfo {
         manufacturer: spec.manufacturer.into(),
         batt_mv,
@@ -446,6 +446,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
             if !busy && cad {
                 busy = radio.channel_activity().await.unwrap_or(false);
             }
+            let now = now_ms();
             if !(busy && m.tx_defer_busy(now))
                 && let Some(frame) = m.tx_take(now)
             {
@@ -459,7 +460,12 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
                 if led_on {
                     led.on();
                 }
-                let res = radio.transmit(frame.bytes(), frame.timeout_ms).await;
+                let res = with_tx_watchdog(radio.transmit(frame.bytes(), frame.timeout_ms), || {
+                    if let Some(w) = &mut watchdog {
+                        w.pet();
+                    }
+                })
+                .await;
                 led.off();
                 if let Some(r) = &mut rxen {
                     r.set_high();
@@ -689,10 +695,16 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
             warn!("identity save failed");
         }
         if let Some(params) = fx.apply_radio {
-            if radio.apply_params(params).and_then(|_| radio.start_rx()).is_err() {
-                warn!("radio reconfigure failed");
+            let result = radio.apply_params(params).and_then(|()| {
+                mesh.ctx.radio = radio.params();
+                if let Some(room) = room.as_mut() {
+                    room.ctx.radio = mesh.ctx.radio;
+                }
+                radio.start_rx()
+            });
+            if let Err(e) = result {
+                warn!("radio reconfigure failed: {e:?}");
             }
-            mesh.ctx.radio = params;
         }
         if let Some(dbm) = fx.tx_power {
             let _ = radio.set_tx_power(dbm);

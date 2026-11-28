@@ -35,7 +35,7 @@ use meshcore_fw_core::frames::FRAMES_IN;
 use meshcore_fw_core::gps;
 use meshcore_fw_core::links::{BLE_CONNECTED, BLE_ENABLED, BLE_OUT};
 use meshcore_fw_core::noise::NoiseFloor;
-use meshcore_fw_core::radio::{LoraRadio, RxEvent, WaitIrq};
+use meshcore_fw_core::radio::{LoraRadio, RxEvent, WaitIrq, with_tx_watchdog};
 use meshcore_fw_core::sensors::Sensors;
 use meshcore_fw_core::storage::{Blob, SharedStore};
 use meshcore_fw_core::sx1262::Sx1262;
@@ -291,7 +291,7 @@ pub async fn run(spawner: Spawner, parts: Parts) -> ! {
         .unwrap_or(0);
     let epoch: u32 = build_epoch.parse::<u32>().unwrap_or(0).max(saved_epoch.saturating_add(1)).max(ram_epoch);
     board::clock_store(epoch);
-    let ctx = MeshCtx::new(self_id.clone(), rng_seed, prefs.radio, epoch);
+    let ctx = MeshCtx::new(self_id.clone(), rng_seed, radio.params(), epoch);
     let board_info = BoardInfo {
         manufacturer: "LilyGo T-Echo".into(),
         batt_mv,
@@ -386,6 +386,7 @@ pub async fn run(spawner: Spawner, parts: Parts) -> ! {
             if !busy && cad {
                 busy = radio.channel_activity().await.unwrap_or(false);
             }
+            let now = now_ms();
             if !(busy && m.tx_defer_busy(now))
                 && let Some(frame) = m.tx_take(now)
             {
@@ -396,7 +397,12 @@ pub async fn run(spawner: Spawner, parts: Parts) -> ! {
                 if led_on {
                     tx_led.set_low();
                 }
-                let res = radio.transmit(frame.bytes(), frame.timeout_ms).await;
+                let res = with_tx_watchdog(radio.transmit(frame.bytes(), frame.timeout_ms), || {
+                    if let Some(w) = &mut watchdog {
+                        w.pet();
+                    }
+                })
+                .await;
                 tx_led.set_high();
                 if frame.cr.is_some() {
                     let _ = radio.set_frame_cr(None);
@@ -598,10 +604,16 @@ pub async fn run(spawner: Spawner, parts: Parts) -> ! {
             warn!("identity save failed");
         }
         if let Some(params) = fx.apply_radio {
-            if radio.apply_params(params).and_then(|_| radio.start_rx()).is_err() {
-                warn!("radio reconfigure failed");
+            let result = radio.apply_params(params).and_then(|()| {
+                mesh.ctx.radio = radio.params();
+                if let Some(room) = room.as_mut() {
+                    room.ctx.radio = mesh.ctx.radio;
+                }
+                radio.start_rx()
+            });
+            if let Err(e) = result {
+                warn!("radio reconfigure failed: {e:?}");
             }
-            mesh.ctx.radio = params;
         }
         if let Some(dbm) = fx.tx_power {
             let _ = radio.set_tx_power(dbm);
