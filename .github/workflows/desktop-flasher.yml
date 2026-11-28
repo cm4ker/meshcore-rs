@@ -1,13 +1,16 @@
 name: Desktop flasher
 on:
   push:
-    branches: [desktop-flasher]
+    branches: [desktop-flasher, ota-app]
     paths:
       - "tools/desktop-flasher/**"
+      - "tools/android-flasher/assets/esp-factory/**"
       - ".github/workflows/desktop-flasher.yml"
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  OTA_APP_VERSION: "1.3.2"
 defaults:
   run:
     working-directory: tools/desktop-flasher
@@ -17,16 +20,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: windows-2025, arch: x86}
-          - {os: macos-15, arch: arm64}
-          - {os: ubuntu-22.04, arch: x86_64}
-          - {os: ubuntu-22.04-arm, arch: aarch64}
-          - {os: ubuntu-24.04-arm, arch: armv7l}
+          - {os: windows-2025, arch: x86, package: Windows-x86-x64.exe}
+          - {os: macos-15-intel, arch: arm64, package: macOS-Apple-Silicon.zip}
+          - {os: ubuntu-22.04, arch: x86_64, package: Linux-PC-x86_64.tar.gz}
+          - {os: ubuntu-22.04-arm, arch: aarch64, package: Linux-Raspberry-Pi-ARM64.tar.gz}
+          - {os: ubuntu-24.04-arm, arch: armv7l, package: Linux-Raspberry-Pi-ARMv7-32bit.tar.gz}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
-        if: matrix.arch != 'armv7l'
+        if: runner.os != 'macOS' && matrix.arch != 'armv7l'
         with:
           python-version: "3.11"
           architecture: ${{ matrix.arch == 'x86' && 'x86' || (matrix.arch == 'x86_64' && 'x64' || 'arm64') }}
@@ -36,43 +41,52 @@ jobs:
           ./windows/build.ps1
           mkdir out
           Move-Item MeshCore-Windows-x86-x64.exe out/
+      - if: runner.os == 'Windows'
+        name: Smoke-test Windows UI and check launcher architecture
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File ./windows/MeshCore.ps1 -SmokeTest
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $stream = [IO.File]::OpenRead((Resolve-Path out/MeshCore-Windows-x86-x64.exe))
+          $pe = [IO.BinaryReader]::new($stream)
+          try {
+            $stream.Position = 0x3c
+            $stream.Position = $pe.ReadInt32()
+            if ($pe.ReadUInt32() -ne 0x4550 -or $pe.ReadUInt16() -ne 0x14c) {
+              throw 'The launcher is not a Windows x86 PE.'
+            }
+          } finally {
+            $pe.Dispose()
+          }
       - if: runner.os == 'Linux' && matrix.arch != 'armv7l'
         run: sudo apt-get update -qq && sudo apt-get install -y xvfb xauth python3-tk libtk8.6
-      - if: runner.os != 'Windows' && matrix.arch != 'armv7l'
+      - if: runner.os == 'Linux' && matrix.arch != 'armv7l'
         run: bash build.sh ${{ matrix.arch }}
+      - if: runner.os == 'macOS'
+        name: Build and smoke-test universal macOS package
+        run: bash build-macos-universal.sh
       - uses: docker/setup-qemu-action@v3
         if: matrix.arch == 'armv7l'
         with:
           platforms: arm
       - if: matrix.arch == 'armv7l'
         run: |
-          docker run --rm --platform linux/arm/v7 -v "$PWD:/src" -w /src arm32v7/debian:bookworm bash -ec '
+          docker run --rm --platform linux/arm/v7 -v "$(dirname "$PWD"):/tools" -w /tools/desktop-flasher arm32v7/debian:bookworm bash -ec '
             apt-get update -qq
             apt-get install -y python3-venv python3-dev python3-tk python3-cryptography python3-pil python3-cffi python3-yaml build-essential binutils zlib1g-dev xvfb xauth libffi-dev libssl-dev
             python3 -m venv --system-site-packages /tmp/venv
             . /tmp/venv/bin/activate
             sed "s/cryptography==43.0.3/cryptography>=38/" requirements.txt > /tmp/arm-req.txt
             sed "s/-r requirements.txt/-r \/tmp\/arm-req.txt/" build.sh | bash -s armv7l'
+      - name: Name release package
+        shell: bash
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          mkdir -p release-packages
+          cp "out/MeshCore-$PACKAGE" "release-packages/ota-app-$OTA_APP_VERSION-$PACKAGE"
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.arch }}
-          path: tools/desktop-flasher/out/*
+          path: tools/desktop-flasher/release-packages/ota-app-${{ env.OTA_APP_VERSION }}-${{ matrix.package }}
           if-no-files-found: error
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: desktop-*
-          merge-multiple: true
-          path: packages
-      - name: Publish desktop release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        working-directory: .
-        run: |
-          tag="desktop-v1.${{ github.run_number }}"
-          gh release create "$tag" packages/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false --title "Прошивальщик MeshCore • $tag" --notes "Графический прошивальщик для Windows, macOS Apple Silicon, Linux x86-64, ARM64 и ARMv7. Скачайте файл своей платформы. Исходники и инструкция — в tools/desktop-flasher."

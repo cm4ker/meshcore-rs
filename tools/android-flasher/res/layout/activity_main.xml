@@ -1,0 +1,197 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="@color/screen" android:orientation="vertical">
+
+    <LinearLayout
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal" android:gravity="center_vertical"
+        android:background="@color/brand" android:paddingStart="20dp" android:paddingEnd="20dp"
+        android:paddingTop="12dp" android:paddingBottom="14dp">
+        <ImageView
+            android:layout_width="40dp" android:layout_height="40dp"
+            android:layout_marginEnd="12dp" android:src="@drawable/ommesh"
+            android:importantForAccessibility="no" />
+        <LinearLayout
+            android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+            android:orientation="vertical">
+            <TextView
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="ota-app" android:textSize="23sp" android:fontFamily="sans-serif-medium"
+                android:textColor="@color/surface" />
+            <TextView
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="Прошивка MeshCore" android:textColor="@color/brand_subtitle"
+                android:textSize="13sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
+        android:clipToPadding="false" android:fillViewport="true">
+        <LinearLayout
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical" android:padding="16dp">
+
+            <LinearLayout style="@style/Panel">
+                <TextView style="@style/SectionTitle" android:text="Подключение" android:labelFor="@id/method" />
+                <Spinner android:id="@+id/method" style="@style/FieldSpinner"
+                    android:layout_marginTop="10dp" android:saveEnabled="false" />
+                <TextView android:id="@+id/guide" style="@style/Body"
+                    android:layout_marginTop="8dp" android:layout_marginBottom="12dp" />
+
+                <TextView android:id="@+id/device_label" style="@style/FieldLabel"
+                    android:text="Устройство" android:labelFor="@id/devices" />
+                <Spinner android:id="@+id/devices" style="@style/FieldSpinner" android:saveEnabled="false" />
+
+                <TextView android:id="@+id/model_label" style="@style/FieldLabel"
+                    android:layout_marginTop="12dp" android:text="Модель платы"
+                    android:labelFor="@id/dfu_model" android:visibility="gone" />
+                <Spinner android:id="@+id/dfu_model" style="@style/FieldSpinner"
+                    android:visibility="gone" android:saveEnabled="false" />
+
+                <EditText android:id="@+id/host"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:minHeight="48dp" android:background="@drawable/field"
+                    android:paddingStart="12dp" android:paddingEnd="12dp"
+                    android:singleLine="true" android:inputType="textUri"
+                    android:imeOptions="actionDone" android:hint="192.168.1.50:5000"
+                    android:textColor="@color/ink" android:textColorHint="@color/muted"
+                    android:textSize="15sp" android:visibility="gone" />
+
+                <TextView android:id="@+id/device_details" style="@style/Body"
+                    android:layout_marginTop="10dp" android:background="@drawable/field"
+                    android:padding="10dp" android:textColor="@color/ink"
+                    android:accessibilityLiveRegion="polite" android:visibility="gone" />
+                <Button android:id="@+id/scan" style="@style/SoftAction"
+                    android:layout_marginTop="12dp" android:text="Найти устройства" />
+                <LinearLayout android:id="@+id/device_actions"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+                    <Button android:id="@+id/help" style="@style/Action"
+                        android:layout_width="0dp" android:layout_height="match_parent"
+                        android:layout_weight="2" android:text="ИНСТРУКЦИЯ" />
+                    <Button android:id="@+id/info" style="@style/Action"
+                        android:layout_width="0dp" android:layout_height="match_parent"
+                        android:layout_weight="3" android:text="Проверить устройство" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout style="@style/Panel" android:layout_marginTop="12dp">
+                <TextView style="@style/SectionTitle" android:text="Прошивка" />
+                <LinearLayout
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp" android:background="@drawable/field"
+                    android:orientation="horizontal" android:gravity="center_vertical">
+                    <TextView android:id="@+id/file_name" style="@style/Body"
+                        android:layout_width="0dp" android:layout_weight="1"
+                        android:minHeight="48dp" android:gravity="center_vertical"
+                        android:paddingStart="12dp" android:paddingEnd="8dp"
+                        android:paddingTop="7dp" android:paddingBottom="7dp"
+                        android:textColor="@color/ink" />
+                    <Button android:id="@+id/clear_file" style="@style/Action"
+                        android:layout_width="48dp" android:text="×" android:textSize="23sp"
+                        android:contentDescription="Снять выбор файла" android:visibility="gone" />
+                </LinearLayout>
+                <TextView android:id="@+id/file_hint" style="@style/Body"
+                    android:layout_marginTop="6dp"
+                    android:textColor="@color/danger" android:visibility="gone" />
+
+                <LinearLayout
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp" android:orientation="horizontal">
+                    <Button android:id="@+id/select_file" style="@style/SoftAction"
+                        android:layout_width="0dp" android:layout_height="match_parent"
+                        android:layout_weight="1" android:layout_marginEnd="8dp" android:text="Выбрать файл" />
+                    <Button android:id="@+id/releases" style="@style/SoftAction"
+                        android:layout_width="0dp" android:layout_height="match_parent"
+                        android:layout_weight="1" android:layout_marginEnd="8dp" android:text="Из GitHub"
+                        android:contentDescription="Скачать прошивку с GitHub" />
+                    <Button android:id="@+id/offline" style="@style/SoftAction"
+                        android:layout_width="0dp" android:layout_height="match_parent"
+                        android:layout_weight="1" android:text="Офлайн"
+                        android:contentDescription="Офлайн-библиотека прошивок" />
+                </LinearLayout>
+
+                <Button android:id="@+id/update" style="@style/PrimaryAction"
+                    android:layout_marginTop="12dp" android:text="Обновить прошивку" />
+                <Button android:id="@+id/export_dfu" style="@style/Action"
+                    android:layout_marginTop="4dp" android:text="Сохранить DFU ZIP"
+                    android:visibility="gone" />
+                <Button android:id="@+id/flash_usb" style="@style/Action" android:text="Прошить через USB" />
+                <Button android:id="@+id/reset_node" style="@style/Action" android:text="Новая нода со сбросом…" />
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+
+    <ru.ommesh.otg.JournalPanel android:id="@+id/journal_panel"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:background="@color/surface">
+        <View android:layout_width="match_parent" android:layout_height="1dp"
+            android:background="@color/stroke" />
+        <LinearLayout android:id="@+id/journal_header"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical">
+            <View
+                android:layout_width="34dp" android:layout_height="4dp"
+                android:layout_gravity="center_horizontal" android:layout_marginTop="6dp"
+                android:alpha="0.65" android:background="@drawable/journal_handle"
+                android:importantForAccessibility="no" />
+            <LinearLayout
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:gravity="center_vertical"
+                android:paddingStart="18dp" android:paddingEnd="10dp">
+                <TextView style="@style/SectionTitle"
+                    android:layout_width="0dp" android:layout_weight="1"
+                    android:textSize="16sp" android:text="Журнал" />
+                <Button android:id="@+id/journal" style="@style/Action"
+                    android:layout_width="wrap_content" android:layout_marginStart="4dp"
+                    android:text="Развернуть" android:contentDescription="Открыть весь журнал" />
+            </LinearLayout>
+            <CheckBox android:id="@+id/save_journal" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:minHeight="42dp"
+                android:layout_marginStart="18dp" android:layout_marginEnd="18dp"
+                android:text="Сохранять журнал в Загрузки" android:textColor="@color/ink"
+                android:buttonTint="@color/accent" android:visibility="gone" />
+        </LinearLayout>
+        <LinearLayout android:id="@+id/operation_progress"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical" android:paddingStart="18dp" android:paddingEnd="18dp"
+            android:paddingBottom="10dp" android:visibility="gone">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/progress_stage" style="@style/Body"
+                    android:layout_width="0dp" android:layout_weight="1"
+                    android:maxLines="2" android:ellipsize="end" />
+                <TextView android:id="@+id/progress_percent" style="@style/Body"
+                    android:layout_width="wrap_content" android:layout_marginStart="12dp"
+                    android:fontFamily="sans-serif-medium" android:textColor="@color/accent" />
+            </LinearLayout>
+            <ProgressBar android:id="@+id/progress" style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent" android:layout_height="8dp" android:layout_marginTop="4dp"
+                android:minHeight="0dp" android:maxHeight="8dp" android:max="100"
+                android:indeterminate="false" android:indeterminateOnly="false"
+                android:progressTint="@color/accent" android:progressBackgroundTint="@color/accent_light"
+                android:importantForAccessibility="no" />
+        </LinearLayout>
+        <FrameLayout android:id="@+id/journal_body"
+            android:layout_width="match_parent" android:layout_height="wrap_content">
+            <LinearLayout android:id="@+id/journal_preview"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:paddingStart="18dp" android:paddingEnd="18dp"
+                android:paddingBottom="10dp">
+                <TextView android:id="@+id/previous_status" style="@style/Body"
+                    android:maxLines="1" android:ellipsize="end" android:visibility="gone" />
+                <TextView android:id="@+id/status" style="@style/Body"
+                    android:maxLines="2" android:ellipsize="end" android:textColor="@color/ink"
+                    android:accessibilityLiveRegion="polite" android:text="Готово к работе" />
+            </LinearLayout>
+            <ScrollView android:id="@+id/journal_scroll"
+                android:layout_width="match_parent" android:layout_height="match_parent"
+                android:background="@color/field" android:visibility="gone">
+                <TextView android:id="@+id/journal_report" style="@style/Body"
+                    android:padding="18dp" android:textColor="@color/ink" android:textIsSelectable="true"
+                    android:text="Ожидание действий.\n" />
+            </ScrollView>
+        </FrameLayout>
+    </ru.ommesh.otg.JournalPanel>
+</LinearLayout>

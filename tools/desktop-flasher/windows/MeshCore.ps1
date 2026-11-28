@@ -1,66 +1,575 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param([switch]$SmokeTest, [string]$PreviewPath)
+
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
 
-$exe = Join-Path $PSScriptRoot 'engine\python.exe'
+$appDirectory = if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'ommesh.ico')) { $PSScriptRoot } else { Split-Path -Parent $PSScriptRoot }
+$exe = Join-Path $appDirectory 'engine\python.exe'
 $form = New-Object Windows.Forms.Form
-$form.Icon = [Drawing.Icon]::new((Join-Path $PSScriptRoot "ommesh.ico"))
-$form.Text = 'Обновление MeshCore'
-$form.ClientSize = [Drawing.Size]::new(800, 520)
-$form.MinimumSize = [Drawing.Size]::new(816, 559)
+$form.Icon = [Drawing.Icon]::new((Join-Path $appDirectory 'ommesh.ico'))
+$form.Text = 'ota-app 1.3.2 · MeshCore'
+$form.AutoScaleDimensions = [Drawing.SizeF]::new(96, 96)
+$form.AutoScaleMode = 'Dpi'
+$form.ClientSize = [Drawing.Size]::new(820, 690)
+$form.MinimumSize = [Drawing.Size]::new(682, 470)
 $form.StartPosition = 'CenterScreen'
 $form.Font = [Drawing.Font]::new('Segoe UI', 10)
+$palette = @{
+    Screen = [Drawing.ColorTranslator]::FromHtml('#EDF4F1')
+    Surface = [Drawing.Color]::White
+    Brand = [Drawing.ColorTranslator]::FromHtml('#103C34')
+    Subtitle = [Drawing.ColorTranslator]::FromHtml('#B8D7CF')
+    Ink = [Drawing.ColorTranslator]::FromHtml('#192F29')
+    Muted = [Drawing.ColorTranslator]::FromHtml('#4F645E')
+    Stroke = [Drawing.ColorTranslator]::FromHtml('#D6E3DE')
+    Field = [Drawing.ColorTranslator]::FromHtml('#F6F9F7')
+    Accent = [Drawing.ColorTranslator]::FromHtml('#006853')
+    AccentLight = [Drawing.ColorTranslator]::FromHtml('#DFEFE9')
+    Disabled = [Drawing.ColorTranslator]::FromHtml('#E8EEEB')
+    Error = [Drawing.ColorTranslator]::FromHtml('#B3261E')
+    ErrorLight = [Drawing.ColorTranslator]::FromHtml('#F9DEDC')
+}
+$form.BackColor = $palette.Screen
+$form.ForeColor = $palette.Ink
+$sectionFont = [Drawing.Font]::new('Segoe UI Semibold', 15)
+$buttonFont = [Drawing.Font]::new('Segoe UI Semibold', 10)
+$smallFont = [Drawing.Font]::new('Segoe UI', 9)
+$titleFont = [Drawing.Font]::new('Segoe UI Semibold', 18)
+$logFont = [Drawing.Font]::new('Consolas', 10)
+$newline = [Environment]::NewLine
 
-function Add-Control($type, $caption, $x, $y, $width, $height) {
+function Set-Rounded([Windows.Forms.Control]$control, [int]$radius) {
+    $control.Add_Resize({
+        param($sender, $eventArgs)
+        $width = $sender.ClientSize.Width
+        $height = $sender.ClientSize.Height
+        if ($width -lt 2 -or $height -lt 2) { return }
+        $diameter = [Math]::Min(2 * $radius * $sender.DeviceDpi / 96, [Math]::Min($width, $height))
+        $path = [Drawing.Drawing2D.GraphicsPath]::new()
+        try {
+            $path.AddArc(0, 0, $diameter, $diameter, 180, 90)
+            $path.AddArc($width - $diameter, 0, $diameter, $diameter, 270, 90)
+            $path.AddArc($width - $diameter, $height - $diameter, $diameter, $diameter, 0, 90)
+            $path.AddArc(0, $height - $diameter, $diameter, $diameter, 90, 90)
+            $path.CloseFigure()
+            $oldRegion = $sender.Region
+            $sender.Region = [Drawing.Region]::new($path)
+            if ($oldRegion) { $oldRegion.Dispose() }
+        } finally { $path.Dispose() }
+    }.GetNewClosure())
+}
+
+function Set-ButtonTheme($button, [string]$appearance = 'Soft') {
+    $button.FlatStyle = 'Flat'
+    $button.Font = $buttonFont
+    $button.Cursor = [Windows.Forms.Cursors]::Hand
+    $button.FlatAppearance.BorderSize = 0
+    $button.UseVisualStyleBackColor = $false
+    $button.Tag = @{
+        Fill = switch ($appearance) {
+            'Primary' { $palette.Accent }
+            'Quiet' { $palette.Surface }
+            default { $palette.AccentLight }
+        }
+        Text = if ($appearance -eq 'Primary') { $palette.Surface } else { $palette.Accent }
+        Disabled = $palette.Disabled
+        Muted = $palette.Muted
+    }
+    $button.BackColor = $button.Tag.Fill
+    $button.ForeColor = $button.Tag.Text
+    $button.FlatAppearance.MouseOverBackColor = if ($appearance -eq 'Primary') { $palette.Brand } else { $palette.Stroke }
+    $button.Add_EnabledChanged({
+        param($sender, $eventArgs)
+        $sender.BackColor = if ($sender.Enabled) { $sender.Tag.Fill } else { $sender.Tag.Disabled }
+        $sender.ForeColor = if ($sender.Enabled) { $sender.Tag.Text } else { $sender.Tag.Muted }
+    })
+    Set-Rounded $button 8
+}
+
+function Add-Control($type, $caption, $x, $y, $width, $height, $parent, [string]$appearance = 'Soft') {
     $control = New-Object "Windows.Forms.$type"
     $control.Text = $caption
+    if ($type -eq 'Button') { Set-ButtonTheme $control $appearance }
+    if ($type -in @('TextBox','ListBox','ComboBox')) {
+        $control.BackColor = $palette.Field
+        $control.ForeColor = $palette.Ink
+    }
+    if ($type -in @('TextBox','ListBox')) { $control.BorderStyle = 'FixedSingle' }
+    if ($type -eq 'ComboBox') { $control.FlatStyle = 'Flat' }
     $control.SetBounds($x, $y, $width, $height)
-    $form.Controls.Add($control)
+    $parent.Controls.Add($control)
     return $control
 }
 
-$null = Add-Control Label 'Подключение' 20 20 135 25
-$method = Add-Control ComboBox '' 160 19 132 28
+$shell = Add-Control TableLayoutPanel '' 0 0 820 690 $form
+$shell.Dock = 'Fill'
+$shell.ColumnCount = 1
+$shell.RowCount = 3
+$null = $shell.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Percent', 100))
+$null = $shell.RowStyles.Add([Windows.Forms.RowStyle]::new('Absolute', 72))
+$null = $shell.RowStyles.Add([Windows.Forms.RowStyle]::new('Percent', 100))
+$drawerRow = [Windows.Forms.RowStyle]::new('Absolute', 66)
+$null = $shell.RowStyles.Add($drawerRow)
+
+function Add-ShellPanel([int]$row, [Drawing.Color]$color) {
+    $panel = [Windows.Forms.Panel]::new()
+    $panel.Width = 820
+    $panel.Margin = [Windows.Forms.Padding]::Empty
+    $panel.Dock = 'Fill'
+    $panel.BackColor = $color
+    $shell.Controls.Add($panel, 0, $row)
+    return $panel
+}
+
+$header = Add-ShellPanel 0 $palette.Brand
+$brandIcon = Add-Control PictureBox '' 22 16 40 40 $header
+$brandIcon.SizeMode = 'Zoom'
+$brandImagePath = Join-Path $appDirectory 'ommesh.png'
+$brandIcon.Image = if (Test-Path -LiteralPath $brandImagePath) {
+    [Drawing.Image]::FromFile($brandImagePath)
+} else { $form.Icon.ToBitmap() }
+$brandTitle = Add-Control Label 'ota-app' 74 9 270 34 $header
+$brandTitle.Font = $titleFont
+$brandTitle.ForeColor = $palette.Surface
+$brandSubtitle = Add-Control Label 'Прошивка MeshCore' 76 42 354 22 $header
+$brandSubtitle.ForeColor = $palette.Subtitle
+$brandSubtitle.Font = $smallFont
+
+$viewport = Add-ShellPanel 1 $palette.Screen
+$viewport.AutoScroll = $true
+$page = Add-Control Panel '' 0 0 820 482 $viewport
+$page.Dock = 'Top'
+
+function Add-Card([int]$top, [int]$height, [string]$caption) {
+    $card = Add-Control Panel '' 16 $top 788 $height $page
+    $card.BackColor = $palette.Surface
+    $card.Anchor = 'Top, Left, Right'
+    Set-Rounded $card 14
+    $title = Add-Control Label $caption 14 11 318 32 $card
+    $title.Font = $sectionFont
+    return $card
+}
+
+$connection = Add-Card 12 230 'Подключение'
+$methodLabel = Add-Control Label 'Способ подключения' 16 45 256 18 $connection
+$methodLabel.Font = $smallFont
+$methodLabel.ForeColor = $palette.Muted
+$targetLabel = Add-Control Label 'Устройство' 287 45 475 18 $connection
+$targetLabel.Font = $smallFont
+$targetLabel.ForeColor = $palette.Muted
+$method = Add-Control ComboBox '' 16 66 255 29 $connection
 $method.DropDownStyle = 'DropDownList'
-$null = $method.Items.AddRange(@('USB', 'Bluetooth', 'Wi-Fi / TCP'))
-$address = Add-Control ComboBox '' 310 19 310 28
-$address.DropDownStyle = 'DropDown'
-$addressLabel = Add-Control Label '' 310 50 385 23
-$find = Add-Control Button 'Найти устройства' 632 17 148 32
-$null = Add-Control Label 'PIN Bluetooth' 20 76 135 25
-$pin = Add-Control TextBox '' 160 75 132 28
+$method.Items.AddRange(@('USB','Обновление по Bluetooth','Wi-Fi / TCP','Загрузчик nRF52 (UF2)'))
+$address = Add-Control ComboBox '' 287 66 485 29 $connection
+$address.Anchor = 'Top, Left, Right'
+$address.DropDownWidth = 470
+$addressLabel = Add-Control Label '' 287 96 485 24 $connection
+$addressLabel.Anchor = 'Top, Left, Right'
+$addressLabel.Font = $smallFont
+$addressLabel.ForeColor = $palette.Muted
+$pinLabel = Add-Control Label 'PIN Bluetooth' 16 103 115 21 $connection
+$pinLabel.ForeColor = $palette.Muted
+$pinLabel.Font = $smallFont
+$pin = Add-Control TextBox '' 136 99 70 24 $connection
 $pin.UseSystemPasswordChar = $true
 $pin.MaxLength = 6
-$null = Add-Control Label 'При необходимости. PIN показывает устройство.' 310 76 390 25
-$null = Add-Control Label 'Файл прошивки' 20 119 135 25
-$firmware = Add-Control TextBox '' 160 118 460 28
+$modelLabel = Add-Control Label 'Модель платы' 16 103 104 22 $connection
+$modelLabel.ForeColor = $palette.Muted
+$modelLabel.Font = $smallFont
+$model = Add-Control ComboBox '' 120 99 151 26 $connection
+$model.DropDownWidth = 225
+$model.DropDownStyle = 'DropDownList'
+$boards = [ordered]@{
+    'Выберите модель' = ''
+    'Heltec T096' = 'heltec-t096'
+    'Heltec T114' = 'heltec-t114'
+    'Pro Micro (FakeTec)' = 'promicro'
+    'LilyGO T-Echo' = 't-echo'
+}
+$model.Items.AddRange([object[]]@($boards.Keys))
+$model.SelectedIndex = 0
+$diskButton = Add-Control Button 'USB-диск UF2…' 16 97 163 29 $connection
+$deviceDetails = Add-Control Label 'Подключите устройство и проверьте его.' 16 132 756 44 $connection
+$deviceDetails.Anchor = 'Top, Left, Right'
+$deviceDetails.BackColor = $palette.Field
+$deviceDetails.Padding = [Windows.Forms.Padding]::new(10, 3, 10, 3)
+$deviceDetails.TextAlign = 'MiddleLeft'
+$deviceDetails.AutoEllipsis = $true
+Set-Rounded $deviceDetails 8
+$find = Add-Control Button 'Найти устройства' 16 185 179 34 $connection
+$help = Add-Control Button 'ИНСТРУКЦИЯ' 203 185 130 34 $connection 'Quiet'
+$info = Add-Control Button 'Проверить устройство' 572 185 200 34 $connection 'Quiet'
+$info.Anchor = 'Top, Right'
+
+$firmwareCard = Add-Card 254 214 'Прошивка'
+$fileField = Add-Control Panel '' 16 43 708 33 $firmwareCard
+$fileField.BackColor = $palette.Field
+$fileField.Anchor = 'Top, Left, Right'
+Set-Rounded $fileField 8
+$firmware = Add-Control TextBox '' 9 8 690 23 $fileField
+$firmware.Anchor = 'Top, Left, Right'
+$firmware.BorderStyle = 'None'
 $firmware.ReadOnly = $true
-$browse = Add-Control Button 'Выбрать файл' 632 116 148 32
-$info = Add-Control Button 'Версия устройства' 20 165 144 34
-$update = Add-Control Button 'Обновить прошивку' 172 165 154 34
-$usbFlash = Add-Control Button 'Прошить через USB' 334 165 152 34
-$newNode = Add-Control Button 'Новая нода со сбросом…' 494 165 185 34
-$help = Add-Control Button 'Как начать' 687 165 93 34
-$status = Add-Control Label 'Готово к работе' 20 214 760 26
-$log = Add-Control TextBox '' 20 246 760 254
+$firmware.AccessibleName = 'Файл прошивки'
+$clearFile = Add-Control Button '×' 732 43 40 32 $firmwareCard 'Quiet'
+$clearFile.Anchor = 'Top, Right'
+$clearFile.AccessibleName = 'Снять выбор файла'
+$sources = Add-Control TableLayoutPanel '' 16 81 756 35 $firmwareCard
+$sources.Anchor = 'Top, Left, Right'
+$sources.ColumnCount = 3
+$sources.RowCount = 1
+for ($column = 0; $column -lt 3; $column++) {
+    $null = $sources.ColumnStyles.Add([Windows.Forms.ColumnStyle]::new('Percent', 100 / 3))
+}
+$browse = Add-Control Button 'Выбрать файл' 0 0 370 35 $sources
+$browse.Margin = [Windows.Forms.Padding]::new(0, 0, 4, 0)
+$browse.Dock = 'Fill'
+$catalog = Add-Control Button 'Из GitHub' 0 0 370 35 $sources
+$catalog.Margin = [Windows.Forms.Padding]::new(4, 0, 4, 0)
+$catalog.Dock = 'Fill'
+$offline = Add-Control Button 'Офлайн' 0 0 240 35 $sources
+$offline.Margin = [Windows.Forms.Padding]::new(4, 0, 0, 0)
+$offline.Dock = 'Fill'
+$update = Add-Control Button 'Обновить прошивку' 16 124 756 42 $firmwareCard 'Primary'
+$update.Anchor = 'Top, Left, Right'
+$usbFlash = Add-Control Button 'Прошить через USB' 16 173 171 33 $firmwareCard 'Quiet'
+$newNode = Add-Control Button 'Новая нода со сбросом…' 195 173 220 33 $firmwareCard 'Quiet'
+$exportDfu = Add-Control Button 'Сохранить DFU ZIP' 16 173 171 33 $firmwareCard 'Quiet'
+
+$journal = Add-ShellPanel 2 $palette.Surface
+$grip = Add-Control Panel '' 0 3 820 14 $journal
+$grip.Anchor = 'Top, Left, Right'
+$grip.Cursor = [Windows.Forms.Cursors]::SizeNS
+$grip.AccessibleName = 'Изменить высоту журнала'
+$handle = Add-Control Panel '' 392 5 36 4 $grip
+$handle.BackColor = $palette.Muted
+$handle.Cursor = [Windows.Forms.Cursors]::SizeNS
+$grip.Add_Resize({ $handle.Left = [Math]::Max(0, ($grip.ClientSize.Width - $handle.Width) / 2) })
+$progressArea = Add-Control Panel '' 20 19 780 39 $journal
+$progressArea.Anchor = 'Top, Left, Right'
+$progressArea.Visible = $false
+$progressTitle = Add-Control Label '' 0 0 675 23 $progressArea
+$progressTitle.Anchor = 'Top, Left, Right'
+$progressTitle.Font = $buttonFont
+$progressTitle.ForeColor = $palette.Brand
+$progressTitle.TextAlign = 'MiddleLeft'
+$progressValue = Add-Control Label '' 675 0 105 23 $progressArea
+$progressValue.Anchor = 'Top, Right'
+$progressValue.Font = $buttonFont
+$progressValue.ForeColor = $palette.Accent
+$progressValue.TextAlign = 'MiddleRight'
+$track = Add-Control Panel '' 0 26 780 9 $progressArea
+$track.Anchor = 'Top, Left, Right'
+$track.BackColor = $palette.Stroke
+$track.AccessibleName = 'Ход операции'
+$track.AccessibleRole = 'ProgressBar'
+Set-Rounded $track 4
+$progressFill = Add-Control Panel '' 0 0 0 9 $track
+$progressFill.BackColor = $palette.Accent
+$journalHeading = Add-Control Label 'Журнал' 20 26 81 27 $journal
+$journalHeading.Font = $buttonFont
+$journalHeading.TextAlign = 'MiddleLeft'
+$journalToggle = Add-Control Button 'Развернуть' 680 23 120 34 $journal 'Quiet'
+$journalToggle.Anchor = 'Top, Right'
+$status = Add-Control Label 'Готово к работе' 107 26 560 27 $journal
+$status.Anchor = 'Top, Left, Right'
+$status.TextAlign = 'MiddleLeft'
+$status.ForeColor = $palette.Muted
+$status.AutoEllipsis = $true
+$saveJournal = Add-Control CheckBox 'Сохранять журнал в Загрузки' 20 60 315 25 $journal
+$saveJournal.Visible = $false
+$log = Add-Control TextBox '' 20 88 780 130 $journal
 $log.Multiline = $true
 $log.ReadOnly = $true
 $log.ScrollBars = 'Both'
 $log.WordWrap = $false
-$log.Anchor = 'Top, Bottom, Left, Right'
-$log.Font = [Drawing.Font]::new('Consolas', 10)
+$log.Font = $logFont
+$log.Visible = $false
 
 $ports = @{ Values = @() }
+$state = @{
+    Process = $null; Output = $null; Errors = $null; Mode = ''; Text = ''
+    Drive = $null; PendingRoot = ''; DfuDevices = @{}; DeviceKey = ''; Device = $null
+    JournalOpen = $false; JournalHeight = 320; JournalDrag = $null
+    ProgressTitle = ''; ProgressPercent = -1; BluetoothErrorText = ''
+}
+$transferModes = @('Download','LibrarySync','Update','USBFlash','NewNode','DfuWrite','Uf2Write')
+$structuredModes = @('Info','Catalog','Download','Uf2Info','DfuList','Library','LibraryIndex','LibrarySync','LibraryCheck')
+$operationTitles = @{
+    Download = 'Загрузка прошивки из GitHub'
+    Library = 'Чтение сохранённых прошивок'
+    LibraryIndex = 'Загрузка списка выпусков'
+    LibrarySync = 'Загрузка офлайн-набора'
+    LibraryCheck = 'Проверка сохранённого файла'
+    Update = 'Обновление прошивки'
+    USBFlash = 'Запись прошивки через USB'
+    NewNode = 'Запись прошивки со сбросом'
+    DfuWrite = 'Запись прошивки через загрузчик nRF52'
+    Uf2Write = 'Запись UF2 на устройство'
+    Info = 'Проверка устройства'
+    Uf2Info = 'Проверка диска загрузчика UF2'
+    List = 'Поиск устройств Bluetooth'
+    DfuList = 'Поиск загрузчиков nRF52'
+    Catalog = 'Загрузка каталога GitHub'
+    Export = 'Сохранение DFU-пакета'
+}
+$controls = @($method,$address,$pin,$model,$find,$browse,$info,$update,$usbFlash,$newNode,$diskButton,$exportDfu,$catalog,$offline,$clearFile)
 $tips = New-Object Windows.Forms.ToolTip
 $tips.AutoPopDelay = 15000
-$tips.SetToolTip($address, 'USB: выберите COM-порт из списка. Bluetooth: выберите найденное устройство. Wi-Fi: введите адрес и порт.')
-$tips.SetToolTip($find, 'В режиме USB показывает COM-порты Windows. Для поиска устройств Bluetooth выберите Bluetooth. Для репитера сначала откройте окно обновления на устройстве.')
-$tips.SetToolTip($pin, 'Введите шестизначный PIN, который показывает устройство при открытии окна Bluetooth-обновления.')
-$tips.SetToolTip($browse, 'Выберите файл .mcfw или .bin для вашей модели.')
+$tips.SetToolTip($pin, 'Введите шестизначный PIN, который показывает устройство.')
 $tips.SetToolTip($newNode, 'Прошивка ESP по USB с удалением ключа, настроек, контактов и каналов обеих ролей.')
-$tips.SetToolTip($usbFlash, 'Установить выбранный образ приложения через загрузчик ESP. Подходит для установки более раннего билда.')
-$tips.SetToolTip($info, 'Читает сведения о подключённом устройстве и его текущей прошивке.')
-$tips.SetToolTip($update, 'Запрашивает подтверждение перед записью выбранной прошивки.')
+$tips.SetToolTip($usbFlash, 'Установить образ приложения через загрузчик ESP.')
+$tips.SetToolTip($info, 'Читает модель устройства и установленную сборку.')
+$tips.SetToolTip($catalog, 'Показывает выпуски для модели и роли устройства.')
+$tips.SetToolTip($offline, 'Скачайте набор заранее или выберите уже сохранённую прошивку.')
+$tips.SetToolTip($grip, 'Потяните вверх, чтобы увеличить журнал. Нажатие раскрывает или сворачивает его.')
+$tips.SetToolTip($handle, 'Потяните вверх, чтобы увеличить журнал.')
+
+function Get-Formats {
+    switch ($method.SelectedIndex) {
+        0 { '.mcfw'; '.mcfd'; '.bin'; '.uf2' }
+        1 { '.mcfw'; '.mcfd'; '.bin' }
+        2 { '.mcfw'; '.mcfd' }
+        3 { '.uf2' }
+    }
+}
+
+function Get-FirmwareExtension {
+    return [IO.Path]::GetExtension($firmware.Text).ToLowerInvariant()
+}
+
+function Uses-Uf2Drive {
+    return $method.SelectedIndex -eq 0 -and ($null -ne $state.Drive -or (Get-FirmwareExtension) -eq '.uf2')
+}
+
+function Get-Target {
+    $value = $address.Text.Trim()
+    switch ($method.SelectedIndex) {
+        0 { return (Get-PortNumber $value) }
+        2 {
+            if ($value -match '^(?:[a-z0-9][a-z0-9.-]*|\[[a-f0-9:]+\])$') { return "$($value):5000" }
+            return $value
+        }
+        default {
+            if ($value -match '\(((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\)$') { return $Matches[1] }
+            return $value
+        }
+    }
+}
+
+function Get-ContextKey { return "$($method.SelectedIndex)|$(Get-Target)" }
+
+function Get-Board {
+    if ($method.SelectedIndex -eq 3) {
+        $detected = $state.DfuDevices[(Get-Target)]
+        if ($detected -and $detected.board) { return $detected.board }
+    } elseif ($state.Drive -and $state.Drive.board) { return $state.Drive.board }
+    return $boards[$model.Text]
+}
+
+function Set-Controls {
+    $busy = $null -ne $state.Process
+    foreach ($control in $controls) { $control.Enabled = -not $busy }
+    $usb = $method.SelectedIndex -eq 0
+    $dfu = $method.SelectedIndex -eq 3
+    $drive = Uses-Uf2Drive
+    $targetLabel.Text = if ($method.SelectedIndex -eq 2) { 'Адрес платы' } elseif ($dfu) { 'Загрузчик' } elseif ($drive) { 'Диск загрузчика' } else { 'Устройство' }
+    $address.Enabled = -not $busy -and -not ($drive -and $state.Drive)
+    $ble = $method.SelectedIndex -eq 1
+    $pinLabel.Visible = $ble
+    $pin.Visible = $ble
+    $diskButton.Visible = $usb -and (-not $drive -or $null -ne $state.Drive -and $state.Drive.board)
+    $showModel = $dfu -or ($drive -and $state.Drive -and -not $state.Drive.board)
+    $model.Visible = $showModel
+    $modelLabel.Visible = $showModel
+    $known = if ($dfu) { $state.DfuDevices[(Get-Target)] } else { $null }
+    if ($known -and $known.board -in $boards.Values) {
+        $model.SelectedIndex = [array]::IndexOf(@($boards.Values),$known.board)
+        $model.Enabled = $false
+    }
+    $find.Enabled = -not $busy -and $method.SelectedIndex -ne 2
+    $find.Visible = $method.SelectedIndex -ne 2
+    $help.Left = if ($method.SelectedIndex -eq 2) { $find.Left } else { $find.Right + $find.Left / 2 }
+    $find.Text = if ($dfu) { 'Найти загрузчик' } else { 'Найти устройства' }
+    $showUsbTools = $usb -and -not $drive
+    $usbFlash.Visible = $showUsbTools
+    $newNode.Visible = $showUsbTools
+    $usbFlash.Enabled = -not $busy -and (Get-FirmwareExtension) -ne '.mcfd'
+    $newNode.Enabled = $usbFlash.Enabled
+    $info.Visible = -not $dfu
+    $exportDfu.Visible = $dfu
+    $exportDfu.Enabled = -not $busy -and (Get-FirmwareExtension) -eq '.uf2'
+    $update.Text = if ($dfu) { 'Начать' } elseif ($drive) { 'Прошить UF2 по USB' } else { 'Обновить прошивку' }
+    $actionsBottom = if ($showUsbTools -or $dfu) { $usbFlash.Bottom } else { $update.Bottom }
+    $firmwareCard.Height = $actionsBottom + $update.Left
+    $page.Height = $firmwareCard.Bottom + $connection.Top
+    $clearFile.Enabled = -not $busy -and [bool]$firmware.Text
+    if ($drive -and $state.Drive) {
+        $deviceDetails.Text = (($state.Drive.model, "UF2-загрузчик $($state.Drive.version) · $($state.Drive.softdevice)") -join $newline)
+    } elseif ($dfu -and $known) {
+        $deviceDetails.Text = if ($known.board) { "Загрузчик распознан · $($model.Text)" } else { 'Загрузчик обнаружен. Выберите модель платы.' }
+    } elseif ($state.Device -and $state.DeviceKey -eq (Get-ContextKey)) {
+        $deviceDetails.Text = $state.Device.summary
+    } else {
+        $deviceDetails.Text = if ($dfu) { 'Переведите плату в BLE OTA и запустите поиск.' } else { 'Подключите устройство и проверьте его.' }
+    }
+    $tips.SetToolTip($deviceDetails, $deviceDetails.Text)
+    $tips.SetToolTip($firmware, $firmware.Text)
+    $formats = @(Get-Formats)
+    $tips.SetToolTip($browse,'Поддерживаемые файлы — ' + ($formats -join ', ') + '.')
+}
+
+function Show-Notice($message) { $null = [Windows.Forms.MessageBox]::Show($form,$message,$form.Text) }
+
+function Show-DetailsDialog([string]$title,[string]$message) {
+    $dialog = New-Object Windows.Forms.Form
+    try {
+        $dialog.Text = $title
+        $dialog.Font = $form.Font
+        $dialog.Icon = $form.Icon
+        $dialog.StartPosition = 'CenterParent'
+        $dialog.AutoScaleDimensions = [Drawing.SizeF]::new(96, 96)
+        $dialog.AutoScaleMode = 'Dpi'
+        $dialog.BackColor = $palette.Surface
+        $dialog.ClientSize = [Drawing.Size]::new(690,450)
+        $dialog.FormBorderStyle = 'FixedDialog'
+        $dialog.MinimizeBox = $false
+        $dialog.MaximizeBox = $false
+        $heading = Add-Control Label $title 18 14 654 34 $dialog
+        $heading.ForeColor = $palette.Ink
+        $heading.Font = $sectionFont
+        $content = Add-Control TextBox $message 18 56 654 336 $dialog
+        $content.Multiline = $true
+        $content.ReadOnly = $true
+        $content.ScrollBars = 'Vertical'
+        $content.Text = ($message -replace '\r?\n',$newline)
+        $content.SelectionLength = 0
+        $close = Add-Control Button 'Закрыть' 552 405 120 32 $dialog 'Quiet'
+        $close.DialogResult = 'Cancel'
+        $dialog.CancelButton = $close
+        $dialog.ActiveControl = $close
+        $null = $dialog.ShowDialog($form)
+    } finally { $dialog.Dispose() }
+}
+
+$help.Add_Click({
+    $modeIntro = switch ($method.SelectedIndex) {
+        0 { 'Подключите плату кабелем с передачей данных. Выберите COM-порт. Если порт один, программа подставит его сама.', '', 'Для первой установки MeshCore-RS выберите .mcfw для своей платы и нажмите «Новая нода со сбросом…». Программа сама войдёт в загрузчик и очистит память после подтверждения.', '', 'Для установки .uf2 переведите плату в USB-загрузчик. Нажмите «USB-диск UF2…», выберите диск и файл для своей платы и нажмите «Прошить UF2 по USB».', '', 'Полный *-merged.bin для ESP32-S3 и ESP32-C6 записывается через «Прошить через USB». Для Heltec V3 со штатной разметкой MeshCore подходит обычный Heltec_v3_*.bin с flasher.meshcore.io.' }
+        1 { 'Включите Bluetooth и откройте окно обновления на плате. Для репитера MeshCore-RS его можно открыть командой fw ble в консоли.', '', 'Нажмите «Найти устройства» и выберите плату. Если устройство показывает PIN, введите его.' }
+        2 { 'Подключите компьютер и плату к одной сети. Введите адрес устройства. Если порт отличается от 5000, добавьте его через двоеточие.', '', 'Для Wi-Fi / TCP нужен подписанный .mcfw или .mcfd.' }
+        3 { 'Переведите плату в BLE OTA и нажмите «Найти загрузчик». Если модель не распозналась, укажите её вручную.', '', 'Нажмите «Из GitHub» и выберите роль или откройте локальный .uf2 для вашей платы. Нажмите «Начать» и подтвердите запись. «Сохранить DFU ZIP» сохраняет пакет для отдельного прошивальщика.' }
+    }
+    $steps = @($modeIntro)
+    if ($method.SelectedIndex -ne 3 -and -not (Uses-Uf2Drive)) {
+        $steps += '', '1. Нажмите «Проверить устройство». Появятся модель, версия и номер сборки.', '2. Нажмите «Из GitHub» для подбора файла или «Выбрать файл». Дельта .mcfd должна подходить к установленной сборке.', '3. Нажмите «Обновить прошивку», сверьте файл и запустите запись. После перезапуска снова проверьте устройство.'
+    }
+    $steps += '', 'Нажмите «Развернуть» для просмотра журнала. Потяните полоску над журналом вверх, чтобы увеличить его.'
+    Show-DetailsDialog $method.Text ($steps -join $newline)
+})
+
+function Set-JournalLayout {
+    $offset = if ($state.ProgressTitle) { 42 } else { 0 }
+    $scale = $form.DeviceDpi / 96
+    $available = [Math]::Floor(($shell.ClientSize.Height - $header.Height) / $scale) - $offset - 74
+    $maximum = [Math]::Max(148, $available)
+    $height = if ($state.JournalOpen) { [Math]::Min($state.JournalHeight, $maximum) } else { 66 }
+    $journalHeading.Top = [Math]::Round((26 + $offset) * $scale)
+    $status.Top = $journalHeading.Top
+    $journalToggle.Top = [Math]::Round((23 + $offset) * $scale)
+    $saveJournal.Top = [Math]::Round((60 + $offset) * $scale)
+    $log.Top = [Math]::Round((88 + $offset) * $scale)
+    $drawerRow.Height = [Math]::Round(($height + $offset) * $scale)
+    $log.Visible = $state.JournalOpen
+    $saveJournal.Visible = $state.JournalOpen
+    $journalToggle.Text = if ($state.JournalOpen) { 'Свернуть' } else { 'Развернуть' }
+    $shell.PerformLayout()
+    $log.Height = [Math]::Max(1, $journal.ClientSize.Height - $log.Top - $log.Left / 2)
+}
+
+function Switch-Journal {
+    $state.JournalOpen = -not $state.JournalOpen
+    Set-JournalLayout
+    if ($state.JournalOpen) {
+        $log.SelectionStart = $log.TextLength
+        $log.ScrollToCaret()
+    }
+}
+
+function Resize-Journal([double]$height) {
+    $wasOpen = $state.JournalOpen
+    $state.JournalOpen = $height -ge 110
+    if ($state.JournalOpen) { $state.JournalHeight = [Math]::Max(148, $height) }
+    Set-JournalLayout
+    if ($state.JournalOpen -and !$wasOpen) {
+        $log.SelectionStart = $log.TextLength
+        $log.ScrollToCaret()
+    }
+}
+
+function Start-JournalDrag($sender, $eventArgs) {
+    if ($eventArgs.Button -ne [Windows.Forms.MouseButtons]::Left) { return }
+    $scale = $form.DeviceDpi / 96
+    $offset = if ($state.ProgressTitle) { 42 } else { 0 }
+    $state.JournalDrag = @{
+        Y = [Windows.Forms.Cursor]::Position.Y
+        Height = $drawerRow.Height / $scale - $offset
+        Moved = $false
+    }
+    $sender.Capture = $true
+}
+
+function Move-JournalDrag($sender) {
+    $drag = $state.JournalDrag
+    if (!$drag -or !$sender.Capture) { return }
+    $distance = ($drag.Y - [Windows.Forms.Cursor]::Position.Y) / ($form.DeviceDpi / 96)
+    if (!$drag.Moved -and [Math]::Abs($distance) -lt 5) { return }
+    $drag.Moved = $true
+    Resize-Journal ($drag.Height + $distance)
+}
+
+function Stop-JournalDrag($sender, $eventArgs) {
+    if ($eventArgs.Button -ne [Windows.Forms.MouseButtons]::Left -or !$state.JournalDrag) { return }
+    $moved = $state.JournalDrag.Moved
+    $state.JournalDrag = $null
+    $sender.Capture = $false
+    if (!$moved) { Switch-Journal }
+}
+
+function Set-ProgressFill {
+    $width = [Math]::Round($track.ClientSize.Width * [Math]::Max(0, $state.ProgressPercent) / 100)
+    $progressFill.Size = [Drawing.Size]::new($width, $track.ClientSize.Height)
+}
+
+function Set-OperationProgress([string]$title, [int]$percent = -1, [switch]$Failed) {
+    $visibilityChanged = [bool]$state.ProgressTitle -ne [bool]$title
+    $state.ProgressTitle = $title
+    $state.ProgressPercent = $percent
+    $progressTitle.Text = $title
+    $progressTitle.ForeColor = if ($Failed) { $palette.Error } else { $palette.Brand }
+    $progressValue.ForeColor = if ($Failed) { $palette.Error } else { $palette.Accent }
+    $progressValue.Text = if ($percent -ge 0) { "$percent%" } else { '—' }
+    $track.AccessibleDescription = if ($percent -ge 0) { "$title, $percent%" } else { $title }
+    $track.BackColor = if ($Failed) { $palette.ErrorLight } else { $palette.Stroke }
+    $progressFill.BackColor = if ($Failed) { $palette.Error } else { $palette.Accent }
+    Set-ProgressFill
+    $progressArea.Visible = [bool]$title
+    if ($visibilityChanged) { Set-JournalLayout }
+}
+
+$track.Add_Resize({ Set-ProgressFill })
+$journalToggle.Add_Click({ Switch-Journal })
+foreach ($part in @($grip,$handle)) {
+    $part.Add_MouseDown({ param($sender,$eventArgs) Start-JournalDrag $sender $eventArgs })
+    $part.Add_MouseMove({ param($sender,$eventArgs) Move-JournalDrag $sender })
+    $part.Add_MouseUp({ param($sender,$eventArgs) Stop-JournalDrag $sender $eventArgs })
+    $part.Add_MouseCaptureChanged({ param($sender,$eventArgs) if (!$sender.Capture) { $state.JournalDrag = $null } })
+}
+$form.Add_ClientSizeChanged({ Set-JournalLayout })
+$journal.Add_Resize({
+    $log.Width = [Math]::Max(1, $journal.ClientSize.Width - 2 * $log.Left)
+    $log.Height = [Math]::Max(1, $journal.ClientSize.Height - $log.Top - $log.Left / 2)
+})
 
 function Get-PortNumber([string]$label) {
     if ($label -match '\((COM[0-9]+)\)$') { return $Matches[1] }
@@ -91,8 +600,15 @@ function Get-PortLabels($current) {
     return $labels
 }
 
+
+function Quote-Argument([string]$value) {
+    return '"' + (($value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+
+
+
 function Refresh-Ports([switch]$Force) {
-    if ($method.SelectedIndex -ne 0 -or $address.DroppedDown) { return }
+    if ($method.SelectedIndex -ne 0 -or $address.DroppedDown -or (Uses-Uf2Drive)) { return }
     try { $current = @([IO.Ports.SerialPort]::GetPortNames() | Sort-Object { [int]($_ -replace '^COM','') }) }
     catch { return }
     if ($Force -or ($current -join ',') -ne ($ports.Values -join ',') -or $address.Items.Count -ne $current.Count) {
@@ -100,130 +616,223 @@ function Refresh-Ports([switch]$Force) {
         $labels = Get-PortLabels $current
         $address.Items.Clear()
         foreach ($port in $current) {
-            $label = if ($labels[$port]) { $labels[$port] } else { $port }
-            $null = $address.Items.Add($label)
+            $null = $address.Items.Add($(if ($labels[$port]) { $labels[$port] } else { $port }))
         }
         $ports.Values = $current
         $address.Text = ''
         if ($previous -in $current) { $address.SelectedIndex = [array]::IndexOf($current,$previous) }
         elseif ($current.Count -eq 1) { $address.SelectedIndex = 0 }
     }
-    $addressLabel.Text = if ($current.Count) { 'Выберите COM-порт устройства' } else { 'COM-порты не найдены. Подключите устройство по USB.' }
+    $addressLabel.Text = if ($current.Count) { 'Выберите COM-порт устройства' } else { 'Подключите плату по USB или выберите диск UF2.' }
 }
 
-$address.DropDownWidth = 450
+function Set-Firmware([string]$path) {
+    if ($path -and [IO.Path]::GetExtension($path).ToLowerInvariant() -notin @(Get-Formats)) {
+        Show-Notice ('Допустимые форматы — ' + ((Get-Formats) -join ', ') + '.')
+        return
+    }
+    if ($path -and [IO.Path]::GetExtension($path) -ine '.uf2' -and $state.Drive) {
+        $state.Drive = $null
+        $address.Text = ''
+    }
+    $firmware.Text = $path
+    Set-Controls
+    Refresh-Ports
+}
+
 $method.Add_SelectedIndexChanged({
-    $usbFlash.Enabled = $method.SelectedIndex -eq 0
-    $newNode.Enabled = $usbFlash.Enabled
+    Set-OperationProgress ''
+    $state.Drive = $null
+    $state.Device = $null
+    $state.DfuDevices = @{}
+    $model.SelectedIndex = 0
     $address.Items.Clear()
     $address.Text = ''
     $pin.Clear()
-    $pin.Enabled = $method.SelectedIndex -eq 1
-    $addressLabel.Text = @('Порт, например COM4', 'Адрес, например AA:BB:CC:DD:EE:FF', 'Адрес и порт, например 192.168.1.50:5000')[$method.SelectedIndex]
+    $addressLabel.Text = @('Выберите COM-порт или USB-диск UF2','Выберите устройство или введите адрес BLE','Адрес платы, например 192.168.1.50:5000','Переведите плату в BLE OTA и найдите загрузчик')[$method.SelectedIndex]
+    $extension = Get-FirmwareExtension
+    if ($extension -and $extension -notin @(Get-Formats)) { $firmware.Clear() }
+    Set-Controls
     Refresh-Ports
 })
+$address.Add_TextChanged({ if ($method.SelectedIndex -ge 0) { Set-Controls } })
 $method.SelectedIndex = 0
 
 $browse.Add_Click({
     $dialog = New-Object Windows.Forms.OpenFileDialog
     try {
         $dialog.Title = 'Выберите прошивку для вашей модели MeshCore'
-        $dialog.Filter = 'Файлы прошивки (*.mcfw;*.bin)|*.mcfw;*.bin'
-        if ($dialog.ShowDialog($form) -eq 'OK') { $firmware.Text = $dialog.FileName }
+        $pattern = ((Get-Formats) | ForEach-Object { '*' + $_ }) -join ';'
+        $dialog.Filter = "Файлы прошивки ($pattern)|$pattern"
+        if ($dialog.ShowDialog($form) -eq 'OK') {
+            Set-OperationProgress ''
+            Set-Firmware $dialog.FileName
+        }
     } finally { $dialog.Dispose() }
 })
-
-$state = @{ Process = $null; Output = $null; Errors = $null; Mode = ''; Listing = '' }
-$controls = @($method, $address, $pin, $find, $browse, $info, $update, $usbFlash, $newNode)
-$timer = New-Object Windows.Forms.Timer
-$timer.Interval = 80
-$portTimer = New-Object Windows.Forms.Timer
-$portTimer.Interval = 1000
-$portTimer.Add_Tick({ if (-not $state.Process) { Refresh-Ports } })
-
-function Show-Notice($message) {
-    $null = [Windows.Forms.MessageBox]::Show($form, $message, $form.Text)
-}
-
-$help.Add_Click({
-    Show-Notice @'
-USB. Подключите устройство кабелем с передачей данных. Если Windows видит один COM-порт, программа выберет его сама. Если портов несколько, выберите порт вашего устройства.
-
-Bluetooth. Для репитера откройте окно обновления на устройстве. Нажмите «Найти устройства» и выберите адрес. Если требуется сопряжение, введите PIN с устройства.
-
-Wi-Fi. Выберите Wi-Fi / TCP и введите адрес устройства с портом, например 192.168.1.50:5000.
-
-
-Для создания новой ноды на уже работающей ESP выберите файл и нажмите «Новая нода со сбросом…». После подтверждения старый ключ и данные будут удалены.
-
-Для установки другого билда на ESP выберите USB, COM-порт и файл. Нажмите «Прошить через USB» и подтвердите запись. Для .bin нужен образ приложения для этой платы.
-
-Нажмите «Версия устройства», чтобы проверить подключение. Затем выберите подходящий вашей модели файл .mcfw или .bin и нажмите «Обновить прошивку». Результат появится в журнале.
-'@
+$clearFile.Add_Click({
+    if ((Get-FirmwareExtension) -eq '.uf2' -and $state.Drive) {
+        $state.Drive = $null
+        $address.Text = ''
+    }
+    Set-Firmware ''
+    Set-OperationProgress ''
+    $status.Text = 'Выбор файла снят.'
 })
 
-function Quote-Argument([string]$value) {
-    return '"' + (($value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+function Select-DfuRole {
+    $dialog = New-Object Windows.Forms.Form
+    try {
+        $dialog.Text = 'Роль прошивки UF2'
+        $dialog.Font = $form.Font
+        $dialog.Icon = $form.Icon
+        $dialog.StartPosition = 'CenterParent'
+        $dialog.AutoScaleDimensions = [Drawing.SizeF]::new(96, 96)
+        $dialog.AutoScaleMode = 'Dpi'
+        $dialog.BackColor = $palette.Surface
+        $dialog.ClientSize = [Drawing.Size]::new(375,115)
+        $dialog.FormBorderStyle = 'FixedDialog'
+        $dialog.MinimizeBox = $false
+        $dialog.MaximizeBox = $false
+        $null = Add-Control Label "Выберите роль для платы $($model.Text)" 14 16 346 28 $dialog
+        $choice = Add-Control Button 'Компаньон' 14 56 164 34 $dialog
+        $choice.DialogResult = 'Yes'
+        $choice = Add-Control Button 'Репитер' 191 56 164 34 $dialog
+        $choice.DialogResult = 'No'
+        $result = $dialog.ShowDialog($form)
+        if ($result -eq 'Yes') { return 'companion' }
+        if ($result -eq 'No') { return 'repeater' }
+    } finally { $dialog.Dispose() }
+    return ''
 }
 
-function Start-Ota($mode) {
-    if ($null -ne $state.Process) { return }
-    if ($mode -eq 'List' -and $method.SelectedIndex -eq 0) {
-        Refresh-Ports -Force
-        $log.Clear()
-        foreach ($label in $address.Items) { $log.AppendText($label + [Environment]::NewLine) }
-        $status.Text = if ($ports.Values.Count) { "Найдено COM-портов: $($ports.Values.Count)." } else { 'COM-порты не найдены. Подключите устройство по USB.' }
-        return
+function Get-AssetDetails($asset) {
+    $kind = switch ($asset.format) {
+        '.mcfd' { "Дельта с №$($asset.base)" }
+        '.uf2' { 'Образ для загрузчика' }
+        default { 'Полный образ' }
     }
-    $scriptName = 'engine\ota_app.py'
-    $arguments = @('--list')
-    if ($mode -ne 'List') {
-        $target = if ($method.SelectedIndex -eq 0) { Get-PortNumber $address.Text } else { $address.Text.Trim() }
-        $patterns = @('^COM[0-9]+$', '^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$', '^(?:[a-z0-9][a-z0-9.-]*|\[[a-f0-9:]+\]):[0-9]{1,5}$')
-        if ($target -notmatch $patterns[$method.SelectedIndex]) {
-            Show-Notice ('Проверьте адрес подключения. ' + $addressLabel.Text)
-            return
-        }
-        $arguments = @(@('--port', '--ble', '--tcp')[$method.SelectedIndex], $target)
-        if ($method.SelectedIndex -eq 1 -and $pin.Text) {
-            if ($pin.Text -notmatch '^[0-9]{6}$') { Show-Notice 'Введите шестизначный PIN.'; return }
-            $arguments += @('--pin', $pin.Text)
-        }
-        if ($mode -eq 'Info') { $arguments += '--info' }
-        if ($mode -in @('Update','USBFlash','NewNode') -and -not $firmware.Text) {
-            $browse.PerformClick()
-            if (-not $firmware.Text) { return }
-        }
-        if ($mode -in @('USBFlash','NewNode')) {
-            if ($method.SelectedIndex -ne 0) { return }
-            if (-not $firmware.Text -or -not (Test-Path -LiteralPath $firmware.Text -PathType Leaf)) {
-                Show-Notice 'Выберите файл выпуска .mcfw или образ приложения .bin для вашей модели ESP.'
-                return
-            }
-            $fileName = [IO.Path]::GetFileName($firmware.Text)
-            $message = "Установить $fileName на устройство $target через загрузчик ESP?`r`n`r`nПроверьте модель платы и роль. Для .bin модель платы по файлу определить нельзя. Разделы с данными сохраняются, но старый билд может иначе читать настройки. Не отключайте USB до окончания."
-            if ($mode -eq 'NewNode') {
-                $message = "Создать новую ноду на $target с файлом $fileName?`r`n`r`nПрограмма установит выбранный билд и безвозвратно удалит прежний ключ, настройки, контакты, каналы и сопряжения обеих ролей. Проверьте порт и модель. Для сохранения прежней личности нужна резервная копия ключа.`r`n`r`nПродолжить?"
-            }
-            if ([Windows.Forms.MessageBox]::Show($form,$message,'Прошивка через USB','YesNo','Warning','Button2') -ne 'Yes') { return }
-            $scriptName = 'engine\usb_flash.py'
-            $arguments = @('--port',$target,$firmware.Text)
-            if ($mode -eq 'NewNode') { $arguments += '--new-node' }
-        }
-        if ($mode -eq 'Update') {
-            if ( -not (Test-Path -LiteralPath $firmware.Text -PathType Leaf)) {
-                Show-Notice 'Выберите существующий файл прошивки.'
-                return
-            }
-            $message = "Обновить устройство $target файлом $([IO.Path]::GetFileName($firmware.Text))?`r`n`r`nУбедитесь, что прошивка подходит вашей модели. Не отключайте питание во время обновления."
-            if ([Windows.Forms.MessageBox]::Show($form, $message, $form.Text, 'YesNo', 'Question', 'Button2') -ne 'Yes') { return }
-            $arguments += $firmware.Text
-        }
-    }
+    $size = if ($asset.size -lt 1024) { "$($asset.size) Б" } else { "$([Math]::Round($asset.size/1024)) КиБ" }
+    $details = "$kind · $($asset.format) · $size"
+    if ($asset.prerelease) { $details += ' · Предварительный выпуск' }
+    if ($asset.issue) { $details += $newline + $asset.issue }
+    return $details
+}
 
+function Show-Catalog($data) {
+    $items = @($data.assets | Where-Object { $null -ne $_ })
+    $dialog = New-Object Windows.Forms.Form
+    try {
+        $dialog.Text = 'Прошивки из GitHub'
+        $dialog.Icon = $form.Icon
+        $dialog.Font = $form.Font
+        $dialog.StartPosition = 'CenterParent'
+        $dialog.AutoScaleDimensions = [Drawing.SizeF]::new(96, 96)
+        $dialog.AutoScaleMode = 'Dpi'
+        $dialog.BackColor = $palette.Surface
+        $dialog.FormBorderStyle = 'FixedDialog'
+        $dialog.ClientSize = [Drawing.Size]::new(680,269)
+        $dialog.MinimizeBox = $false
+        $dialog.MaximizeBox = $false
+        $summary = if ($data.device.summary) { $data.device.summary } else { "Загрузчик UF2 · $($model.Text)" }
+        $heading = Add-Control Label 'Прошивки из GitHub' 18 12 644 34 $dialog
+        $heading.Font = $sectionFont
+        $heading.ForeColor = $palette.Ink
+        $summaryLabel = Add-Control Label $summary 18 51 644 41 $dialog
+        $summaryLabel.ForeColor = $palette.Muted
+        $pick = @{ Asset = $null; Open = $false }
+        $recommended = $null
+        if ($null -ne $data.recommended -and [int]$data.recommended -ge 0 -and [int]$data.recommended -lt $items.Count) {
+            $recommended = $items[[int]$data.recommended]
+        }
+        $card = Add-Control Panel '' 18 94 644 82 $dialog
+        Set-Rounded $card 10
+        $card.BackColor = $palette.Field
+        $cardTitle = Add-Control Label '' 14 9 615 25 $card
+        $cardTitle.Font = $buttonFont
+        $cardTitle.ForeColor = $palette.Accent
+        $cardDetail = Add-Control Label '' 14 37 615 40 $card
+        $cardDetail.ForeColor = $palette.Ink
+        if ($recommended) {
+            $cardTitle.Text = "Рекомендуем · $($recommended.tag)"
+            $cardDetail.Text = Get-AssetDetails $recommended
+            $card.BackColor = $palette.AccentLight
+            $pick.Asset = $recommended
+        } elseif (!$items.Count) {
+            $cardTitle.Text = 'В каталоге нет файлов для этой модели и роли.'
+        } elseif ($data.device.build -and -not ($items | Where-Object { $_.build -eq 0 -or $_.build -gt $data.device.build })) {
+            $cardTitle.Text = "В каталоге нет сборки новее №$($data.device.build)."
+        } else {
+            $cardTitle.Text = 'Подходящего обновления нет'
+            $cardDetail.Text = 'Откройте другие файлы, чтобы посмотреть причины.'
+        }
+        $others = @($items | Where-Object { $_ -ne $recommended })
+        $more = Add-Control Button "Другие файлы ($($others.Count))" 18 187 198 36 $dialog
+        $more.Enabled = [bool]$others.Count
+        $primary = Add-Control Button 'Скачать' 470 187 192 36 $dialog 'Primary'
+        $primary.Enabled = $null -ne $recommended
+        $primary.DialogResult = 'OK'
+        $close = Add-Control Button 'Закрыть' 542 229 120 32 $dialog 'Quiet'
+        $close.Anchor = 'Bottom, Right'
+        $close.DialogResult = 'Cancel'
+        $dialog.CancelButton = $close
+        $list = Add-Control ListBox '' 18 236 644 181 $dialog
+        $list.Visible = $false
+        $detail = Add-Control Label '' 18 426 644 52 $dialog
+        $detail.ForeColor = $palette.Muted
+        $detail.Visible = $false
+        foreach ($asset in $others) {
+            $badge = if ($asset.issue) { ' · архив' } elseif ($asset.prerelease) { ' · предварительный' } else { '' }
+            $null = $list.Items.Add("$($asset.tag) · $($asset.format)$badge")
+        }
+        $list.Add_SelectedIndexChanged({
+            if ($list.SelectedIndex -ge 0) {
+                $pick.Asset = $others[$list.SelectedIndex]
+                $detail.Text = Get-AssetDetails $pick.Asset
+                $primary.Enabled = $true
+            }
+        })
+        $more.Add_Click({
+            $pick.Open = -not $pick.Open
+            $list.Visible = $pick.Open
+            $detail.Visible = $pick.Open
+            $scale = $dialog.DeviceDpi / 96
+            if ($pick.Open) {
+                $dialog.ClientSize = [Drawing.Size]::new($dialog.ClientSize.Width, [Math]::Round(521 * $scale))
+                $more.Text = 'Скрыть другие файлы'
+                if ($list.SelectedIndex -lt 0 -and $list.Items.Count) { $list.SelectedIndex = 0 }
+                $pick.Asset = $others[$list.SelectedIndex]
+                $primary.Enabled = $null -ne $pick.Asset
+            } else {
+                $dialog.ClientSize = [Drawing.Size]::new($dialog.ClientSize.Width, [Math]::Round(269 * $scale))
+                $more.Text = "Другие файлы ($($others.Count))"
+                $pick.Asset = $recommended
+                $primary.Enabled = $null -ne $recommended
+            }
+        })
+        if ($dialog.ShowDialog($form) -eq 'OK' -and $pick.Asset) {
+            return $pick.Asset
+        }
+    } finally { $dialog.Dispose() }
+    return $null
+}
+
+function Select-Uf2Disk {
+    if ($state.Process) { return }
+    $dialog = New-Object Windows.Forms.FolderBrowserDialog
+    try {
+        $dialog.Description = 'Выберите сам диск загрузчика UF2, например E:\'
+        $dialog.ShowNewFolderButton = $false
+        if ($dialog.ShowDialog($form) -ne 'OK') { return }
+        $state.PendingRoot = $dialog.SelectedPath
+        Start-Engine 'Uf2Info' 'nrf_flash.py' @('inspect',$state.PendingRoot)
+    } finally { $dialog.Dispose() }
+}
+
+function Start-Engine([string]$mode,[string]$scriptName,[string[]]$arguments) {
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $exe
-    $start.Arguments = (@('-X', 'utf8', '-u', (Join-Path $PSScriptRoot $scriptName)) + $arguments | ForEach-Object { Quote-Argument $_ }) -join ' '
+    $start.Arguments = (@('-X','utf8','-u',(Join-Path $appDirectory "engine\$scriptName")) + $arguments | ForEach-Object { Quote-Argument $_ }) -join ' '
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
@@ -232,29 +841,505 @@ function Start-Ota($mode) {
     $start.StandardErrorEncoding = [Text.Encoding]::UTF8
     $start.EnvironmentVariables['PYTHONIOENCODING'] = 'utf-8'
     $start.EnvironmentVariables['PYTHONUNBUFFERED'] = '1'
-    try {
-        $state.Process = [Diagnostics.Process]::Start($start)
-    } catch {
-        Show-Notice ('Не удалось запустить утилиту MeshCore. ' + $_.Exception.Message)
+    $start.EnvironmentVariables['OTA_APP_REPORT_PROGRESS'] = '1'
+    Start-EngineProcess $mode $start
+}
+
+function Start-EngineProcess([string]$mode, [Diagnostics.ProcessStartInfo]$start) {
+    $log.Clear()
+    $state.BluetoothErrorText = ''
+    $tips.SetToolTip($status, '')
+    Set-OperationProgress $operationTitles[$mode]
+    try { $state.Process = [Diagnostics.Process]::Start($start) }
+    catch {
+        Set-OperationProgress 'Не удалось начать операцию' -Failed
+        $status.Text = 'Не удалось запустить утилиту MeshCore.'
+        $log.AppendText($_.Exception.Message + $newline)
+        Save-OperationJournal $operationTitles[$mode] $status.Text $log.Text
+        Show-Notice ($status.Text + ' ' + $_.Exception.Message)
         return
     }
     $state.Mode = $mode
-    $state.Listing = ''
+    $state.Text = ''
     $state.Output = $state.Process.StandardOutput.ReadLineAsync()
     $state.Errors = $state.Process.StandardError.ReadLineAsync()
-    $controls | ForEach-Object { $_.Enabled = $false }
-    $log.Clear()
-    $status.Text = @{ NewNode = 'Прошивка и сброс данных узла…'; USBFlash = 'Установка через USB-загрузчик…'; List = 'Поиск устройств…'; Info = 'Чтение версии…'; Update = 'Идёт обновление…' }[$mode]
+    $status.Text = 'Подготовка…'
+    Set-Controls
     $timer.Start()
 }
 
-$timer.Add_Tick({
-    foreach ($stream in @('Output', 'Errors')) {
+function Get-DownloadDirectory {
+    $directory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'ota-app\Firmware'
+    $null = [IO.Directory]::CreateDirectory($directory)
+    return $directory
+}
+
+function Save-OperationJournal([string]$operation, [string]$result, [string]$transcript, [switch]$Quiet) {
+    if (!$saveJournal.Checked) { return }
+    try {
+        $locations = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders' -ErrorAction SilentlyContinue
+        $downloadKey = '{374DE290-123F-4565-9164-39C4925E467B}'
+        $configured = if ($locations) { $locations.$downloadKey } else { $null }
+        $directory = if ($configured) { [Environment]::ExpandEnvironmentVariables([string]$configured) } else {
+            Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads'
+        }
+        $null = [IO.Directory]::CreateDirectory($directory)
+        $now = [DateTime]::Now
+        $name = 'ota-app-' + $now.ToString('yyyyMMdd-HHmmss-fff') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,6) + '.txt'
+        $destination = Join-Path $directory $name
+        $heading = @('ota-app 1.3.2', $now.ToString('yyyy-MM-dd HH:mm:ss'), "$operation · $($method.Text)", $result, '')
+        [IO.File]::WriteAllText($destination, ($heading -join $newline) + $newline + $transcript.TrimEnd() + $newline, [Text.UTF8Encoding]::new($false))
+        if (!$Quiet) { $log.AppendText("Журнал сохранён в Загрузки · $name$newline") }
+    } catch {
+        $log.AppendText("Не удалось сохранить журнал в Загрузки · $($_.Exception.Message)$newline")
+    }
+}
+
+function Start-Library([string]$operation, [string[]]$arguments) {
+    if (!$state.Process) {
+        Start-Engine $operation 'firmware_library.py' (@('--directory',(Get-DownloadDirectory)) + $arguments)
+    }
+}
+
+$offline.Add_Click({
+    $device = if ($state.DeviceKey -eq (Get-ContextKey) -and -not $state.Drive -and $method.SelectedIndex -ne 3) {
+        $state.Device
+    } else { $null }
+    $nrfIds = @{'t-echo'=4; 'promicro'=5; 'heltec-t114'=7; 'heltec-t096'=9}
+    $slug = Get-Board
+    $boardId = if ($slug) { [int]$nrfIds[$slug] } else { 0 }
+    $formats = if ($state.Drive) { @('.uf2') } else { @(Get-Formats) }
+    $context = @{ device=$device; board=$boardId; formats=@($formats); usb=$method.SelectedIndex -eq 0 -and !$state.Drive }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $context -Depth 6 -Compress)))
+    Start-Library 'Library' @('list',$encoded)
+})
+
+function New-LibraryDialog([string]$title, [int]$width, [int]$height) {
+    $dialog = New-Object Windows.Forms.Form
+    $dialog.Text = $title
+    $dialog.Icon = $form.Icon
+    $dialog.Font = $form.Font
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.AutoScaleDimensions = [Drawing.SizeF]::new(96, 96)
+    $dialog.AutoScaleMode = 'Dpi'
+    $dialog.BackColor = $palette.Surface
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.ClientSize = [Drawing.Size]::new($width,$height)
+    $dialog.MinimizeBox = $false
+    $dialog.MaximizeBox = $false
+    $heading = Add-Control Label $title 18 12 ($width-36) 34 $dialog
+    $heading.Font = $sectionFont
+    $heading.ForeColor = $palette.Ink
+    return $dialog
+}
+
+function Show-Library($data) {
+    $items = @($data.files | Where-Object { $null -ne $_ })
+    $deltas = @($items | Where-Object format -eq '.mcfd')
+    $visible = @{ Rows = @() }
+    $dialog = New-LibraryDialog 'Офлайн-библиотека' 680 473
+    try {
+        $null = Add-Control Label "Сохранено $($data.total) · Доступно в этом режиме $($items.Count)" 18 52 644 24 $dialog
+        $note = if ($data.device) { $data.device } else { 'Проверьте устройство, чтобы подобрать прошивку по модели и сборке.' }
+        $details = Add-Control Label $note 18 80 644 36 $dialog
+        $details.ForeColor = $palette.Muted
+        $onlyDelta = Add-Control CheckBox "Только дельты .mcfd ($($deltas.Count))" 18 115 644 28 $dialog
+        $onlyDelta.Enabled = $deltas.Count -gt 0
+        $list = Add-Control ListBox '' 18 151 644 204 $dialog
+        $empty = if ($data.total) { 'Нет сохранённых прошивок для выбранного подключения.' } else {
+            'Скачайте набор заранее, чтобы прошивать без интернета.'
+        }
+        $fileDetails = Add-Control Label $empty 18 366 644 51 $dialog
+        $fileDetails.ForeColor = $palette.Muted
+        $use = Add-Control Button 'Выбрать' 502 422 160 35 $dialog 'Primary'
+        $use.DialogResult = 'OK'
+        $use.Enabled = $false
+        $download = Add-Control Button 'Скачать набор…' 18 422 178 35 $dialog
+        $download.DialogResult = 'Retry'
+        $close = Add-Control Button 'Закрыть' 386 422 108 35 $dialog 'Quiet'
+        $close.DialogResult = 'Cancel'
+        $dialog.CancelButton = $close
+        $list.Add_SelectedIndexChanged({
+            if ($list.SelectedIndex -lt 0) {
+                $use.Enabled = $false
+                $fileDetails.Text = $empty
+                return
+            }
+            $asset = $visible.Rows[$list.SelectedIndex]
+            $description = @($asset.name,"Выпуск $($asset.tag)")
+            if ($asset.issue) {
+                $prefix = if ($asset.enabled) { 'Только через USB-загрузчик · ' } else { '' }
+                $description += "$prefix$($asset.issue)"
+            }
+            $fileDetails.Text = $description -join $newline
+            $use.Enabled = $asset.enabled
+        })
+        $list.Add_DoubleClick({ if ($use.Enabled) { $use.PerformClick() } })
+        $refresh = {
+            $selected = if ($list.SelectedIndex -ge 0) { $visible.Rows[$list.SelectedIndex] } else { $null }
+            $visible.Rows = @(if ($onlyDelta.Checked) { $deltas } else { $items })
+            $list.BeginUpdate()
+            try {
+                $list.Items.Clear()
+                foreach ($asset in $visible.Rows) { $null = $list.Items.Add($asset.label) }
+                if ($visible.Rows.Count) {
+                    $list.SelectedIndex = [Math]::Max(0, [array]::IndexOf($visible.Rows, $selected))
+                }
+            } finally { $list.EndUpdate() }
+        }
+        $onlyDelta.Add_CheckedChanged($refresh)
+        & $refresh
+        $answer = $dialog.ShowDialog($form)
+        if ($answer -eq 'Retry') { return @{ download = $true } }
+        if ($answer -eq 'OK' -and $use.Enabled -and $list.SelectedIndex -ge 0) {
+            return @{ asset = $visible.Rows[$list.SelectedIndex] }
+        }
+    } finally { $dialog.Dispose() }
+}
+
+function Show-LibraryIndex($data) {
+    $versions = @($data.versions)
+    $boardIds = @(0) + @($data.boards.PSObject.Properties | Sort-Object Value | ForEach-Object { [int]$_.Name })
+    $roleIds = @(0,2,1)
+    $dialog = New-LibraryDialog 'Скачать набор' 560 333
+    try {
+        $null = Add-Control Label 'Выпуск' 18 52 524 22 $dialog
+        $version = Add-Control ComboBox '' 18 77 524 27 $dialog
+        $version.DropDownStyle = 'DropDownList'
+        foreach ($release in $versions) {
+            $suffix = if ($release.prerelease) { ' · предварительный' } else { '' }
+            $null = $version.Items.Add("$($release.tag)$suffix")
+        }
+        $null = Add-Control Label 'Модель' 18 118 524 22 $dialog
+        $boardPick = Add-Control ComboBox '' 18 143 524 27 $dialog
+        $boardPick.DropDownStyle = 'DropDownList'
+        $null = $boardPick.Items.Add('Все платы')
+        foreach ($id in $boardIds | Select-Object -Skip 1) {
+            $null = $boardPick.Items.Add($data.boards.PSObject.Properties["$id"].Value)
+        }
+        $null = Add-Control Label 'Роль' 18 184 524 22 $dialog
+        $rolePick = Add-Control ComboBox '' 18 209 524 27 $dialog
+        $rolePick.DropDownStyle = 'DropDownList'
+        $rolePick.Items.AddRange(@('Обе роли','Компаньон','Репитер'))
+        $summary = Add-Control Label '' 18 248 524 28 $dialog
+        $summary.ForeColor = $palette.Muted
+        $download = Add-Control Button 'Скачать' 377 282 165 35 $dialog 'Primary'
+        $download.DialogResult = 'OK'
+        $close = Add-Control Button 'Закрыть' 253 282 115 35 $dialog 'Quiet'
+        $close.DialogResult = 'Cancel'
+        $dialog.CancelButton = $close
+        $version.SelectedIndex = $boardPick.SelectedIndex = $rolePick.SelectedIndex = 0
+        $refresh = {
+            $boardId = $boardIds[$boardPick.SelectedIndex]
+            $roleId = $roleIds[$rolePick.SelectedIndex]
+            $files = @($versions[$version.SelectedIndex].assets | Where-Object {
+                (!$boardId -or $_.board -eq $boardId) -and (!$roleId -or $_.role -eq $roleId)
+            })
+            $download.Enabled = $files.Count -gt 0
+            $summary.Text = if ($files.Count) {
+                $size = ($files | Measure-Object size -Sum).Sum / 1MB
+                'Файлов: {0} · {1:N1} МиБ' -f $files.Count,$size
+            } else { 'Для выбранной модели и роли файлов нет.' }
+        }
+        foreach ($box in @($version,$boardPick,$rolePick)) { $box.Add_SelectedIndexChanged($refresh) }
+        & $refresh
+        if ($dialog.ShowDialog($form) -eq 'OK' -and $download.Enabled) {
+            return @($versions[$version.SelectedIndex].tag, $boardIds[$boardPick.SelectedIndex], $roleIds[$rolePick.SelectedIndex])
+        }
+    } finally { $dialog.Dispose() }
+}
+
+function Start-Catalog($arguments) {
+    if ($method.SelectedIndex -eq 3 -or (Uses-Uf2Drive)) {
+        if ($method.SelectedIndex -eq 0 -and -not $state.Drive) { Select-Uf2Disk; return }
+        $board = Get-Board
+        if (!$board) { Show-Notice 'Выберите точную модель платы.'; return }
+        $role = Select-DfuRole
+        if ($role) { Start-Engine 'Catalog' 'ota_app.py' @('--catalog','--uf2-board',$board,'--uf2-role',$role) }
+    } else {
+        Start-Engine 'Catalog' 'ota_app.py' ($arguments + '--catalog')
+    }
+}
+
+function Confirm-Flash([string]$text,[switch]$Warning) {
+    $icon = if ($Warning) { 'Warning' } else { 'Question' }
+    return [Windows.Forms.MessageBox]::Show($form,$text,$form.Text,'YesNo',$icon,'Button2') -eq 'Yes'
+}
+
+function Start-Ota([string]$mode) {
+    if ($state.Process) { return }
+    $transport = $method.SelectedIndex
+    if ($mode -eq 'List') {
+        switch ($transport) {
+            0 {
+                Set-OperationProgress ''
+                if (Uses-Uf2Drive) { $state.Drive = $null; $address.Text = '' }
+                if ((Get-FirmwareExtension) -eq '.uf2') { Set-Firmware '' }
+                Refresh-Ports -Force
+                $log.Lines = [string[]]@($address.Items)
+                $status.Text = "Найдено COM-портов: $($ports.Values.Count)."
+                Save-OperationJournal 'Поиск USB-устройств' $status.Text $log.Text
+            }
+            1 { Start-Engine 'List' 'ota_app.py' @('--scan-ble') }
+            3 { Start-Engine 'DfuList' 'nrf_flash.py' @('scan') }
+        }
+        return
+    }
+    $target = Get-Target
+    $drive = Uses-Uf2Drive
+    if ($mode -eq 'Info' -and $drive) { Select-Uf2Disk; return }
+    if ($mode -eq 'Catalog' -and ($transport -eq 3 -or $drive)) { Start-Catalog; return }
+    $flashing = $mode -in @('Update','USBFlash','NewNode','Export')
+    if ($flashing) {
+        if (!$firmware.Text) { $browse.PerformClick() }
+        if (!$firmware.Text) { return }
+        $extension = Get-FirmwareExtension
+        if ($extension -notin @(Get-Formats) -or -not (Test-Path -LiteralPath $firmware.Text -PathType Leaf)) {
+            Show-Notice 'Выберите существующий файл поддерживаемого формата.'
+            return
+        }
+        $fileName = [IO.Path]::GetFileName($firmware.Text)
+        $merged = $fileName -like '*-merged.bin'
+        $direct = $merged -or $fileName -like 'Heltec_v3_*.bin'
+        if ($direct -and $mode -eq 'Update') {
+            Show-Notice 'Для этого образа ESP выберите USB и нажмите «Прошить через USB».'
+            return
+        }
+        if ($direct -and -not $merged -and $mode -eq 'NewNode') {
+            Show-Notice 'Для полной очистки Heltec V3 выберите *-merged.bin для своей модели.'
+            return
+        }
+    }
+    if ($mode -eq 'Export') {
+        $dialog = New-Object Windows.Forms.SaveFileDialog
+        try {
+            $dialog.Filter = 'Пакет DFU (*.zip)|*.zip'
+            $dialog.FileName = [IO.Path]::GetFileNameWithoutExtension($fileName)+'-dfu.zip'
+            if ($dialog.ShowDialog($form) -eq 'OK') {
+                Start-Engine 'Export' 'nrf_flash.py' @('export',$firmware.Text,$dialog.FileName)
+            }
+        } finally { $dialog.Dispose() }
+        return
+    }
+    if ($mode -eq 'Update' -and $extension -eq '.uf2') {
+        if ($transport -eq 0 -and -not $state.Drive) { Select-Uf2Disk; return }
+        $board = Get-Board
+        if (!$board) { Show-Notice 'Выберите точную модель платы.'; return }
+        if ($transport -eq 3 -and $target -notmatch '^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$') {
+            Show-Notice 'Найдите и выберите загрузчик.'
+            return
+        }
+        $destination = if ($transport -eq 3) { $target } else { $state.Drive.root }
+        if (-not (Confirm-Flash ("Установить $fileName на $($destination)?" + $newline + $newline + "Сверьте модель и роль файла."))) { return }
+        if ($transport -eq 3) {
+            Start-Engine 'DfuWrite' 'nrf_flash.py' @('dfu',$target,$firmware.Text,$board)
+        } else {
+            Start-Engine 'Uf2Write' 'nrf_flash.py' @('write',$firmware.Text,$destination,'--board',$board)
+        }
+        return
+    }
+    $patterns = @('^COM[0-9]+$','^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$','^(?:[a-z0-9][a-z0-9.-]*|\[[a-f0-9:]+\]):[0-9]{1,5}$')
+    if ($transport -gt 2 -or $target -notmatch $patterns[$transport]) {
+        Show-Notice ('Проверьте адрес подключения. ' + $addressLabel.Text)
+        return
+    }
+    if ($mode -in @('USBFlash','NewNode')) {
+        if ($transport -ne 0 -or $extension -notin @('.mcfw','.bin')) { Show-Notice 'Для загрузчика ESP выберите полный образ .mcfw или .bin.'; return }
+        $message = "Установить $fileName на устройство $target через загрузчик ESP?" + $newline + $newline + 'Сверьте модель и роль. Оставьте USB подключённым до конца записи.'
+        $arguments = @('--port',$target,$firmware.Text)
+        if ($merged) {
+            $message += $newline + $newline + 'Образ содержит загрузчик и таблицу разделов и перезапишет данные в занимаемой области флеш-памяти.'
+        }
+        if ($mode -eq 'NewNode' -and $extension -eq '.mcfw') {
+            $header = New-Object byte[] 7
+            $models = @{1='Heltec V4';2='Heltec V3';3='Seeed XIAO ESP32-C6';6='Heltec Wireless Paper';8='LilyGO T3-S3'}
+            $roles = @{1='Репитер';2='Компаньон'}
+            try {
+                $stream = [IO.File]::OpenRead($firmware.Text)
+                try { $count = $stream.Read($header,0,$header.Length) } finally { $stream.Dispose() }
+            } catch { Show-Notice 'Не удалось прочитать файл .mcfw.'; return }
+            $espModel = $models[[int]$header[5]]
+            $espRole = $roles[[int]$header[6]]
+            if ($count -ne 7 -or [Text.Encoding]::ASCII.GetString($header,0,4) -cne 'MCFW' -or $header[4] -ne 1 -or !$espModel -or !$espRole) {
+                Show-Notice 'Нужен файл .mcfw для поддерживаемой ESP-платы.'
+                return
+            }
+            $message += $newline + $newline + "$espModel · $espRole. Сверьте маркировку платы."
+            $message += $newline + $newline + 'Вся флеш-память будет очищена. Ключ, настройки и данные будут удалены.'
+            $arguments += '--factory'
+        } elseif ($mode -eq 'NewNode') {
+            $message += $newline + $newline + $(if ($merged) {
+                'Вся флеш-память будет очищена перед записью. Настройки и данные будут удалены.'
+            } else { 'Будут удалены прежний ключ, настройки, контакты, каналы и сопряжения обеих ролей.' })
+            $arguments += '--new-node'
+        }
+        if (Confirm-Flash $message -Warning) { Start-Engine $mode 'usb_flash.py' $arguments }
+        return
+    }
+    $arguments = @(@('--port','--ble','--tcp')[$transport],$target)
+    if ($transport -eq 1 -and $pin.Text) {
+        if ($pin.Text -notmatch '^[0-9]{6}$') { Show-Notice 'Введите шестизначный PIN.'; return }
+        $arguments += @('--pin',$pin.Text)
+    }
+    switch ($mode) {
+        'Info' { Start-Engine 'Info' 'ota_app.py' ($arguments + '--device-json') }
+        'Catalog' { Start-Catalog $arguments }
+        'Update' {
+            if (Confirm-Flash ("Обновить устройство $target файлом $fileName?" + $newline + $newline + 'Оставьте плату подключённой до окончания записи.')) {
+                Start-Engine 'Update' 'ota_app.py' ($arguments + $firmware.Text)
+            }
+        }
+    }
+}
+
+
+function Finish-Engine([int]$exitCode) {
+    if ($exitCode -ne 0) {
+        $status.Text = if ($state.BluetoothErrorText) { $state.BluetoothErrorText } else {
+            "Ошибка операции (код $exitCode). Подробности в журнале."
+        }
+        $tips.SetToolTip($status,$status.Text)
+        if ($state.Mode -in @('List','DfuList') -and $state.BluetoothErrorText) { Show-Notice $state.BluetoothErrorText }
+        return
+    }
+    switch ($state.Mode) {
+        'Info' {
+            $state.Device = ConvertFrom-Json $state.Text
+            $state.DeviceKey = Get-ContextKey
+            $log.AppendText(($state.Device.summary -replace '\r?\n',$newline) + $newline)
+            $status.Text = 'Сведения об устройстве прочитаны.'
+        }
+        'Catalog' {
+            $data = ConvertFrom-Json $state.Text
+            if ($data.device.summary) {
+                $state.Device = $data.device
+                $state.DeviceKey = Get-ContextKey
+            }
+            $status.Text = 'Каталог выпусков загружен.'
+            Set-Controls
+            $asset = Show-Catalog $data
+            if ($asset) {
+                $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $asset -Depth 6 -Compress)))
+                Start-Engine 'Download' 'ota_app.py' @('--download-release',$encoded,'--download-dir',(Get-DownloadDirectory))
+            }
+        }
+        'Download' {
+            $data = ConvertFrom-Json $state.Text
+            Set-Firmware $data.path
+            $status.Text = 'Файл GitHub загружен и выбран.'
+            $log.AppendText($status.Text + $newline)
+        }
+        'Library' {
+            $status.Text = 'Сохранённые прошивки прочитаны.'
+            Set-Controls
+            $selection = Show-Library (ConvertFrom-Json $state.Text)
+            if ($selection.download) { Start-Library 'LibraryIndex' @('index') }
+            elseif ($selection.asset) { Start-Library 'LibraryCheck' @('check',$selection.asset.path,$selection.asset.digest) }
+        }
+        'LibraryIndex' {
+            $status.Text = 'Список выпусков загружен.'
+            Set-Controls
+            $selection = @(Show-LibraryIndex (ConvertFrom-Json $state.Text))
+            if ($selection.Count -eq 3) { Start-Library 'LibrarySync' (@('sync') + $selection) }
+        }
+        'LibrarySync' {
+            $result = ConvertFrom-Json $state.Text
+            $status.Text = "Скачано: $($result.downloaded). Уже в библиотеке: $($result.existing)."
+            $log.AppendText($status.Text + $newline)
+        }
+        'LibraryCheck' {
+            $data = ConvertFrom-Json $state.Text
+            Set-Firmware $data.path
+            $status.Text = 'Выбрана сохранённая прошивка.'
+        }
+        'Uf2Info' {
+            $state.Drive = ConvertFrom-Json $state.Text
+            if ($state.Drive.PSObject.Properties['root']) { $state.Drive.root = $state.PendingRoot }
+            else { $state.Drive | Add-Member -NotePropertyName root -NotePropertyValue $state.PendingRoot }
+            if ($state.Drive.board -in $boards.Values) { $model.SelectedIndex = [array]::IndexOf(@($boards.Values),$state.Drive.board) }
+            $address.Items.Clear()
+            $address.Text = $state.Drive.root
+            $addressLabel.Text = 'Выбран диск загрузчика UF2.'
+            if ((Get-FirmwareExtension) -ne '.uf2') { $firmware.Clear() }
+            $status.Text = 'Диск UF2 проверен.'
+            $log.AppendText("$($state.Drive.model) · UF2 $($state.Drive.version)" + $newline)
+        }
+        'DfuList' {
+            $state.DfuDevices = @{}
+            $address.Items.Clear()
+            $address.Text = ''
+            $model.SelectedIndex = 0
+            foreach ($device in (ConvertFrom-Json $state.Text)) {
+                if (!$device -or !$device.address) { continue }
+                $state.DfuDevices[$device.address] = $device
+                $label = "$($device.name) ($($device.address))"
+                $null = $address.Items.Add($label)
+                $log.AppendText($label + $newline)
+            }
+            if ($address.Items.Count -eq 1) { $address.SelectedIndex = 0 }
+            $status.Text = "Найдено загрузчиков: $($address.Items.Count)."
+        }
+        'List' {
+            $address.Items.Clear()
+            foreach ($item in [regex]::Matches($state.Text,'(?im)^\s*((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\s+(.+?)\s+RSSI\s+[-0-9]+\s*$')) {
+                $null = $address.Items.Add("$($item.Groups[2].Value) ($($item.Groups[1].Value))")
+            }
+            if ($address.Items.Count -eq 1) { $address.SelectedIndex = 0 }
+            $status.Text = "Найдено устройств Bluetooth: $($address.Items.Count)."
+        }
+        'Export' { $status.Text = 'DFU-пакет сохранён.' }
+        default {
+            $state.Device = $null
+            if ($state.Mode -eq 'Uf2Write') { $state.Drive = $null; $address.Text = '' }
+            Set-Firmware ''
+            $status.Text = 'Утилита завершила запись. Дождитесь перезагрузки платы.'
+        }
+    }
+}
+
+$timer = New-Object Windows.Forms.Timer
+$timer.Interval = 80
+$portTimer = New-Object Windows.Forms.Timer
+$portTimer.Interval = 1000
+$portTimer.Add_Tick({ if (-not $state.Process) { Refresh-Ports } })
+
+function Receive-EngineLine([string]$stream, [string]$line) {
+    if ($stream -eq 'Errors' -and $line.StartsWith('Bluetooth. ', [StringComparison]::Ordinal)) {
+        $state.BluetoothErrorText = $line
+    }
+    if ($line.StartsWith('OTA_PROGRESS ', [StringComparison]::Ordinal)) {
+        if ($state.Mode -in $transferModes -and $line -cmatch '\AOTA_PROGRESS ([0-9]{1,19}) ([0-9]{1,19})\z') {
+            $current = [uint64]$Matches[1]
+            $total = [uint64]$Matches[2]
+            if ($total -gt 0 -and $current -le $total) {
+                $percent = [int][Math]::Min(99, [Math]::Floor(100.0 * $current / $total))
+                $title = $operationTitles[$state.Mode]
+                if ($current -eq $total) {
+                    $title = if ($state.Mode -in @('Download','LibrarySync')) { 'Проверка загрузки' } else { 'Ожидание подтверждения записи' }
+                }
+                if ($percent -gt $state.ProgressPercent -or ($percent -eq $state.ProgressPercent -and $current -eq $total -and $title -ne $state.ProgressTitle)) {
+                    Set-OperationProgress $title $percent
+                }
+            }
+        }
+        return
+    }
+    if ($stream -eq 'Output' -and ($state.Mode -in $structuredModes -or $state.Mode -eq 'List')) {
+        $state.Text += $line + $newline
+    }
+    if ($stream -eq 'Errors' -or $state.Mode -notin $structuredModes) {
+        $log.AppendText($line + $newline)
+        if ($line.Trim()) { $status.Text = $line.Trim() }
+    }
+}
+
+function Receive-EngineOutput {
+    if (!$state.Process) { return }
+    foreach ($stream in @('Output','Errors')) {
         for ($i = 0; $i -lt 150 -and $state[$stream] -and $state[$stream].IsCompleted; $i++) {
             $line = $state[$stream].GetAwaiter().GetResult()
             if ($null -eq $line) { $state[$stream] = $null; break }
-            $log.AppendText($line + [Environment]::NewLine)
-            if ($state.Mode -eq 'List' -and $stream -eq 'Output') { $state.Listing += $line + "`n" }
+            Receive-EngineLine $stream $line
             $reader = if ($stream -eq 'Output') { $state.Process.StandardOutput } else { $state.Process.StandardError }
             $state[$stream] = $reader.ReadLineAsync()
         }
@@ -264,62 +1349,191 @@ $timer.Add_Tick({
     $exitCode = $state.Process.ExitCode
     $state.Process.Dispose()
     $state.Process = $null
-    $controls | ForEach-Object { $_.Enabled = $true }
-    $usbFlash.Enabled = $method.SelectedIndex -eq 0
-    $newNode.Enabled = $usbFlash.Enabled
-    $pin.Enabled = $method.SelectedIndex -eq 1
-
-    if ($exitCode -ne 0) {
-        $status.Text = "Операция завершилась с ошибкой (код $exitCode). Подробности в журнале."
-    } elseif ($state.Mode -eq 'List') {
-        $status.Text = 'Поиск завершён. Адреса устройств указаны в журнале.'
-        $pattern = if ($method.SelectedIndex -eq 0) { '\bCOM[0-9]+\b' } elseif ($method.SelectedIndex -eq 1) { '(?:[0-9a-f]{2}:){5}[0-9a-f]{2}' }
-        if ($pattern) {
-            $matchesFound = @([regex]::Matches($state.Listing, $pattern, 'IgnoreCase') | ForEach-Object Value | Sort-Object -Unique)
-            if ($method.SelectedIndex -eq 1) {
-                $previous = $address.Text
-                $address.Items.Clear()
-                $address.Items.AddRange([object[]]$matchesFound)
-                $address.Text = $previous
-            } else { Refresh-Ports }
-            if ($matchesFound.Count -eq 1 -and -not $address.Text) { $address.Text = $matchesFound[0] }
+    $mode = $state.Mode
+    $transcript = $log.Text
+    $result = if ($exitCode -eq 0) { 'Операция завершена.' } else { "Ошибка операции (код $exitCode)." }
+    $transfer = $mode -in $transferModes
+    try {
+        if ($exitCode -ne 0) { Set-OperationProgress 'Операция прервана' $state.ProgressPercent -Failed }
+        elseif (-not $transfer) { Set-OperationProgress '' }
+        Finish-Engine $exitCode
+        if ($exitCode -eq 0 -and $transfer) {
+            $title = if ($mode -in @('Download','LibrarySync')) { 'Загрузка завершена' } else { 'Запись завершена' }
+            Set-OperationProgress $title 100
         }
-    } else {
-        $status.Text = if ($state.Mode -eq 'Info') { 'Версия устройства указана в журнале.' } else { 'Утилита завершила обновление. Результат указан в журнале.' }
     }
-})
+    catch {
+        $log.AppendText($_.Exception.Message + $newline)
+        $status.Text = 'Ошибка обработки результата. Подробности в журнале.'
+        $result = $status.Text
+        Set-OperationProgress 'Операция прервана' $state.ProgressPercent -Failed
+    }
+    if (!$state.Process) { $transcript = $log.Text }
+    Save-OperationJournal $operationTitles[$mode] $result $transcript -Quiet:($null -ne $state.Process)
+    Set-Controls
+}
+$timer.Add_Tick({ Receive-EngineOutput })
 
 $newNode.Add_Click({ Start-Ota 'NewNode' })
 $usbFlash.Add_Click({ Start-Ota 'USBFlash' })
 $find.Add_Click({ Start-Ota 'List' })
 $info.Add_Click({ Start-Ota 'Info' })
 $update.Add_Click({ Start-Ota 'Update' })
+$catalog.Add_Click({ Start-Ota 'Catalog' })
+$exportDfu.Add_Click({ Start-Ota 'Export' })
+$diskButton.Add_Click({ Select-Uf2Disk })
 $form.Add_FormClosing({
-    param($sender, $eventArgs)
+    param($sender,$eventArgs)
     if ($state.Process) {
         $eventArgs.Cancel = $true
         Show-Notice 'Дождитесь завершения текущей операции.'
     }
 })
 
-if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
-    Show-Notice 'Поместите engine\python.exe в папку рядом с интерфейсом.'
-} else {
-    $portTimer.Start()
-    $null = $form.ShowDialog()
+function Start-ProgressFixture([string]$mode, [string[]]$lines) {
+    $fixture = [Diagnostics.ProcessStartInfo]::new($exe)
+    $fixture.Arguments = '-X utf8 -u -c ' + (Quote-Argument ($lines -join "`n"))
+    $fixture.UseShellExecute = $false
+    $fixture.CreateNoWindow = $true
+    $fixture.RedirectStandardInput = $true
+    $fixture.RedirectStandardOutput = $true
+    $fixture.RedirectStandardError = $true
+    $fixture.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $fixture.StandardErrorEncoding = [Text.Encoding]::UTF8
+    Start-EngineProcess $mode $fixture
 }
-$portTimer.Dispose()
-$tips.Dispose()
-$timer.Dispose()
-$form.Dispose()
 
+function Wait-ProgressFixture([scriptblock]$condition, [string]$failure) {
+    $wait = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        Receive-EngineOutput
+        if (& $condition) { return }
+        [Threading.Thread]::Sleep(15)
+    } while ($wait.Elapsed.TotalSeconds -lt 8)
+    throw $failure
+}
 
+function Test-OperationProgress {
+    try {
+        Start-ProgressFixture 'Download' @('import json',
+            'print("OTA_PROGRESS 0 100"); input()',
+            'print("OTA_PROGRESS 25 100"); input()',
+            'print("OTA_PROGRESS 100 100"); input()',
+            'print(json.dumps({"path": "smoke.uf2"}))')
+        if ($state.ProgressPercent -ne -1 -or $progressFill.Width -ne 0) { throw 'Unknown transfer must start with an empty track' }
+        Wait-ProgressFixture { $state.ProgressPercent -eq 0 } 'No progress after the start of download'
+        $state.Process.StandardInput.WriteLine('continue')
+        Wait-ProgressFixture { $progressValue.Text -eq '25%' } 'No progress after receiving a quarter of the download'
+        if ($progressFill.Width -ne [Math]::Round($track.ClientSize.Width / 4) -or $state.JournalOpen) { throw 'Progress fill must reflect the amount transferred with the journal closed' }
+        $state.Process.StandardInput.WriteLine('continue')
+        Wait-ProgressFixture { $state.ProgressPercent -eq 99 } 'Unverified transfer reached 100% or stopped updating'
+        $state.Process.StandardInput.WriteLine('continue')
+        Wait-ProgressFixture { !$state.Process } 'Transfer did not finish'
+        if ($progressValue.Text -ne '100%' -or $firmware.Text -ne 'smoke.uf2' -or $log.Text -match 'OTA_PROGRESS') { throw 'Successful download or progress filtering failed' }
 
+        Start-ProgressFixture 'DfuWrite' @('import sys', 'print("OTA_PROGRESS 100 100")', 'print("bad write", file=sys.stderr)', 'sys.exit(1)')
+        Wait-ProgressFixture { !$state.Process } 'Failed flash did not finish'
+        if ($state.ProgressPercent -ne 99 -or $progressValue.ForeColor -ne $palette.Error -or $log.Text -notmatch 'bad write' -or $log.Text -match 'OTA_PROGRESS') { throw 'Failure must retain the reported position and show the error' }
 
+        Start-ProgressFixture 'Info' @('import json', 'print("OTA_PROGRESS 100 100")', 'print(json.dumps({"summary": "Test device"}))')
+        if ($state.ProgressPercent -ne -1) { throw 'Checking a device inherited previous write progress' }
+        Wait-ProgressFixture { !$state.Process } 'Device info did not finish'
+        if ($state.Device.summary -ne 'Test device' -or $state.ProgressTitle -or $log.Text -match 'OTA_PROGRESS') { throw 'Info must preserve its data and clear the progress area' }
 
+        Start-ProgressFixture 'Info' @('import sys', 'print("Bluetooth. Не удалось включить уведомления от платы.", file=sys.stderr)', 'print("Введите PIN с экрана платы.", file=sys.stderr)', 'sys.exit(1)')
+        Wait-ProgressFixture { !$state.Process } 'Bluetooth error did not finish'
+        if ($status.Text -notlike 'Bluetooth. *уведомления*' -or $log.Text -notlike '*Введите PIN*') {
+            throw 'The Bluetooth failure and its instruction must be shown.'
+        }
 
+        Start-ProgressFixture 'List' @('print("02:00:00:12:34:56 Test device RSSI -45")')
+        Wait-ProgressFixture { !$state.Process } 'Device discovery did not finish'
+        if ($address.Items.Count -ne 1 -or $state.ProgressTitle) { throw 'Discovery must preserve its results and clear the progress area' }
+    } finally {
+        if ($state.Process) {
+            $timer.Stop()
+            if (!$state.Process.HasExited) { $state.Process.Kill() }
+            $state.Process.Dispose()
+            $state.Process = $null
+        }
+    }
+}
 
-
-
-
-
+try {
+    if ($SmokeTest -or $PreviewPath) {
+        if ($method.Items.Count -ne 4 -or $form.Icon -eq $null) { throw 'Windows UI failed to initialize' }
+        $firmware.Text = 'test.bin'
+        $method.SelectedIndex = 2
+        $address.Text = '192.168.1.50'
+        if ($firmware.Text -or '.bin' -in @(Get-Formats) -or (Get-Target) -ne '192.168.1.50:5000') { throw 'TCP firmware selection failed' }
+        $method.SelectedIndex = 3
+        if ($update.Text -ne 'Начать' -or '.uf2' -notin @(Get-Formats)) { throw 'DFU mode failed' }
+        $state.Mode = 'DfuList'
+        $state.Text = '[{"name":"HT-n5262-OTA","address":"02:00:00:12:34:56","board":"heltec-t114"}]'
+        Finish-Engine 0
+        if ((Get-Board) -ne 'heltec-t114' -or (Get-Target) -ne '02:00:00:12:34:56') { throw 'DFU selection failed' }
+        $clientSize = $form.ClientSize
+        Switch-Journal
+        if (!$state.JournalOpen -or $journalToggle.Text -ne 'Свернуть') { throw 'Journal expansion failed' }
+        $logHeight = $log.Height
+        Resize-Journal 490
+        if ($log.Height -le $logHeight -or $viewport.Height -lt 65 -or $form.ClientSize -ne $clientSize) {
+            throw 'The journal must grow within the current window.'
+        }
+        Switch-Journal
+        if ($state.JournalOpen -or $journalToggle.Text -ne 'Развернуть' -or $form.ClientSize -ne $clientSize) { throw 'Journal collapse failed' }
+        Resize-Journal 300
+        Resize-Journal 66
+        if ($state.JournalOpen -or $log.Visible -or $drawerRow.Height -gt [Math]::Round(66 * $form.DeviceDpi / 96)) {
+            throw 'Dragging down must collapse the journal.'
+        }
+        $form.ClientSize = [Drawing.Size]::new(668, 470)
+        Set-OperationProgress 'Обновление прошивки' 25
+        $shell.PerformLayout()
+        $connection.PerformLayout()
+        if ($address.Right -gt $connection.ClientSize.Width -or $info.Left -lt $help.Right -or $fileField.Right -gt $clearFile.Left -or
+            $progressArea.Right -gt $journal.ClientSize.Width -or $progressFill.Width -ne [Math]::Round($track.ClientSize.Width / 4)) {
+            throw 'Windows controls overlap at minimum width.'
+        }
+        $form.ClientSize = $clientSize
+        if ($SmokeTest -and !(Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Missing Windows engine' }
+        if ($SmokeTest) { Test-OperationProgress }
+        if ($PreviewPath) {
+            $method.SelectedIndex = 2
+            $address.Text = '192.168.1.50:5000'
+            $state.DeviceKey = Get-ContextKey
+            $state.Device = @{ summary = 'Heltec V4.3 OLED · v1.18.0-rs' + $newline + 'Сборка №192 · Компаньон · слот 4032 КиБ' }
+            $firmware.Text = 'heltec-v4-companion-0.9.0-dev.22-r194.from-r192.mcfd'
+            Set-Controls
+            Set-OperationProgress 'Обновление прошивки' 70
+            $status.Text = 'Передано 17 из 24 КиБ.'
+            $form.StartPosition = 'Manual'
+            $form.Location = [Drawing.Point]::new(-20000, -20000)
+            $form.ShowInTaskbar = $false
+            $form.Opacity = 0
+            $form.Show()
+            [Windows.Forms.Application]::DoEvents()
+            $image = [Drawing.Bitmap]::new($form.Width, $form.Height)
+            try {
+                $form.DrawToBitmap($image, [Drawing.Rectangle]::new(0, 0, $image.Width, $image.Height))
+                $image.Save([IO.Path]::GetFullPath($PreviewPath), [Drawing.Imaging.ImageFormat]::Png)
+            } finally {
+                $image.Dispose()
+                $form.Hide()
+            }
+        }
+        Write-Output 'Windows UI smoke passed'
+    } elseif (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        Show-Notice 'Поместите engine\python.exe в папку рядом с интерфейсом.'
+    } else {
+        $portTimer.Start()
+        $null = $form.ShowDialog()
+    }
+} finally {
+    $portTimer.Dispose()
+    $tips.Dispose()
+    $timer.Dispose()
+    $brandIcon.Image.Dispose()
+    $form.Dispose()
+    foreach ($font in @($sectionFont, $buttonFont, $smallFont, $titleFont, $logFont)) { $font.Dispose() }
+}

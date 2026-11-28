@@ -1,0 +1,15 @@
+<resources>
+    <color name="screen">#EDF4F1</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="brand">#103C34</color>
+    <color name="brand_subtitle">#B8D7CF</color>
+    <color name="ink">#192F29</color>
+    <color name="muted">#4F645E</color>
+    <color name="stroke">#D6E3DE</color>
+    <color name="field">#F6F9F7</color>
+    <color name="accent">#006853</color>
+    <color name="accent_light">#DFEFE9</color>
+    <color name="disabled_fill">#E8EEEB</color>
+    <color name="disabled_ink">#65756F</color>
+    <color name="danger">#9B3527</color>
+</resources>
