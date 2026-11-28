@@ -400,6 +400,7 @@ pub async fn run(spawner: Spawner, chip: Chip, parts: Parts, spec: &'static Spec
         seed[0] ^= 0x5A; // its own random stream
         let mut room = start_room(&store, &mesh, &entropy, seed);
         room.begin(now_ms());
+        mesh.share_tx_budget_with_room(&mut room);
         room.app.start(&mut room.ctx);
         room
     });
