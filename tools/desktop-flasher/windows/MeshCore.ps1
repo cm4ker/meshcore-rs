@@ -277,7 +277,9 @@ $status.Anchor = 'Top, Left, Right'
 $status.TextAlign = 'MiddleLeft'
 $status.ForeColor = $palette.Muted
 $status.AutoEllipsis = $true
-$log = Add-Control TextBox '' 20 64 780 130 $journal
+$saveJournal = Add-Control CheckBox 'Сохранять журнал в Загрузки' 20 60 315 25 $journal
+$saveJournal.Visible = $false
+$log = Add-Control TextBox '' 20 88 780 130 $journal
 $log.Multiline = $true
 $log.ReadOnly = $true
 $log.ScrollBars = 'Both'
@@ -475,9 +477,11 @@ function Set-JournalLayout {
     $journalHeading.Top = [Math]::Round((26 + $offset) * $scale)
     $status.Top = $journalHeading.Top
     $journalToggle.Top = [Math]::Round((23 + $offset) * $scale)
-    $log.Top = [Math]::Round((64 + $offset) * $scale)
+    $saveJournal.Top = [Math]::Round((60 + $offset) * $scale)
+    $log.Top = [Math]::Round((88 + $offset) * $scale)
     $drawerRow.Height = [Math]::Round(($height + $offset) * $scale)
     $log.Visible = $state.JournalOpen
+    $saveJournal.Visible = $state.JournalOpen
     $journalToggle.Text = if ($state.JournalOpen) { 'Свернуть' } else { 'Развернуть' }
     $shell.PerformLayout()
     $log.Height = [Math]::Max(1, $journal.ClientSize.Height - $log.Top - $log.Left / 2)
@@ -851,6 +855,7 @@ function Start-EngineProcess([string]$mode, [Diagnostics.ProcessStartInfo]$start
         Set-OperationProgress 'Не удалось начать операцию' -Failed
         $status.Text = 'Не удалось запустить утилиту MeshCore.'
         $log.AppendText($_.Exception.Message + $newline)
+        Save-OperationJournal $operationTitles[$mode] $status.Text $log.Text
         Show-Notice ($status.Text + ' ' + $_.Exception.Message)
         return
     }
@@ -867,6 +872,27 @@ function Get-DownloadDirectory {
     $directory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'ota-app\Firmware'
     $null = [IO.Directory]::CreateDirectory($directory)
     return $directory
+}
+
+function Save-OperationJournal([string]$operation, [string]$result, [string]$transcript, [switch]$Quiet) {
+    if (!$saveJournal.Checked) { return }
+    try {
+        $locations = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders' -ErrorAction SilentlyContinue
+        $downloadKey = '{374DE290-123F-4565-9164-39C4925E467B}'
+        $configured = if ($locations) { $locations.$downloadKey } else { $null }
+        $directory = if ($configured) { [Environment]::ExpandEnvironmentVariables([string]$configured) } else {
+            Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads'
+        }
+        $null = [IO.Directory]::CreateDirectory($directory)
+        $now = [DateTime]::Now
+        $name = 'ota-app-' + $now.ToString('yyyyMMdd-HHmmss-fff') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,6) + '.txt'
+        $destination = Join-Path $directory $name
+        $heading = @('ota-app 1.3.2', $now.ToString('yyyy-MM-dd HH:mm:ss'), "$operation · $($method.Text)", $result, '')
+        [IO.File]::WriteAllText($destination, ($heading -join $newline) + $newline + $transcript.TrimEnd() + $newline, [Text.UTF8Encoding]::new($false))
+        if (!$Quiet) { $log.AppendText("Журнал сохранён в Загрузки · $name$newline") }
+    } catch {
+        $log.AppendText("Не удалось сохранить журнал в Загрузки · $($_.Exception.Message)$newline")
+    }
 }
 
 function Start-Library([string]$operation, [string[]]$arguments) {
@@ -1052,6 +1078,7 @@ function Start-Ota([string]$mode) {
                 Refresh-Ports -Force
                 $log.Lines = [string[]]@($address.Items)
                 $status.Text = "Найдено COM-портов: $($ports.Values.Count)."
+                Save-OperationJournal 'Поиск USB-устройств' $status.Text $log.Text
             }
             1 { Start-Engine 'List' 'ota_app.py' @('--scan-ble') }
             3 { Start-Engine 'DfuList' 'nrf_flash.py' @('scan') }
@@ -1323,6 +1350,8 @@ function Receive-EngineOutput {
     $state.Process.Dispose()
     $state.Process = $null
     $mode = $state.Mode
+    $transcript = $log.Text
+    $result = if ($exitCode -eq 0) { 'Операция завершена.' } else { "Ошибка операции (код $exitCode)." }
     $transfer = $mode -in $transferModes
     try {
         if ($exitCode -ne 0) { Set-OperationProgress 'Операция прервана' $state.ProgressPercent -Failed }
@@ -1336,8 +1365,11 @@ function Receive-EngineOutput {
     catch {
         $log.AppendText($_.Exception.Message + $newline)
         $status.Text = 'Ошибка обработки результата. Подробности в журнале.'
+        $result = $status.Text
         Set-OperationProgress 'Операция прервана' $state.ProgressPercent -Failed
     }
+    if (!$state.Process) { $transcript = $log.Text }
+    Save-OperationJournal $operationTitles[$mode] $result $transcript -Quiet:($null -ne $state.Process)
     Set-Controls
 }
 $timer.Add_Tick({ Receive-EngineOutput })

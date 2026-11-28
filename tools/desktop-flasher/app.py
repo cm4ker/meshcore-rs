@@ -17,6 +17,7 @@ from serial.tools import list_ports
 import firmware_catalog
 import firmware_library
 import nrf_flash
+import operation_log
 import ota_app
 import usb_flash
 from ble_scan import BluetoothScanUnavailable, discover_ble
@@ -100,6 +101,7 @@ class Appearance:
         self.style.configure("RecommendTitle.TLabel", background=ACCENT_LIGHT, foreground=ACCENT, font=self.strong)
         self.style.configure("RecommendBuild.TLabel", background=ACCENT_LIGHT, foreground=INK, font=self.section)
         self.style.configure("ProgressPercent.TLabel", background=PANEL, foreground=ACCENT, font=self.strong)
+        self.style.configure("Surface.TCheckbutton", background=PANEL, foreground=INK)
 
         self.style.configure("Card.TFrame", background=PANEL, bordercolor=BORDER, borderwidth=1, relief="solid")
         self.style.configure("Recommendation.TFrame", background=ACCENT_LIGHT, bordercolor=ACCENT,
@@ -328,7 +330,12 @@ class Flasher:
         journal_header.columnconfigure(0, weight=1)
         ttk.Label(journal_header, text="Журнал", style="FieldTitle.TLabel").grid(row=0, column=0, sticky="w")
         self.toggle = ttk.Button(journal_header, text="Развернуть", style="Link.TButton", command=self.toggle_journal)
-        self.toggle.grid(row=0, column=1, sticky="e")
+        self.toggle.grid(row=0, column=2, sticky="e")
+        self.save_logs = tk.BooleanVar(value=False)
+        self.save_logs_check = ttk.Checkbutton(journal_header, text="Сохранять журнал в Загрузки",
+                                             variable=self.save_logs, style="Surface.TCheckbutton")
+        self.save_logs_check.grid(row=0, column=1, sticky="e", padx=(px(6), px(12)))
+        self.save_logs_check.grid_remove()
         self.log_area = ttk.Frame(journal, style="Field.TFrame")
         self.log_area.grid(row=4, column=0, sticky="ew", pady=(px(6), 0))
         self.log_area.columnconfigure(0, weight=1)
@@ -440,6 +447,7 @@ class Flasher:
     def toggle_journal(self):
         self.journal_open = not self.journal_open
         if self.journal_open:
+            self.save_logs_check.grid()
             self.log_area.grid()
             self.log.see("end")
         else:
@@ -447,6 +455,7 @@ class Flasher:
             if focused and str(focused).startswith(str(self.log_area) + "."):
                 self.toggle.focus_set()
             self.log_area.grid_remove()
+            self.save_logs_check.grid_remove()
         self.toggle.configure(text="Свернуть" if self.journal_open else "Развернуть")
         self.update_preview()
 
@@ -621,6 +630,7 @@ class Flasher:
             else:
                 self.ports()
                 self.status.set(f"Портов найдено: {len(self.labels)}")
+                self.save_operation_log(op, self.status.get(), "\n".join(self.labels))
             return
         if op in ("update", "usb", "new", "export"):
             path = path or self.choose()
@@ -738,6 +748,7 @@ class Flasher:
                 if op == "scan" and transport == DFU:
                     devices = asyncio.run(nrf_flash.scan_dfu())
                     self.events.put(("dfu", {f"{device['name']} ({device['address']})": device for device in devices}))
+                    self.events.put(("log", f"Найдено устройств: {len(devices)}\n"))
                 elif op == "scan":
                     found = asyncio.run(discover_ble())
                     devices = {}
@@ -746,6 +757,7 @@ class Flasher:
                         if name.startswith("MeshCore"):
                             devices[f"{name} ({device.address})"] = device.address
                     self.events.put(("ble", devices))
+                    self.events.put(("log", f"Найдено устройств: {len(devices)}\n"))
                 elif op == "catalog-uf2":
                     self.events.put(("catalog", firmware_catalog.catalog(firmware_catalog.uf2_target(board, target))))
                 elif op == "download":
@@ -794,6 +806,15 @@ class Flasher:
             self.events.put(("log", f"\n{exc or type(exc).__name__}\n"))
             self.events.put(("done", (False, op)))
 
+    def save_operation_log(self, operation, result, transcript):
+        if not self.save_logs.get():
+            return
+        try:
+            saved = operation_log.save_log(operation, self.method.get(), result, transcript)
+            self.events.put(("log", f"Журнал сохранён в Загрузки · {saved.name}\n"))
+        except OSError as exc:
+            self.events.put(("log", f"Не удалось сохранить журнал в Загрузки · {exc}\n"))
+
     def poll(self):
         while not self.events.empty():
             kind, value = self.events.get_nowait()
@@ -815,7 +836,6 @@ class Flasher:
                 self.address.configure(values=tuple(value))
                 self.address.set(next(iter(value)) if len(value) == 1 else "")
                 self.target_changed()
-                self.events.put(("log", f"Найдено устройств: {len(value)}\n"))
             elif kind == "device":
                 self.checked = value
                 self.update_summary()
@@ -841,6 +861,7 @@ class Flasher:
                     self.file.set("")
                     self.update_summary()
                 self.status.set("Операция завершена." if success else "Ошибка. Подробности в журнале.")
+                self.save_operation_log(operation, self.status.get(), self.log.get("1.0", "end-1c"))
                 self.controls()
                 if self.pending_catalog is not None:
                     catalog, self.pending_catalog = self.pending_catalog, None
