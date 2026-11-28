@@ -208,6 +208,7 @@ pub const PUSH_CODE_TRACE_DATA: u8 = 0x89;
 pub const PUSH_CODE_NEW_ADVERT: u8 = 0x8A;
 pub const PUSH_CODE_TELEMETRY_RESPONSE: u8 = 0x8B;
 pub const PUSH_CODE_BINARY_RESPONSE: u8 = 0x8C;
+pub(crate) const BINARY_RESPONSE_HEADER: [u8; 2] = [PUSH_CODE_BINARY_RESPONSE, 0];
 pub const PUSH_CODE_PATH_DISCOVERY_RESPONSE: u8 = 0x8D;
 pub const PUSH_CODE_CONTROL_DATA: u8 = 0x8E;
 pub const PUSH_CODE_CONTACT_DELETED: u8 = 0x8F;
@@ -1459,12 +1460,12 @@ impl Companion {
             f.extend_from_slice(&data[4..]);
         } else if data.len() > 4 && tag == self.pending_req {
             self.pending_req = 0;
-            f.extend_from_slice(&[PUSH_CODE_BINARY_RESPONSE, 0]);
+            f.extend_from_slice(&BINARY_RESPONSE_HEADER);
             f.extend_from_slice(&tag.to_le_bytes());
             f.extend_from_slice(&data[4..]);
         } else {
             // unknown/unhandled responses (eg. pushed telemetry) go to the app as they are
-            f.extend_from_slice(&[PUSH_CODE_BINARY_RESPONSE, 0]);
+            f.extend_from_slice(&BINARY_RESPONSE_HEADER);
             f.extend_from_slice(data);
         }
         self.write_frame(&f);

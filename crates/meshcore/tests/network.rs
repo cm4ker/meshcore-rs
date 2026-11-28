@@ -80,6 +80,79 @@ fn frame(pkt: &Packet) -> Vec<u8> {
 }
 
 #[test]
+fn large_acl_is_readable_over_short_and_long_flood_paths() {
+    use meshcore::mcrs::{OPCODE, SUB_ACL_PAGE};
+    use meshcore::repeater::{MAX_CLIENTS, PERM_ACL_ADMIN, PERM_ACL_READ_ONLY};
+
+    let mut r = repeater(1);
+    let mut admin = client(2);
+    let peer = r.ctx.self_id.id;
+    let secret = admin.ctx.self_id.calc_shared_secret(&peer.pub_key).unwrap();
+    admin.app.peer = Some((peer, secret));
+
+    let mut saved_acl = Vec::new();
+    let mut expected = Vec::new();
+    for i in 0..MAX_CLIENTS {
+        let id = LocalIdentity::from_seed(&[i as u8 + 2; 32]);
+        let permissions = if i == 0 { PERM_ACL_ADMIN } else { PERM_ACL_READ_ONLY };
+        let mut record = [0; 136];
+        record[..32].copy_from_slice(id.pub_key());
+        record[32] = permissions;
+        record[39] = 0xFF;
+        saved_acl.extend_from_slice(&record);
+        let mut row = [0; 7];
+        row[..6].copy_from_slice(&id.pub_key()[..6]);
+        row[6] = permissions;
+        expected.push(row);
+    }
+    r.app.acl_load(&saved_acl, &r.ctx.self_id);
+
+    let mut now = 10;
+    let mut tag = 1_760_000_100u32;
+    for (size, hops, legacy_count, page_size) in [(1, 0, 22, 22), (2, 32, 13, 12)] {
+        let path = vec![0x42; size * hops];
+        let mut request = |body: &[u8]| {
+            let mut data = tag.to_le_bytes().to_vec();
+            data.extend_from_slice(body);
+            let mut pkt = admin.ctx.create_datagram(PAYLOAD_TYPE_REQ, &peer, &secret, &data).unwrap();
+            pkt.set_route_type(ROUTE_TYPE_FLOOD);
+            pkt.set_path_hash_size_and_count(size, hops);
+            pkt.path[..path.len()].copy_from_slice(&path);
+            r.on_rx_frame(now, &frame(&pkt), 7.0, -60.0);
+            r.poll(now + 32_000);
+            now += LATER;
+            let tx = drain_tx(&mut r, now);
+            assert_eq!(tx.len(), 1, "one response per request");
+            admin.on_rx_frame(now, &tx[0], 7.0, -60.0);
+            admin.poll(now + 32_000);
+            let (path_len, returned_path, extra_type, reply) = admin.app.path_returns.pop().expect("ACL path reply");
+            assert_eq!(path_len, pkt.path_len);
+            assert_eq!(&returned_path, &path);
+            assert_eq!(extra_type, PAYLOAD_TYPE_RESPONSE);
+            assert_eq!(&reply[..4], &tag.to_le_bytes());
+            tag += 1;
+            reply
+        };
+
+        let legacy = request(&[0x05, 0, 0]);
+        let rows: Vec<_> = legacy[4..].chunks_exact(7).filter(|row| row[6] != 0).collect();
+        assert_eq!(rows, expected[..legacy_count]);
+
+        let mut offset = 0;
+        while offset < expected.len() {
+            let reply = request(&[OPCODE, SUB_ACL_PAGE, offset as u8]);
+            let count = page_size.min(expected.len() - offset);
+            assert_eq!(&reply[4..7], &[SUB_ACL_PAGE, MAX_CLIENTS as u8, count as u8]);
+            let rows: Vec<_> = reply[7..7 + count * 7].chunks_exact(7).collect();
+            assert_eq!(rows, expected[offset..offset + count]);
+            offset += count;
+        }
+        let end = request(&[OPCODE, SUB_ACL_PAGE, u8::MAX]);
+        assert_eq!(&end[4..7], &[SUB_ACL_PAGE, MAX_CLIENTS as u8, 0]);
+    }
+}
+
+#[test]
 fn boot_advert_is_valid_zero_hop() {
     let mut r = repeater(1);
     r.app.start(&mut r.ctx);

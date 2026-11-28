@@ -170,6 +170,48 @@ fn deliver(who: &mut Member, tx: &[Vec<u8>], now: u64) {
 }
 
 #[test]
+fn room_acl_pages_apply_admin_filter_and_require_admin() {
+    use meshcore::mcrs::{OPCODE, SUB_ACL_PAGE};
+    use meshcore::repeater::{PERM_ACL_ADMIN, PERM_ACL_GUEST, PERM_ACL_READ_WRITE};
+
+    let mut r = room_server(NodePrefs::room_server_defaults());
+    let room_id = r.ctx.self_id.id;
+    let mut admin = Member::new(2, room_id);
+    let mut member = Member::new(3, room_id);
+    let other = LocalIdentity::from_seed(&[5; 32]);
+
+    let mut saved_acl = Vec::new();
+    for (seed, permissions) in [(2, PERM_ACL_ADMIN), (3, PERM_ACL_READ_WRITE), (4, PERM_ACL_GUEST), (5, PERM_ACL_ADMIN)] {
+        let identity = LocalIdentity::from_seed(&[seed; 32]);
+        let mut record = [0; 136];
+        record[..32].copy_from_slice(identity.pub_key());
+        record[32] = permissions;
+        saved_acl.extend_from_slice(&record);
+    }
+    r.app.acl_load(&saved_acl, &r.ctx.self_id);
+
+    let mut now = 10;
+    for body in [[0x05, 0, 0], [OPCODE, SUB_ACL_PAGE, 0]] {
+        let req = member.request(&body);
+        r.on_rx_frame(now, &frame(&req), 7.0, -60.0);
+        now += LATER;
+        assert!(drain_tx(&mut r, now).is_empty());
+    }
+
+    let req = admin.request(&[OPCODE, SUB_ACL_PAGE, 1]);
+    r.on_rx_frame(now, &frame(&req), 7.0, -60.0);
+    now += LATER;
+    let tx = drain_tx(&mut r, now);
+    assert_eq!(tx.len(), 1);
+    deliver(&mut admin, &tx, now);
+    let reply = admin.m.app.responses.pop().expect("admin ACL page");
+    assert_eq!(&reply[..4], &admin.ts.to_le_bytes());
+    assert_eq!(&reply[4..7], &[SUB_ACL_PAGE, 2, 1]);
+    assert_eq!(&reply[7..13], &other.pub_key()[..6]);
+    assert_eq!(reply[13], PERM_ACL_ADMIN);
+}
+
+#[test]
 fn room_advert_and_role() {
     let mut r = room_server(NodePrefs::room_server_defaults());
     r.app.start(&mut r.ctx);

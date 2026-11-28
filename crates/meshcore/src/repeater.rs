@@ -22,7 +22,7 @@ use crate::fwshare::{self, FwStore};
 use crate::fwstate::{self, FwState};
 use crate::gps::GpsReading;
 use crate::identity::{Identity, LocalIdentity};
-use crate::mesh::{MeshApp, MeshCtx};
+use crate::mesh::{self, MeshApp, MeshCtx};
 use crate::ota::{OtaEndpoint, OtaOutcome};
 use crate::release;
 use crate::packet::*;
@@ -35,7 +35,7 @@ use crate::sensor::descriptor::Descriptor;
 use crate::timesync::TimeFetch;
 use crate::timesync::{self, TimeSync};
 use crate::util::{Fixed, atof, atoi, atoi_signed, epoch_to_datetime, from_hex, ftoa, parse_key_prefix, to_hex, truncate_str};
-use crate::{FIRMWARE_VERSION, MAX_ADVERT_DATA_SIZE, MAX_PACKET_PAYLOAD, MAX_PATH_SIZE, PRV_KEY_SIZE, PUB_KEY_SIZE};
+use crate::{CIPHER_BLOCK_SIZE, FIRMWARE_VERSION, MAX_ADVERT_DATA_SIZE, MAX_PACKET_PAYLOAD, MAX_PATH_SIZE, PRV_KEY_SIZE, PUB_KEY_SIZE};
 
 mod autoupdate;
 pub mod room;
@@ -53,6 +53,7 @@ pub const PERM_ACL_ADMIN: u8 = 3;
 pub const OUT_PATH_UNKNOWN: u8 = 0xFF;
 
 pub const MAX_CLIENTS: usize = 32;
+const ACL_KEY_PREFIX_SIZE: usize = 6;
 /// Leads the clients' last timestamps after the ACL records (see [`Repeater::acl_serialize`]).
 const ACL_STAMPS_MAGIC: &[u8; 2] = b"TS";
 const _: () = assert!(2 + 4 * MAX_CLIENTS < 136, "the timestamps must stay shorter than a record");
@@ -1005,7 +1006,43 @@ impl Repeater {
 
     // ------------------------------------------------------------- requests
 
-    fn handle_request(&mut self, ctx: &mut MeshCtx, client_idx: usize, sender_timestamp: u32, payload: &[u8]) -> Vec<u8> {
+    /// Append only complete ACL rows that fit the selected reply and the companion link.
+    fn append_access_list(&self, pkt: &Packet, offset: Option<usize>, reply: &mut Vec<u8>) {
+        use crate::companion::{BINARY_RESPONSE_HEADER, MAX_FRAME_SIZE};
+        use crate::mcrs::SUB_ACL_PAGE;
+
+        let limit = if pkt.is_route_flood() {
+            let Some(limit) = MeshCtx::path_return_extra_limit(pkt.path_len) else {
+                reply.clear();
+                return;
+            };
+            limit
+        } else {
+            // The companion forwards the whole decrypted datagram, including AES padding.
+            let push_limit = (MAX_FRAME_SIZE - BINARY_RESPONSE_HEADER.len()) / CIPHER_BLOCK_SIZE * CIPHER_BLOCK_SIZE;
+            mesh::MAX_DATAGRAM_DATA.min(push_limit)
+        };
+
+        let room = self.room.is_some();
+        let entries = self.acl.iter().filter(|c| c.permissions != 0 && (!room || c.is_admin()));
+        let start = offset.unwrap_or(0);
+        const ROW_SIZE: usize = ACL_KEY_PREFIX_SIZE + 1;
+        let page_header_size = if offset.is_some() { 3 } else { 0 };
+        let capacity = limit.saturating_sub(reply.len() + page_header_size) / ROW_SIZE;
+        if offset.is_some() {
+            let total = entries.clone().count();
+            let returned = total.saturating_sub(start).min(capacity);
+            reply.extend_from_slice(&[SUB_ACL_PAGE, total as u8, returned as u8]);
+        }
+        for client in entries.skip(start).take(capacity) {
+            reply.extend_from_slice(&client.id.pub_key[..ACL_KEY_PREFIX_SIZE]);
+            reply.push(client.permissions);
+        }
+    }
+
+    fn handle_request(
+        &mut self, ctx: &mut MeshCtx, pkt: &Packet, client_idx: usize, sender_timestamp: u32, payload: &[u8],
+    ) -> Vec<u8> {
         let mut r = Vec::with_capacity(MAX_PACKET_PAYLOAD);
         r.extend_from_slice(&sender_timestamp.to_le_bytes()); // reflected back like a tag
         let at = |i: usize| payload.get(i).copied().unwrap_or(0);
@@ -1066,20 +1103,8 @@ impl Repeater {
                     r.extend_from_slice(&((t * 10.0) as i16).to_be_bytes());
                 }
             }
-            REQ_TYPE_GET_ACCESS_LIST if self.acl[client_idx].is_admin() => {
-                if at(1) == 0 && at(2) == 0 {
-                    // a room server lists its admins only
-                    let room = self.room.is_some();
-                    for c in self.acl.iter().filter(|c| c.permissions != 0 && (!room || c.is_admin())) {
-                        if r.len() + 7 > MAX_PACKET_PAYLOAD - 4 {
-                            break;
-                        }
-                        r.extend_from_slice(&c.id.pub_key[..6]);
-                        r.push(c.permissions);
-                    }
-                } else {
-                    r.clear();
-                }
+            REQ_TYPE_GET_ACCESS_LIST if self.acl[client_idx].is_admin() && at(1) == 0 && at(2) == 0 => {
+                self.append_access_list(pkt, None, &mut r);
             }
             REQ_TYPE_GET_NEIGHBOURS | REQ_TYPE_GET_OWNER_INFO if self.room.is_some() => r.clear(),
             REQ_TYPE_GET_NEIGHBOURS if at(1) == 0 => {
@@ -1118,6 +1143,9 @@ impl Repeater {
             }
             REQ_TYPE_MCRS => match payload.get(1).copied() {
                 Some(crate::mcrs::SUB_INFO) => r.extend_from_slice(&self.mcrs_info().encode()),
+                Some(crate::mcrs::SUB_ACL_PAGE) if self.acl[client_idx].is_admin() => {
+                    self.append_access_list(pkt, Some(at(2) as usize), &mut r);
+                }
                 _ => r.clear(),
             },
             _ => r.clear(), // unknown command
@@ -1380,7 +1408,7 @@ impl MeshApp for Repeater {
             if timestamp <= self.acl[i].last_timestamp {
                 return; // replay
             }
-            let reply = self.handle_request(ctx, i, timestamp, &data[4..]);
+            let reply = self.handle_request(ctx, pkt, i, timestamp, &data[4..]);
             if reply.is_empty() {
                 return;
             }
@@ -3050,7 +3078,7 @@ impl Repeater {
     /// `meshcore-rs` protocol version, build identity and hardware capabilities (`REQ_TYPE_MCRS` `SUB_INFO`).
     pub fn mcrs_info(&self) -> crate::mcrs::McrsInfo {
         use crate::mcrs::cap;
-        let mut caps = cap::TIMESYNC;
+        let mut caps = cap::TIMESYNC | cap::ACL_PAGES;
         if self.board.has_screen {
             caps |= cap::SCREEN;
         }
