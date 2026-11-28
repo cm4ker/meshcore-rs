@@ -16,6 +16,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either4, select4};
+use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Instant, Timer};
@@ -33,6 +34,7 @@ use meshcore::repeater::{BLE_OTA_WINDOW_MINS, BoardInfo, Repeater};
 use meshcore::timesync::{Clock, Source};
 use meshcore::util::{Shortest, to_hex};
 use meshcore::{PRV_KEY_SIZE, PUB_KEY_SIZE, uplink};
+use meshcore_fw_core::repeater_sleep::Deadlines as LightSleepDeadlines;
 use meshcore_ui::refresh::oled::Oled as ScreenPolicy;
 use meshcore_ui::{
     Action, Alert, Bar, BleState, Body, Button, Health, NetInfo, OtaWindow, Page, Passport, PowerInfo, Traffic, Ui, UpdateInfo,
@@ -870,10 +872,13 @@ where
         // `powersaving on`: light sleep until the next timer or a packet, when nothing needs the
         // chip awake (radios other than LoRa, a console, queued packets, a lit screen: an e-paper
         // is never dark, and keeps its image through the sleep)
+        // CAD can await, so use fresh time to choose the sleep deadline.
+        let now = now_ms();
         if mesh.app.ota.requests != ota_requests {
             (ota_requests, ota_seen) = (mesh.app.ota.requests, now);
         }
         let usb_host = board.usb_host_active();
+        let mut light_sleep_returned = false;
         if mesh.app.prefs.powersaving_enabled
             && now >= awake_until
             && (always_on || !ui.screen_on(now))
@@ -887,36 +892,57 @@ where
             && mesh.ctx.outbound_len() == 0
             && room.as_ref().is_none_or(|r| r.ctx.outbound_len() == 0)
         {
-            let next = room.as_ref().and_then(|r| r.next_deadline()).into_iter().chain(mesh.next_deadline()).min();
-            let next = next.unwrap_or(u64::MAX);
-            let span = next.saturating_sub(now).min(MAX_SLEEP_MS);
-            if span >= 100 && radio.arm_wake() {
-                if let Some(woke) = board.light_sleep(span) {
-                    if woke.button && screen_mode != ScreenMode::Off {
-                        let t = now_ms();
-                        ui.button_down(t);
-                        manual_until = t + SCREEN_ON_MS;
-                        let _ = ui_button.poll(true, t);
-                        awake_until = t + AWAKE_AFTER_ACTIVITY_MS;
-                        next_view = 0;
-                    }
-                    if woke.console {
-                        let t = now_ms();
-                        awake_until = t + AWAKE_AFTER_ACTIVITY_MS;
-                        println!();
-                        println!("  -> woke from sleep, that line was lost: send it again");
-                    }
-                    continue;
+            let gps_sync = gps_fix_since
+                .filter(|_| board.gps_latest().is_some_and(|g| g.valid && g.time.is_some()))
+                .map(|since| (since + GPS_FIX_SETTLE_MS).max(next_gps_time));
+            let deadlines = LightSleepDeadlines {
+                mesh: mesh.next_deadline(),
+                room: room.as_ref().and_then(|r| r.next_deadline()),
+                power_status: next_power_status,
+                battery: next_batt,
+                sensors: next_sensors,
+                clock_save: next_clock_save,
+                agc_reset: (mesh.app.prefs.agc_reset_interval > 0).then_some(next_agc_reset),
+                gps_sync,
+                trial_confirm: in_trial.then_some(confirm_at),
+            };
+            if let Some(span) = deadlines.sleep_span(now, MAX_SLEEP_MS)
+                && radio.arm_wake()
+                && let Some(woke) = board.light_sleep(span)
+            {
+                light_sleep_returned = true;
+                let t = now_ms();
+                if woke.button && screen_mode != ScreenMode::Off {
+                    ui.button_down(t);
+                    manual_until = t + SCREEN_ON_MS;
+                    let _ = ui_button.poll(true, t);
+                    awake_until = t + AWAKE_AFTER_ACTIVITY_MS;
+                    next_view = 0;
+                }
+                if woke.console {
+                    awake_until = t + AWAKE_AFTER_ACTIVITY_MS;
+                    println!();
+                    println!("  -> woke from sleep, that line was lost: send it again");
                 }
             }
         }
+        let now = now_ms();
         if now >= next_power_status {
             next_power_status = now + 60_000;
             mesh.app.board.power_status = board.power_summary();
         }
-        // sleep until a frame arrives, a CLI line or a BLE frame comes in, or a timer is due
-        let wake = room.as_ref().map_or(u64::MAX, |r| r.next_wakeup()).min(mesh.next_wakeup()).min(now + 50).max(now + 1);
-        match select4(radio.wait_irq(), CLI_LINES.receive(), Timer::at(Instant::from_millis(wake)), FRAMES_IN.receive()).await {
+        // Give ready input priority after light sleep, then run maintenance in this pass.
+        // Yield once rather than relying on a new timer interrupt just after waking.
+        let idle = async {
+            if light_sleep_returned {
+                yield_now().await;
+            } else {
+                let wake = room.as_ref().map_or(u64::MAX, |r| r.next_wakeup()).min(mesh.next_wakeup()).min(now + 50).max(now + 1);
+                Timer::at(Instant::from_millis(wake)).await;
+            }
+        };
+        let event = select4(radio.wait_irq(), CLI_LINES.receive(), idle, FRAMES_IN.receive()).await;
+        match event {
             Either4::First(()) => match radio.read_rx() {
                 Ok(RxEvent::Frame(f)) => {
                     let t = now_ms();
@@ -971,7 +997,8 @@ where
             }
         }
 
-        // a burst every 2 s; one cut short by a packet goes on in the next one
+        // Sample while awake, at most once every 2 s. This does not wake the board.
+        // A burst cut short by a packet goes on in the next one.
         if now >= next_noise {
             next_noise = now + NoiseFloor::INTERVAL_MS;
             if noise.measure(|| if radio.is_receiving().unwrap_or(true) { None } else { radio.rssi_inst().ok() }) {
