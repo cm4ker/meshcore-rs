@@ -96,11 +96,13 @@ pub struct Sx1262<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> {
     max_payload_ms: u64,
 }
 
-fn bw_code(bw_khz: f32) -> u8 {
-    // (bandwidth, register value) - nearest match
-    const TABLE: [(f32, u8); 10] = [
-        (7.8, 0x00), (10.4, 0x08), (15.6, 0x01), (20.8, 0x09), (31.25, 0x02),
-        (41.7, 0x0A), (62.5, 0x03), (125.0, 0x04), (250.0, 0x05), (500.0, 0x06),
+fn select_bandwidth(bw_khz: f32) -> (f32, u8) {
+    // Match requests against the existing nominal values. Use the selected mode's
+    // bandwidth in Hz (Semtech's sx126x_get_lora_bw_in_hz) for timing.
+    const TABLE: [(f32, u32, u8); 10] = [
+        (7.8, 7_812, 0x00), (10.4, 10_417, 0x08), (15.6, 15_625, 0x01), (20.8, 20_833, 0x09),
+        (31.25, 31_250, 0x02), (41.7, 41_667, 0x0A), (62.5, 62_500, 0x03), (125.0, 125_000, 0x04),
+        (250.0, 250_000, 0x05), (500.0, 500_000, 0x06),
     ];
     let mut best = TABLE[0];
     for e in TABLE {
@@ -108,7 +110,67 @@ fn bw_code(bw_khz: f32) -> u8 {
             best = e;
         }
     }
-    best.1
+    (best.1 as f32 / 1000.0, best.2)
+}
+
+fn cad_timeout_ms(params: RadioParams) -> u64 {
+    // Two CAD symbols plus about half a symbol of post-processing (SX1261/2 §6.1.5).
+    // Allow three symbols and a fixed margin for startup and IRQ handling.
+    (3.0 * params.symbol_ms()) as u64 + 20
+}
+
+fn cad_busy(irq: u16) -> bool {
+    // A missing CAD_DONE cannot establish a clear channel. Use the normal bounded backoff.
+    irq & IRQ_CAD_DONE == 0 || irq & IRQ_CAD_DETECTED != 0
+}
+
+fn tx_timeout_ticks(timeout_ms: u32) -> u32 {
+    // 15.625 µs per tick. A zero value disables the hardware deadline.
+    timeout_ms.saturating_mul(64).clamp(1, 0xFF_FFFE)
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn bandwidth_selection_keeps_existing_codes_and_supplies_effective_bandwidth() {
+        assert_eq!(select_bandwidth(93.0), (62.5, 0x03));
+        assert_eq!(select_bandwidth(20.8), (20.833, 0x09));
+        let mut p = RadioParams { sf: 11, bw_khz: 130.0, ..RadioParams::default() };
+        assert!(!p.ldro());
+        p.bw_khz = select_bandwidth(p.bw_khz).0;
+        assert_eq!(p.bw_khz, 125.0);
+        assert!(p.ldro());
+    }
+
+    #[test]
+    fn cad_deadline_allows_two_symbols_and_post_processing_on_narrow_bands() {
+        for nominal in [7.8, 20.8] {
+            let p = RadioParams { sf: 12, bw_khz: select_bandwidth(nominal).0, ..RadioParams::default() };
+            assert!(cad_timeout_ms(p) as f32 > 2.5 * p.symbol_ms());
+            assert!(cad_timeout_ms(p) > 200);
+        }
+    }
+
+    #[test]
+    fn only_a_completed_cad_with_no_detection_can_report_clear() {
+        assert!(cad_busy(0));
+        assert!(cad_busy(IRQ_CAD_DETECTED));
+        assert!(cad_busy(IRQ_CAD_DONE | IRQ_CAD_DETECTED));
+        assert!(!cad_busy(IRQ_CAD_DONE));
+    }
+
+    #[test]
+    fn hardware_tx_deadline_is_finite_and_covers_the_longest_packet() {
+        assert_eq!(tx_timeout_ticks(100), 6400);
+        assert_eq!(tx_timeout_ticks(0), 1);
+        assert_eq!(tx_timeout_ticks(u32::MAX), 0xFF_FFFE);
+        let p = RadioParams { sf: 12, bw_khz: select_bandwidth(7.8).0, cr: 8, ..RadioParams::default() };
+        let airtime = u64::from(p.time_on_air_us(255));
+        assert!(airtime > 60_000_000);
+        assert!(u64::from(tx_timeout_ticks(u32::MAX)) * 1000 >= airtime * 64);
+    }
 }
 
 /// Image calibration band for a frequency (RadioLib `calibrateImage`).
@@ -297,7 +359,9 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Sx126
     }
 
     /// Frequency / bandwidth / SF / CR, plus the derived preamble and "stuck receive" timeouts.
-    fn apply_params(&mut self, p: RadioParams) -> Result<(), Error> {
+    fn apply_params(&mut self, mut p: RadioParams) -> Result<(), Error> {
+        let (bw_khz, bw_code) = select_bandwidth(p.bw_khz);
+        p.bw_khz = bw_khz;
         self.params = p;
         self.command(CMD_SET_STANDBY, &[STDBY_RC])?;
         self.command(CMD_CALIBRATE_IMAGE, &image_cal(p.freq_mhz))?;
@@ -306,7 +370,7 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Sx126
         let frf = (p.freq_mhz * (1u32 << 20) as f32) as u32;
         self.command(CMD_SET_RF_FREQUENCY, &frf.to_be_bytes())?;
         let ldro = if p.ldro() { 1 } else { 0 };
-        self.command(CMD_SET_MODULATION_PARAMS, &[p.sf, bw_code(p.bw_khz), p.cr - 4, ldro])?;
+        self.command(CMD_SET_MODULATION_PARAMS, &[p.sf, bw_code, p.cr - 4, ldro])?;
         self.set_packet_params(255)?;
         // standard IQ: errata 15.4 says set bit 2 of 0x0736
         self.modify_register(REG_IQ_POLARITY, 0x04, 0)?;
@@ -323,7 +387,7 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Sx126
         let cr = cr.unwrap_or(p.cr).clamp(5, 8);
         let ldro = if p.ldro() { 1 } else { 0 };
         self.command(CMD_SET_STANDBY, &[STDBY_RC])?;
-        self.command(CMD_SET_MODULATION_PARAMS, &[p.sf, bw_code(p.bw_khz), cr - 4, ldro])
+        self.command(CMD_SET_MODULATION_PARAMS, &[p.sf, select_bandwidth(p.bw_khz).1, cr - 4, ldro])
     }
 
     fn set_tx_power(&mut self, dbm: i8) -> Result<(), Error> {
@@ -473,7 +537,8 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Sx126
         let _ = self.nss.set_high();
         self.set_irq(IRQ_TX_DONE | IRQ_TIMEOUT, IRQ_TX_DONE | IRQ_TIMEOUT)?;
         self.clear_irq(IRQ_ALL)?;
-        self.command(CMD_SET_TX, &[0x00, 0x00, 0x00])?;
+        let timeout = tx_timeout_ticks(timeout_ms).to_be_bytes();
+        self.command(CMD_SET_TX, &timeout[1..])?;
 
         let done = with_timeout(Duration::from_millis(timeout_ms as u64), self.dio1.wait_high()).await;
         let irq = self.irq_status()?;
@@ -495,10 +560,10 @@ impl<SPI: SpiBus, OUT: OutputPin, IN: InputPin, IRQ: IrqPin> LoraRadio for Sx126
         self.set_irq(IRQ_CAD_DONE | IRQ_CAD_DETECTED, IRQ_CAD_DONE)?;
         self.clear_irq(IRQ_ALL)?;
         self.command(CMD_SET_CAD, &[])?;
-        let _ = with_timeout(Duration::from_millis(200), self.dio1.wait_high()).await;
-        let irq = self.irq_status()?;
+        let _ = with_timeout(Duration::from_millis(cad_timeout_ms(self.params)), self.dio1.wait_high()).await;
+        let irq = self.irq_status();
         self.start_rx()?;
-        Ok(irq & IRQ_CAD_DETECTED != 0)
+        Ok(cad_busy(irq?))
     }
 
     /// Full receiver reset (upstream `sx126xResetAGC`): warm sleep powers the analog front end

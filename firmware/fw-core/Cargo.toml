@@ -28,5 +28,5 @@ extra-sensors = []
 
 [dev-dependencies]
 # a clock and critical sections on the host
-embassy-time = { version = "0.5.0", features = ["std"] }
+embassy-time = { version = "0.5.0", features = ["std", "generic-queue-8"] }
 critical-section = { version = "1.2", features = ["std"] }
