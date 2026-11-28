@@ -109,6 +109,20 @@ impl Ui {
         self.lit_ms.is_none() || now < self.lit_until
     }
 
+    /// When to poll a display that follows this UI. A pending panel transition is due now.
+    /// A dark panel with nothing to show contributes no periodic deadline.
+    pub fn screen_poll_at(&self, now: u64, enabled: bool, lit: bool, interval_ms: u64) -> Option<u64> {
+        let show = enabled && self.screen_on(now);
+        if show != lit {
+            return Some(now);
+        }
+        if !show {
+            return None;
+        }
+        let next = now + interval_ms;
+        Some(self.lit_ms.map_or(next, |_| next.min(self.lit_until)))
+    }
+
     pub fn alert(&mut self, alert: Alert, now: u64) {
         self.alert = Some((alert, now + ALERT_MS));
         self.wake(now);
@@ -147,6 +161,23 @@ mod tests {
     use super::*;
 
     const PAGES: &[Page] = &[Page::Home, Page::Neighbours, Page::Update];
+
+    #[test]
+    fn a_dark_panel_waits_without_a_poll_deadline() {
+        let mut ui = Ui::new(PAGES).with_screen_timeout(60_000, 0);
+
+        assert_eq!(ui.screen_poll_at(0, true, false, 50), Some(0)); // draw the first frame
+        assert_eq!(ui.screen_poll_at(1_000, true, true, 50), Some(1_050));
+        assert_eq!(ui.screen_poll_at(59_980, true, true, 50), Some(60_000));
+        assert_eq!(ui.screen_poll_at(60_000, true, true, 50), Some(60_000)); // turn the panel off
+        assert_eq!(ui.screen_poll_at(60_000, true, false, 50), None);
+
+        ui.button_down(70_000);
+        assert_eq!(ui.screen_poll_at(70_000, true, false, 50), Some(70_000));
+        assert_eq!(ui.press(Intent::Act, 71_000), None); // the first press only wakes the screen
+        assert_eq!(ui.screen_poll_at(71_000, false, true, 50), Some(71_000));
+        assert_eq!(ui.screen_poll_at(71_000, false, false, 50), None); // forced off
+    }
 
     #[test]
     fn a_press_on_a_dark_screen_only_lights_it() {
