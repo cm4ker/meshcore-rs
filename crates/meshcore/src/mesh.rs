@@ -870,6 +870,7 @@ impl<A: MeshApp> Mesh<A> {
         let size = pkt.path_hash_size();
         if pkt.is_route_flood()
             && !pkt.is_marked_do_not_retransmit()
+            && n < usize::from(PATH_HASH_COUNT_MASK)
             && (n + 1) * size <= MAX_PATH_SIZE
             && app.allow_packet_forward(ctx, pkt)
         {
@@ -1026,3 +1027,49 @@ fn multipart_inner(pkt: &Packet) -> Packet {
 }
 
 const _: () = assert!(PATH_HASH_SIZE == 1);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Forwarder;
+
+    impl MeshApp for Forwarder {
+        fn allow_packet_forward(&mut self, _: &MeshCtx, _: &Packet) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn flood_retransmission_stops_at_the_last_encodable_hop() {
+        let id = LocalIdentity::from_seed(&[1; 32]);
+        let mut ctx = MeshCtx::new(id, [1; 16], RadioParams::default(), 0);
+        let mut app = Forwarder;
+
+        for route in [ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD] {
+            // One-byte hashes are limited by the count field. Wider hashes fill the path first.
+            for (size, limit) in [(1, 63), (2, 32), (3, 21)] {
+                let mut pkt = Packet::with_type(PAYLOAD_TYPE_ACK);
+                pkt.set_route_type(route);
+                pkt.set_path_hash_size_and_count(size, limit - 1);
+                let end = pkt.path_byte_len();
+                pkt.path[..end].fill(0x42);
+
+                assert!(matches!(
+                    Mesh::route_recv_packet(&mut ctx, &mut app, &mut pkt),
+                    Action::Retransmit { priority, .. } if usize::from(priority) == limit
+                ));
+                assert_eq!(pkt.path_hash_count(), limit);
+                assert_eq!(pkt.path_hash_size(), size);
+                assert!(pkt.path[..end].iter().all(|&byte| byte == 0x42));
+                assert_eq!(&pkt.path[end..end + size], &ctx.self_id.pub_key()[..size]);
+
+                let path = pkt.path;
+                let path_len = pkt.path_len;
+                assert_eq!(Mesh::route_recv_packet(&mut ctx, &mut app, &mut pkt), Action::Release);
+                assert_eq!(pkt.path_len, path_len);
+                assert_eq!(pkt.path, path);
+            }
+        }
+    }
+}

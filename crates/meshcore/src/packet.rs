@@ -17,6 +17,8 @@ pub const PH_TYPE_MASK: u8 = 0x0F;
 pub const PH_VER_SHIFT: u8 = 6;
 pub const PH_VER_MASK: u8 = 0x03;
 
+pub(crate) const PATH_HASH_COUNT_MASK: u8 = 0x3F;
+
 pub const ROUTE_TYPE_TRANSPORT_FLOOD: u8 = 0x00;
 pub const ROUTE_TYPE_FLOOD: u8 = 0x01;
 pub const ROUTE_TYPE_DIRECT: u8 = 0x02;
@@ -122,7 +124,7 @@ impl Packet {
     }
 
     pub fn path_hash_count(&self) -> usize {
-        (self.path_len & 63) as usize
+        (self.path_len & PATH_HASH_COUNT_MASK) as usize
     }
 
     pub fn path_byte_len(&self) -> usize {
@@ -130,16 +132,16 @@ impl Packet {
     }
 
     pub fn set_path_hash_count(&mut self, n: usize) {
-        self.path_len = (self.path_len & !63) | (n as u8 & 63);
+        self.path_len = (self.path_len & !PATH_HASH_COUNT_MASK) | (n as u8 & PATH_HASH_COUNT_MASK);
     }
 
     pub fn set_path_hash_size_and_count(&mut self, size: usize, n: usize) {
-        self.path_len = (((size as u8).wrapping_sub(1)) << 6) | (n as u8 & 63);
+        self.path_len = (((size as u8).wrapping_sub(1)) << 6) | (n as u8 & PATH_HASH_COUNT_MASK);
     }
 
     /// Byte length of the path described by an encoded `path_len`.
     pub fn path_bytes_for(path_len: u8) -> usize {
-        ((path_len & 63) as usize) * (((path_len >> 6) + 1) as usize)
+        ((path_len & PATH_HASH_COUNT_MASK) as usize) * (((path_len >> 6) + 1) as usize)
     }
 
     pub fn is_valid_path_len(path_len: u8) -> bool {
